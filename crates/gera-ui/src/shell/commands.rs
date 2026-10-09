@@ -61,6 +61,7 @@ impl Command {
                 DocCommand::ToggleCover => "Mostrar capa sozinha",
                 DocCommand::Copy => "Copiar",
                 DocCommand::SelectAll => "Selecionar tudo",
+                DocCommand::Delete => "Excluir",
                 DocCommand::Rotate { clockwise: true } => "Girar no sentido horário",
                 DocCommand::Rotate { clockwise: false } => "Girar no sentido anti-horário",
             },
@@ -99,6 +100,10 @@ pub fn shortcuts() -> Vec<(KeyboardShortcut, Command)> {
         (cmd(Key::Tab), Command::NextTab),
         (cmd(Key::D), Command::Properties),
         (cmd(Key::P), Command::Print),
+        (
+            KeyboardShortcut::new(Modifiers::NONE, Key::Delete),
+            doc(DocCommand::Delete),
+        ),
         (cmd(Key::Equals), doc(DocCommand::ZoomIn)),
         (cmd(Key::Plus), doc(DocCommand::ZoomIn)),
         (cmd(Key::Minus), doc(DocCommand::ZoomOut)),
@@ -159,6 +164,7 @@ fn belongs_to_text_fields(cmd: &Command) -> bool {
                 | DocCommand::ZoomOut
                 | DocCommand::Copy
                 | DocCommand::SelectAll
+                | DocCommand::Delete
         )
     )
 }

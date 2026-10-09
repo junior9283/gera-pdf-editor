@@ -6,6 +6,12 @@ use pdf_core::{AnnotInfo, AnnotKind, OutlineItem, PageSize, Rotation, Worker};
 pub enum SidebarAction {
     None,
     JumpToPage(usize),
+    /// Seleciona a anotação e leva até ela.
+    SelectAnnot {
+        page: i32,
+        id: i32,
+        at: (f32, f32),
+    },
 }
 
 const THUMB_WIDTH: f32 = 110.0;
@@ -147,7 +153,11 @@ fn annotation_list(ui: &mut egui::Ui, annots: &[AnnotInfo]) -> SidebarAction {
             }
             for a in annots {
                 if ui.button(annot_label(a)).clicked() {
-                    action = SidebarAction::JumpToPage(a.page.max(0) as usize);
+                    action = SidebarAction::SelectAnnot {
+                        page: a.page,
+                        id: a.id,
+                        at: (a.rect.x0, a.rect.y0),
+                    };
                 }
             }
         });

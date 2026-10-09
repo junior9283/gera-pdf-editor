@@ -1,6 +1,8 @@
+use crate::shell::annot_props::{self, PropsDraft};
+use app_state::annot_geom::{annot_hit, handle_at, resized, Handle};
 use app_state::tools::Tool;
 use app_state::transform::PageMap;
-use pdf_core::{AnnotOp, NewAnnot, PdfRect, Request, TextSelection, Worker};
+use pdf_core::{AnnotInfo, AnnotKind, AnnotOp, NewAnnot, PdfRect, Request, TextSelection, Worker};
 use std::path::PathBuf;
 
 /// Texto selecionado: numa página (com as áreas marcadas) ou o documento inteiro (Ctrl+A).
@@ -19,6 +21,76 @@ struct SelectDrag {
     from: (f32, f32),
     /// Último ponto já pedido ao worker (só pede de novo se o mouse andou).
     last: (f32, f32),
+}
+
+/// Como a anotação está sendo arrastada.
+#[derive(Debug, Clone, Copy)]
+enum Grab {
+    Move,
+    Resize(Handle),
+}
+
+/// Arrasto de anotação em andamento (mover ou redimensionar pela alça).
+#[derive(Debug, Clone, Copy)]
+struct AnnotDrag {
+    page: i32,
+    id: i32,
+    /// Retângulo da anotação quando o arrasto começou.
+    rect: PdfRect,
+    grab: Grab,
+    from: (f32, f32),
+    to: (f32, f32),
+}
+
+/// Menor lado (pontos) de um desenho redimensionado.
+const MIN_SIZE: f32 = 4.0;
+
+impl AnnotDrag {
+    fn offset(&self) -> (f32, f32) {
+        (self.to.0 - self.from.0, self.to.1 - self.from.1)
+    }
+
+    /// Onde a anotação ficaria se o mouse fosse solto agora.
+    fn preview(&self) -> PdfRect {
+        let (dx, dy) = self.offset();
+        let r = self.rect;
+        match self.grab {
+            Grab::Move => PdfRect::new(r.x0 + dx, r.y0 + dy, r.x1 + dx, r.y1 + dy),
+            Grab::Resize(h) => {
+                let (x, y) = h.point(r);
+                resized(r, h, (x + dx, y + dy), MIN_SIZE)
+            }
+        }
+    }
+
+    /// A edição a enviar ao soltar (nada se o mouse quase não andou).
+    fn op(&self) -> Option<AnnotOp> {
+        let (dx, dy) = self.offset();
+        if dx.abs().max(dy.abs()) < 1.0 {
+            return None;
+        }
+        let (page, id) = (self.page, self.id);
+        Some(match self.grab {
+            Grab::Move => AnnotOp::Move { page, id, dx, dy },
+            Grab::Resize(_) => AnnotOp::Resize {
+                page,
+                id,
+                rect: self.preview(),
+            },
+        })
+    }
+}
+
+/// Nota sendo digitada: nova (na posição) ou o texto de uma existente (duplo clique).
+enum NoteTarget {
+    New((f32, f32)),
+    Existing(i32),
+}
+
+struct NoteDraft {
+    page: i32,
+    target: NoteTarget,
+    text: String,
 }
 
 /// Marca de texto criada a partir de uma seleção.
@@ -62,9 +134,30 @@ pub struct EditState {
     pub(crate) latest_tag: u64,
     /// Arrasto de Destacar/Sublinhar terminado: tag da resposta final e a marca a criar.
     pub(crate) finish_tag: Option<(u64, Markup)>,
-    /// Nota sendo digitada: (página, posição, texto).
-    note_draft: Option<(i32, (f32, f32), String)>,
+    note_draft: Option<NoteDraft>,
+    /// Anotação selecionada: (página, id).
+    pub selected: Option<(i32, i32)>,
+    annot_drag: Option<AnnotDrag>,
+    /// O último clique direito caiu sobre uma anotação (o menu é o dela, não o do texto).
+    menu_on_annot: bool,
+    /// Janela de propriedades aberta.
+    props: Option<PropsDraft>,
 }
+
+/// Anotações da página como (id, retângulo), na ordem de desenho.
+fn rects_on(annots: &[AnnotInfo], page: i32) -> Vec<(i32, PdfRect)> {
+    annots
+        .iter()
+        .filter(|a| a.page == page)
+        .map(|a| (a.id, a.rect))
+        .collect()
+}
+
+fn find(annots: &[AnnotInfo], (page, id): (i32, i32)) -> Option<&AnnotInfo> {
+    annots.iter().find(|a| a.page == page && a.id == id)
+}
+
+const SELECTED: egui::Color32 = egui::Color32::from_rgb(30, 110, 230);
 
 /// Retângulo da página (pontos) -> retângulo na tela.
 pub(crate) fn screen_rect(r: &PdfRect, map: &PageMap) -> egui::Rect {
@@ -97,6 +190,30 @@ impl EditState {
         self.selection = None;
         self.select_drag = None;
         self.finish_tag = None;
+        self.selected = None;
+        self.annot_drag = None;
+        self.props = None;
+    }
+
+    /// Apaga a anotação selecionada (tecla Delete ou menu).
+    pub fn delete_selected(&mut self) {
+        if let Some((page, id)) = self.selected.take() {
+            self.ops.push(AnnotOp::Delete { page, id });
+        }
+    }
+
+    /// Lista nova do worker: a seleção (e a janela de propriedades) só fica se a anotação existe.
+    pub fn keep_valid_selection(&mut self, annots: &[AnnotInfo]) {
+        if self.selected.is_some_and(|s| find(annots, s).is_none()) {
+            self.selected = None;
+        }
+        if self
+            .props
+            .as_ref()
+            .is_some_and(|d| find(annots, (d.page, d.id)).is_none())
+        {
+            self.props = None;
+        }
     }
 
     /// Toda pergunta de texto ao worker avança a tag; só a resposta da mais nova vale.
@@ -179,6 +296,7 @@ impl EditState {
         &mut self,
         ui: &mut egui::Ui,
         worker: &Worker,
+        annots: &[AnnotInfo],
         page: i32,
         rect: egui::Rect,
         map: &PageMap,
@@ -193,17 +311,230 @@ impl EditState {
             .map(|p| map.to_page(p.into()));
         match self.tool {
             Tool::Select | Tool::Highlight | Tool::Underline => {
-                self.drag_text(worker, &response, pointer, page, map);
-                self.selection_menu(&response, page);
+                let grabbed = self.tool == Tool::Select
+                    && self.annot_gestures(&response, pointer, annots, page, map);
+                if !grabbed {
+                    self.drag_text(worker, &response, pointer, page, map);
+                }
+                self.context_menu(&response, pointer, annots, page, map);
             }
             Tool::Note => {
                 if let (true, Some(at)) = (response.clicked(), pointer) {
-                    self.note_draft = Some((page, at, String::new()));
+                    self.note_draft = Some(NoteDraft {
+                        page,
+                        target: NoteTarget::New(at),
+                        text: String::new(),
+                    });
                 }
             }
             Tool::Ink => self.draw_ink(ui, &response, pointer, page, map),
         }
         self.paint_selection(ui.painter(), page, map);
+        self.paint_selected(ui.painter(), annots, page, map);
+    }
+
+    /// Com Selecionar: clicar numa anotação a seleciona; arrastar uma nota ou desenho move; a alça
+    /// de um desenho selecionado redimensiona; duplo clique numa nota edita o texto. Devolve se o
+    /// gesto foi da anotação (senão segue como seleção de texto).
+    fn annot_gestures(
+        &mut self,
+        response: &egui::Response,
+        pointer: Option<(f32, f32)>,
+        annots: &[AnnotInfo],
+        page: i32,
+        map: &PageMap,
+    ) -> bool {
+        let rects = rects_on(annots, page);
+        let hit = |p| annot_hit(&rects, p, 3.0 / map.zoom).map(|id| (page, id));
+        if response.double_clicked() {
+            if let Some(note) = pointer
+                .and_then(hit)
+                .and_then(|s| find(annots, s))
+                .filter(|a| a.kind == AnnotKind::Note)
+            {
+                self.note_draft = Some(NoteDraft {
+                    page,
+                    target: NoteTarget::Existing(note.id),
+                    text: note.contents.clone(),
+                });
+                return true;
+            }
+        }
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            let pressed = response.ctx.input(|i| i.pointer.press_origin());
+            let Some(p) = pressed.map(|p| map.to_page(p.into())).or(pointer) else {
+                return false;
+            };
+            let handle = self
+                .selected
+                .and_then(|s| find(annots, s))
+                .filter(|a| a.page == page && a.resizable())
+                .and_then(|a| Some((a, handle_at(a.rect, p, 5.0 / map.zoom)?)));
+            let grab = match handle {
+                Some((a, h)) => Some((a, Grab::Resize(h))),
+                None => hit(p)
+                    .and_then(|s| find(annots, s))
+                    .filter(|a| a.movable())
+                    .map(|a| (a, Grab::Move)),
+            };
+            let Some((a, grab)) = grab else {
+                self.selected = None; // marcação ou área vazia: o arrasto seleciona texto
+                return false;
+            };
+            self.selected = Some((page, a.id));
+            self.selection = None;
+            self.annot_drag = Some(AnnotDrag {
+                page,
+                id: a.id,
+                rect: a.rect,
+                grab,
+                from: p,
+                to: p,
+            });
+            return true;
+        }
+        if let Some(drag) = self.annot_drag.as_mut().filter(|d| d.page == page) {
+            if let Some(p) = pointer {
+                drag.to = p;
+            }
+            if !response.dragged() {
+                self.ops.extend(drag.op());
+                self.annot_drag = None;
+            }
+            return true;
+        }
+        if response.clicked() {
+            self.selected = pointer.and_then(hit);
+            if self.selected.is_some() {
+                self.selection = None;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Botão direito: sobre uma anotação, Propriedades… e Excluir; sobre a seleção de texto desta
+    /// página, Copiar e as marcas.
+    fn context_menu(
+        &mut self,
+        response: &egui::Response,
+        pointer: Option<(f32, f32)>,
+        annots: &[AnnotInfo],
+        page: i32,
+        map: &PageMap,
+    ) {
+        if response.secondary_clicked() {
+            let rects = rects_on(annots, page);
+            let hit = pointer.and_then(|p| annot_hit(&rects, p, 3.0 / map.zoom));
+            self.menu_on_annot = hit.is_some();
+            if let Some(id) = hit {
+                self.selected = Some((page, id));
+            }
+        }
+        let on_annot = self.menu_on_annot && self.selected.is_some_and(|(p, _)| p == page);
+        let on_text = self.selection.as_ref().and_then(|s| s.page) == Some(page);
+        if !on_annot && !on_text {
+            return;
+        }
+        response.context_menu(|ui| {
+            if on_annot {
+                if ui.button("Propriedades…").clicked() {
+                    self.props = self
+                        .selected
+                        .and_then(|s| find(annots, s))
+                        .map(PropsDraft::new);
+                }
+                if ui.button("Excluir").clicked() {
+                    self.delete_selected();
+                }
+                return;
+            }
+            if ui.button("Copiar").clicked() {
+                self.copy(ui.ctx());
+            }
+            ui.separator();
+            for (label, markup) in [
+                ("Destacar texto", Markup::Highlight),
+                ("Sublinhar texto", Markup::Underline),
+                ("Riscar texto", Markup::StrikeOut),
+            ] {
+                if ui.button(label).clicked() {
+                    self.mark_selection(markup);
+                }
+            }
+        });
+    }
+
+    /// Contorno da anotação selecionada (com as alças, se der para redimensionar) ou, durante o
+    /// arrasto, o contorno tracejado de onde ela vai ficar.
+    fn paint_selected(
+        &self,
+        painter: &egui::Painter,
+        annots: &[AnnotInfo],
+        page: i32,
+        map: &PageMap,
+    ) {
+        if let Some(drag) = self.annot_drag.filter(|d| d.page == page) {
+            let r = screen_rect(&drag.preview(), map);
+            let corners = [
+                r.left_top(),
+                r.right_top(),
+                r.right_bottom(),
+                r.left_bottom(),
+                r.left_top(),
+            ];
+            painter.extend(egui::Shape::dashed_line(
+                &corners,
+                egui::Stroke::new(1.5, SELECTED),
+                6.0,
+                4.0,
+            ));
+            return;
+        }
+        let Some(a) = self
+            .selected
+            .filter(|(p, _)| *p == page)
+            .and_then(|s| find(annots, s))
+        else {
+            return;
+        };
+        let r = screen_rect(&a.rect, map).expand(2.0);
+        painter.rect_stroke(
+            r,
+            0.0,
+            egui::Stroke::new(1.5, SELECTED),
+            egui::StrokeKind::Outside,
+        );
+        if a.resizable() {
+            for h in Handle::ALL {
+                let c = map.to_screen(h.point(a.rect));
+                let square = egui::Rect::from_center_size(c.into(), egui::vec2(7.0, 7.0));
+                painter.rect_filled(square, 0.0, egui::Color32::WHITE);
+                painter.rect_stroke(
+                    square,
+                    0.0,
+                    egui::Stroke::new(1.0, SELECTED),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+    }
+
+    /// Janela "Propriedades da anotação", se aberta.
+    pub fn props_window(&mut self, ui: &mut egui::Ui, annots: &[AnnotInfo]) {
+        let Some(draft) = self.props.as_mut() else {
+            return;
+        };
+        let Some(info) = find(annots, (draft.page, draft.id)) else {
+            self.props = None;
+            return;
+        };
+        let mut open = true;
+        self.ops
+            .extend(annot_props::window(ui, info, draft, &mut open));
+        if !open {
+            self.props = None;
+        }
     }
 
     /// Arrastar seleciona o texto pelo fluxo (pedindo ao worker a cada movimento); ao soltar com
@@ -250,28 +581,6 @@ impl EditState {
         }
     }
 
-    /// Botão direito sobre a seleção desta página: Copiar e marcar o texto.
-    fn selection_menu(&mut self, response: &egui::Response, page: i32) {
-        if self.selection.as_ref().and_then(|s| s.page) != Some(page) {
-            return;
-        }
-        response.context_menu(|ui| {
-            if ui.button("Copiar").clicked() {
-                self.copy(ui.ctx());
-            }
-            ui.separator();
-            for (label, markup) in [
-                ("Destacar texto", Markup::Highlight),
-                ("Sublinhar texto", Markup::Underline),
-                ("Riscar texto", Markup::StrikeOut),
-            ] {
-                if ui.button(label).clicked() {
-                    self.mark_selection(markup);
-                }
-            }
-        });
-    }
-
     fn paint_selection(&self, painter: &egui::Painter, page: i32, map: &PageMap) {
         let Some(sel) = self.selection.as_ref().filter(|s| s.page == Some(page)) else {
             return;
@@ -312,29 +621,37 @@ impl EditState {
         }
     }
 
-    /// Janelinha para digitar o texto de uma nota.
+    /// Janelinha para digitar o texto de uma nota nova ou editar o de uma existente.
     pub fn note_window(&mut self, ui: &mut egui::Ui) {
-        let Some((page, at, mut text)) = self.note_draft.take() else {
+        let Some(mut draft) = self.note_draft.take() else {
             return;
         };
-        let mut choice = None; // Some(true) = adicionar, Some(false) = cancelar
-        egui::Window::new("Nova nota")
-            .collapsible(false)
-            .show(ui, |ui| {
-                ui.text_edit_multiline(&mut text);
-                ui.horizontal(|ui| {
-                    if ui.button("Adicionar").clicked() {
-                        choice = Some(true);
-                    }
-                    if ui.button("Cancelar").clicked() {
-                        choice = Some(false);
-                    }
-                });
+        let (title, ok) = match draft.target {
+            NoteTarget::New(_) => ("Nova nota", "Adicionar"),
+            NoteTarget::Existing(_) => ("Editar nota", "OK"),
+        };
+        let mut choice = None; // Some(true) = confirmar, Some(false) = cancelar
+        egui::Window::new(title).collapsible(false).show(ui, |ui| {
+            ui.text_edit_multiline(&mut draft.text);
+            ui.horizontal(|ui| {
+                if ui.button(ok).clicked() {
+                    choice = Some(true);
+                }
+                if ui.button("Cancelar").clicked() {
+                    choice = Some(false);
+                }
             });
+        });
         match choice {
-            Some(true) => self.add(NewAnnot::Note { page, at, text }),
+            Some(true) => {
+                let (page, text) = (draft.page, draft.text);
+                self.ops.push(match draft.target {
+                    NoteTarget::New(at) => AnnotOp::Create(NewAnnot::Note { page, at, text }),
+                    NoteTarget::Existing(id) => AnnotOp::SetContents { page, id, text },
+                });
+            }
             Some(false) => {}
-            None => self.note_draft = Some((page, at, text)),
+            None => self.note_draft = Some(draft),
         }
     }
 
@@ -498,5 +815,85 @@ mod tests {
             },
         );
         assert!(e.selection.is_none());
+    }
+
+    fn drag(grab: Grab, to: (f32, f32)) -> AnnotDrag {
+        AnnotDrag {
+            page: 1,
+            id: 9,
+            rect: PdfRect::new(100.0, 100.0, 200.0, 150.0),
+            grab,
+            from: (110.0, 110.0),
+            to,
+        }
+    }
+
+    #[test]
+    fn moving_previews_the_shifted_rect_and_sends_the_offset() {
+        let d = drag(Grab::Move, (140.0, 100.0));
+        assert_eq!(d.preview(), PdfRect::new(130.0, 90.0, 230.0, 140.0));
+        assert!(matches!(
+            d.op(),
+            Some(AnnotOp::Move { page: 1, id: 9, dx, dy }) if dx == 30.0 && dy == -10.0
+        ));
+    }
+
+    #[test]
+    fn resizing_moves_the_grabbed_corner_by_the_mouse_offset() {
+        let d = AnnotDrag {
+            from: (200.0, 150.0),
+            ..drag(Grab::Resize(Handle::BottomRight), (260.0, 170.0))
+        };
+        let r = PdfRect::new(100.0, 100.0, 260.0, 170.0);
+        assert_eq!(d.preview(), r);
+        assert!(matches!(d.op(), Some(AnnotOp::Resize { id: 9, rect, .. }) if rect == r));
+    }
+
+    #[test]
+    fn tiny_drags_send_nothing() {
+        assert!(drag(Grab::Move, (110.4, 110.3)).op().is_none());
+        assert!(drag(Grab::Resize(Handle::TopLeft), (110.2, 110.0))
+            .op()
+            .is_none());
+    }
+
+    fn info(page: i32, id: i32) -> AnnotInfo {
+        AnnotInfo {
+            id,
+            kind: AnnotKind::Note,
+            page,
+            rect: PdfRect::new(0.0, 0.0, 20.0, 20.0),
+            contents: String::new(),
+            color: None,
+            opacity: 1.0,
+            width: None,
+        }
+    }
+
+    #[test]
+    fn deleting_sends_the_selected_annotation_once() {
+        let mut e = EditState {
+            selected: Some((2, 5)),
+            ..Default::default()
+        };
+        e.delete_selected();
+        e.delete_selected();
+        assert!(matches!(
+            e.take_ops()[..],
+            [AnnotOp::Delete { page: 2, id: 5 }]
+        ));
+        assert!(e.selected.is_none());
+    }
+
+    #[test]
+    fn selection_survives_only_while_the_annotation_exists() {
+        let mut e = EditState {
+            selected: Some((0, 3)),
+            ..Default::default()
+        };
+        e.keep_valid_selection(&[info(0, 3)]);
+        assert_eq!(e.selected, Some((0, 3)));
+        e.keep_valid_selection(&[info(1, 3)]);
+        assert!(e.selected.is_none(), "mesmo id em outra página não conta");
     }
 }

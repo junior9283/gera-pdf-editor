@@ -44,6 +44,8 @@ pub enum DocCommand {
     Copy,
     /// Seleciona o texto do documento inteiro.
     SelectAll,
+    /// Apaga a anotação selecionada.
+    Delete,
     Rotate {
         clockwise: bool,
     },
@@ -174,6 +176,7 @@ impl DocTab {
             DocCommand::Find => self.focus_search = true,
             DocCommand::Copy => self.edit.copy(ctx),
             DocCommand::SelectAll => self.edit.select_all(&self.worker),
+            DocCommand::Delete => self.edit.delete_selected(),
             DocCommand::ZoomIn | DocCommand::ZoomOut | DocCommand::ZoomReset => {
                 let z = match cmd {
                     DocCommand::ZoomIn => zoom::zoom_in(view.zoom),
@@ -411,6 +414,7 @@ impl DocTab {
                     can_redo,
                     dirty,
                 } => {
+                    self.edit.keep_valid_selection(&annots);
                     self.annots = annots;
                     (self.dirty, self.can_undo, self.can_redo) = (dirty, can_undo, can_redo);
                     if let Some(view) = self.view.as_mut() {
@@ -583,6 +587,7 @@ impl DocTab {
         }
         egui::CentralPanel::default().show(ui, |ui| self.canvas(ui));
         self.edit.note_window(ui);
+        self.edit.props_window(ui, &self.annots);
         self.send_edits();
         self.password_window(ui);
         if let Some(view) = self.view.as_mut() {
@@ -601,10 +606,16 @@ impl DocTab {
                 sidebar::show(ui, panel, view, &self.worker, &self.outline, &self.annots)
             })
             .inner;
-        if let SidebarAction::JumpToPage(page) = action {
-            if let Some(y) = view.go_to(page as i32, None) {
-                self.jump_to = Some(y);
+        let target = match action {
+            SidebarAction::None => return,
+            SidebarAction::JumpToPage(page) => (page as i32, None),
+            SidebarAction::SelectAnnot { page, id, at } => {
+                self.edit.selected = Some((page, id));
+                (page, Some(at))
             }
+        };
+        if let Some(y) = view.go_to(target.0, target.1) {
+            self.jump_to = Some(y);
         }
     }
 
@@ -694,7 +705,8 @@ impl DocTab {
         {
             self.jump_to = Some(self.last.scroll_y * ratio);
         }
-        let (worker, edit, search) = (&self.worker, &mut self.edit, &self.search);
+        let (worker, edit, search, annots) =
+            (&self.worker, &mut self.edit, &self.search, &self.annots);
         let jump_to = self.jump_to.take();
         // cada aba com seu id: a área de rolagem guarda a posição de cada documento
         self.last = ui
@@ -706,7 +718,7 @@ impl DocTab {
                     jump_to,
                     &mut |ui, page, rect, map: &PageMap| {
                         paint_search_hits(ui, search, page as i32, map);
-                        edit.on_page(ui, worker, page as i32, rect, map);
+                        edit.on_page(ui, worker, annots, page as i32, rect, map);
                     },
                 )
             })

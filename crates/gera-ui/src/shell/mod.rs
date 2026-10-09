@@ -1,4 +1,5 @@
 //! Casca no arranjo do Acrobat: abas, menus, barras e painéis.
+pub mod annot_props;
 pub mod close;
 pub mod commands;
 pub mod help;
