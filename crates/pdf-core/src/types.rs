@@ -18,6 +18,14 @@ impl PdfRect {
         Self::new(a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1))
     }
 
+    pub fn width(&self) -> f32 {
+        self.x1 - self.x0
+    }
+
+    pub fn height(&self) -> f32 {
+        self.y1 - self.y0
+    }
+
     pub fn intersects(&self, o: &PdfRect) -> bool {
         self.x0 < o.x1 && o.x0 < self.x1 && self.y0 < o.y1 && o.y0 < self.y1
     }
@@ -201,6 +209,39 @@ impl Rotation {
 pub struct TextSelection {
     pub quads: Vec<PdfRect>,
     pub text: String,
+}
+
+/// Operação do usuário sobre as anotações (aplicada na hora, com desfazer).
+#[derive(Debug, Clone, PartialEq)]
+pub enum AnnotOp {
+    Create(NewAnnot),
+    Move {
+        page: i32,
+        id: i32,
+        dx: f32,
+        dy: f32,
+    },
+    Resize {
+        page: i32,
+        id: i32,
+        rect: PdfRect,
+    },
+    Style {
+        page: i32,
+        id: i32,
+        color: Option<[f32; 3]>,
+        opacity: f32,
+        width: Option<f32>,
+    },
+    SetContents {
+        page: i32,
+        id: i32,
+        text: String,
+    },
+    Delete {
+        page: i32,
+        id: i32,
+    },
 }
 
 /// Propriedades do documento (Arquivo → Propriedades). As datas vêm cruas (`D:AAAAMMDD…`).

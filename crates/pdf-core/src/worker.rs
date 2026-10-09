@@ -241,11 +241,11 @@ impl State {
                     .map_or_else(Response::PropertiesFailed, Response::Properties),
             ),
             Request::ExportForPrint {
-                pending,
+                pending: _, // protocolo antigo até a tarefa 3: a cópia sai do documento em memória
                 dest,
                 with_annots,
             } => send(
-                match self.with_doc(|d| d.export_for_print(&pending, &dest, with_annots)) {
+                match self.with_doc(|d| d.export_for_print(&dest, with_annots)) {
                     Ok(()) => Response::Exported { dest },
                     Err(e) => Response::ExportFailed(e),
                 },

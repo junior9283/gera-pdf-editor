@@ -1,4 +1,4 @@
-use mupdf::pdf::{Encryption, PdfDocument, PdfWriteOptions};
+use mupdf::pdf::{AnnotationFlags, Encryption, PdfDocument, PdfWriteOptions};
 use pdf_core::sample::sample_pdf;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -20,4 +20,30 @@ pub fn encrypted_sample(dir: &TempDir) -> PathBuf {
         .set_user_password("segredo");
     doc.save_with_options(path.to_str().unwrap(), opts).unwrap();
     path
+}
+
+/// Liga a flag Hidden em todas as anotações do arquivo (anotação "escondida de fábrica").
+#[allow(dead_code)]
+pub fn hide_all_annotations(path: &std::path::Path) {
+    let doc = PdfDocument::open(path.to_str().unwrap()).unwrap();
+    for p in 0..doc.page_count().unwrap() {
+        let mut page = doc.load_pdf_page(p).unwrap();
+        let all: Vec<_> = page.annotations().collect();
+        for mut a in all {
+            let flags = a.flags().unwrap() | AnnotationFlags::IS_HIDDEN;
+            a.set_flags(flags).unwrap();
+            a.update().unwrap();
+        }
+        page.update().unwrap();
+    }
+    doc.save(path.to_str().unwrap()).unwrap();
+}
+
+/// Quantas anotações o arquivo tem, contando as escondidas.
+#[allow(dead_code)]
+pub fn count_raw_annotations(path: &std::path::Path) -> usize {
+    let doc = PdfDocument::open(path.to_str().unwrap()).unwrap();
+    (0..doc.page_count().unwrap())
+        .map(|p| doc.load_pdf_page(p).unwrap().annotations().count())
+        .sum()
 }

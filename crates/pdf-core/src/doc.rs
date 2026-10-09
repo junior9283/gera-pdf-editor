@@ -1,13 +1,14 @@
+use crate::annot_edit::{self, Edit, History};
 use crate::error::{PdfError, Result};
 use crate::types::{
-    AnnotInfo, AnnotKind, DocProperties, DocSummary, NewAnnot, OutlineItem, PageSize, PdfRect,
-    RenderedPage, Rotation, TextSelection, Word,
+    AnnotInfo, AnnotKind, AnnotOp, DocProperties, DocSummary, NewAnnot, OutlineItem, PageSize,
+    PdfRect, RenderedPage, Rotation, TextSelection, Word,
 };
+use mupdf::color::AnnotationColor;
 use mupdf::pdf::{
     AnnotationFlags, Encryption, PdfAnnotation, PdfAnnotationType, PdfDocument, PdfPage,
     PdfWriteOptions,
 };
-use mupdf::color::AnnotationColor;
 use mupdf::{
     Colorspace, Matrix, MetadataName, Point, Quad, Rect, TextExtractOptions, TextPageFlags,
 };
@@ -38,6 +39,8 @@ pub struct PdfDoc {
     pub(crate) path: PathBuf,
     /// Guardada só em memória, para reabrir o arquivo (ex.: descartar mudanças após falha ao salvar).
     pub(crate) password: Option<String>,
+    /// Desfazer/refazer das edições de anotação desde a última gravação.
+    history: History,
 }
 
 /// Abre o arquivo e, se for protegido, autentica com `password`.
@@ -60,6 +63,7 @@ impl PdfDoc {
             inner,
             path: path.to_path_buf(),
             password: password.map(str::to_owned),
+            history: History::default(),
         })
     }
 
@@ -213,15 +217,11 @@ impl PdfDoc {
         })
     }
 
-    /// Cópia para imprimir: o arquivo do disco mais as pendentes (ou sem nenhuma anotação),
-    /// gravada sem criptografia, porque o CUPS precisa ler. O documento aberto não muda.
-    pub fn export_for_print(
-        &self,
-        pending: &[NewAnnot],
-        dest: &Path,
-        with_annots: bool,
-    ) -> Result<()> {
-        let written = self.write_print_copy(pending, dest, with_annots);
+    /// Cópia para imprimir, gravada sem criptografia (o CUPS precisa ler): o documento em memória
+    /// (com as edições; as apagadas, escondidas, não aparecem) ou, só "Documento", o arquivo do
+    /// disco sem nenhuma anotação. O documento aberto não muda.
+    pub fn export_for_print(&self, dest: &Path, with_annots: bool) -> Result<()> {
+        let written = self.write_print_copy(dest, with_annots);
         if written.is_err() {
             // nada de cópia sem senha esquecida no disco (nem pela metade, nem de tentativa antiga)
             let _ = std::fs::remove_file(dest);
@@ -229,20 +229,22 @@ impl PdfDoc {
         written
     }
 
-    fn write_print_copy(&self, pending: &[NewAnnot], dest: &Path, with_annots: bool) -> Result<()> {
-        let copy = open_authenticated(&self.path, self.password.as_deref())?;
-        if with_annots {
-            apply_pending(&copy, pending)?;
+    fn write_print_copy(&self, dest: &Path, with_annots: bool) -> Result<()> {
+        let without_annots;
+        let copy = if with_annots {
+            &self.inner
         } else {
-            for p in 0..copy.page_count()? {
-                let mut page = copy.load_pdf_page(p)?;
+            without_annots = open_authenticated(&self.path, self.password.as_deref())?;
+            for p in 0..without_annots.page_count()? {
+                let mut page = without_annots.load_pdf_page(p)?;
                 let all: Vec<_> = page.annotations().collect();
                 for a in all {
                     page.delete_annotation(a)?;
                 }
                 page.update()?;
             }
-        }
+            &without_annots
+        };
         let dest = utf8_path(dest)?;
         // o padrão do MuPDF é manter a criptografia; o CUPS precisa de uma cópia legível
         let mut opts = PdfWriteOptions::default();
@@ -282,52 +284,20 @@ fn quads(rects: &[PdfRect]) -> Result<Vec<Quad>> {
     Ok(rects.iter().map(|r| Rect::from(*r).quad()).collect())
 }
 
-fn add_one(page: &mut PdfPage, a: &NewAnnot) -> Result<()> {
-    match a {
-        NewAnnot::Highlight { rects, .. } => {
-            page.add_highlight_annotation(quads(rects)?)?;
-        }
-        NewAnnot::Underline { rects, .. } => {
-            page.add_underline_annotation(quads(rects)?)?;
-        }
-        NewAnnot::StrikeOut { rects, .. } => {
-            page.add_strikeout_annotation(quads(rects)?)?;
-        }
+fn add_one(page: &mut PdfPage, a: &NewAnnot) -> Result<PdfAnnotation> {
+    Ok(match a {
+        NewAnnot::Highlight { rects, .. } => page.add_highlight_annotation(quads(rects)?)?,
+        NewAnnot::Underline { rects, .. } => page.add_underline_annotation(quads(rects)?)?,
+        NewAnnot::StrikeOut { rects, .. } => page.add_strikeout_annotation(quads(rects)?)?,
         NewAnnot::Note { at, text, .. } => {
-            page.add_text_annotation(Rect::new(at.0, at.1, at.0 + 24.0, at.1 + 24.0), text)?;
+            page.add_text_annotation(Rect::new(at.0, at.1, at.0 + 24.0, at.1 + 24.0), text)?
         }
-        NewAnnot::Ink { strokes, .. } => {
-            page.add_ink_annotation(
-                strokes
-                    .iter()
-                    .map(|s| s.iter().map(|&(x, y)| Point::new(x, y))),
-            )?;
-        }
-    }
-    Ok(())
-}
-
-/// Aplica as anotações pendentes às páginas de `doc` (recusa páginas fora do documento).
-fn apply_pending(doc: &PdfDocument, pending: &[NewAnnot]) -> Result<()> {
-    let count = doc.page_count()?;
-    if let Some(bad) = pending
-        .iter()
-        .map(NewAnnot::page)
-        .find(|p| *p < 0 || *p >= count)
-    {
-        return Err(PdfError::PageOutOfRange(bad));
-    }
-    let mut pages: Vec<i32> = pending.iter().map(NewAnnot::page).collect();
-    pages.sort_unstable();
-    pages.dedup();
-    for p in pages {
-        let mut page = doc.load_pdf_page(p)?;
-        for a in pending.iter().filter(|a| a.page() == p) {
-            add_one(&mut page, a)?;
-        }
-        page.update()?;
-    }
-    Ok(())
+        NewAnnot::Ink { strokes, .. } => page.add_ink_annotation(
+            strokes
+                .iter()
+                .map(|s| s.iter().map(|&(x, y)| Point::new(x, y))),
+        )?,
+    })
 }
 
 fn utf8_path(path: &Path) -> Result<&str> {
@@ -347,7 +317,7 @@ fn kind_of(t: PdfAnnotationType) -> AnnotKind {
 }
 
 /// Cor da anotação em RGB (cinza e CMYK convertidos de forma simples).
-fn rgb_of(c: AnnotationColor) -> [f32; 3] {
+pub(crate) fn rgb_of(c: AnnotationColor) -> [f32; 3] {
     match c {
         AnnotationColor::Gray(g) => [g, g, g],
         AnnotationColor::Rgb { red, green, blue } => [red, green, blue],
@@ -415,17 +385,54 @@ impl PdfDoc {
 
     /// Aplica `pending`, grava em arquivo temporário ao lado de `dest` e renomeia.
     /// Em qualquer erro descarta as mudanças em memória (recarrega do disco) e devolve o erro.
+    /// Cria as anotações `pending` e grava (atalho usado pelos testes e pela v1).
     pub fn save_with(&mut self, pending: &[NewAnnot], dest: &Path) -> Result<()> {
-        let result = self.apply_and_write(pending, dest);
-        if result.is_err() {
-            // descarta as mudanças em memória reabrindo o arquivo (com a mesma senha, se houver)
-            self.inner = open_authenticated(&self.path, self.password.as_deref())?;
+        let count = self.page_count()?;
+        if let Some(bad) = pending
+            .iter()
+            .map(NewAnnot::page)
+            .find(|p| *p < 0 || *p >= count)
+        {
+            return Err(PdfError::PageOutOfRange(bad));
         }
+        for a in pending {
+            if let Err(e) = self.apply(AnnotOp::Create(a.clone())) {
+                self.discard_changes()?;
+                return Err(e);
+            }
+        }
+        self.save(dest)
+    }
+
+    /// Grava o documento em memória em `dest`: as anotações escondidas por nós (apagadas) saem de
+    /// verdade; o histórico recomeça. Em erro, descarta as mudanças em memória (relê do disco).
+    pub fn save(&mut self, dest: &Path) -> Result<()> {
+        let result = self.purge_hidden().and_then(|()| self.write(dest));
+        if result.is_err() {
+            self.discard_changes()?;
+        }
+        self.history = History::default();
         result
     }
 
-    fn apply_and_write(&mut self, pending: &[NewAnnot], dest: &Path) -> Result<()> {
-        apply_pending(&self.inner, pending)?;
+    /// Volta ao arquivo do disco (com a mesma senha), sem as edições em memória.
+    fn discard_changes(&mut self) -> Result<()> {
+        self.inner = open_authenticated(&self.path, self.password.as_deref())?;
+        self.history = History::default();
+        Ok(())
+    }
+
+    fn purge_hidden(&mut self) -> Result<()> {
+        for &(page, id) in &self.history.hidden {
+            if let Ok((mut page_ref, a)) = annot_edit::find(&self.inner, page, id) {
+                page_ref.delete_annotation(a)?;
+                page_ref.update()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn write(&mut self, dest: &Path) -> Result<()> {
         let tmp = temp_path(dest)?;
         let tmp_str = utf8_path(&tmp)?;
         let mut opts = PdfWriteOptions::default();
@@ -448,6 +455,83 @@ impl PdfDoc {
         written?;
         self.path = dest.to_path_buf();
         Ok(())
+    }
+
+    /// Aplica uma operação do usuário no documento em memória; devolve as páginas mudadas.
+    pub fn apply(&mut self, op: AnnotOp) -> Result<Vec<i32>> {
+        let edit = match op {
+            AnnotOp::Create(a) => {
+                let page = a.page();
+                self.check_page(page)?;
+                let mut page_ref = self.inner.load_pdf_page(page)?;
+                let annot = add_one(&mut page_ref, &a)?;
+                page_ref.update()?;
+                let id = annot_id(&annot)?;
+                self.history.record(Edit::Hide { page, id });
+                return Ok(vec![page]);
+            }
+            AnnotOp::Move { page, id, dx, dy } => {
+                let (rect, ink) = annot_edit::geometry_of(&self.inner, page, id)?;
+                let (rect, ink) = annot_edit::moved(rect, ink, dx, dy);
+                Edit::Geometry {
+                    page,
+                    id,
+                    rect,
+                    ink,
+                }
+            }
+            AnnotOp::Resize { page, id, rect } => {
+                let (old, ink) = annot_edit::geometry_of(&self.inner, page, id)?;
+                let ink = annot_edit::scaled(old, rect, ink);
+                Edit::Geometry {
+                    page,
+                    id,
+                    rect,
+                    ink,
+                }
+            }
+            AnnotOp::Style {
+                page,
+                id,
+                color,
+                opacity,
+                width,
+            } => Edit::Style {
+                page,
+                id,
+                color,
+                opacity,
+                width,
+            },
+            AnnotOp::SetContents { page, id, text } => Edit::Contents { page, id, text },
+            AnnotOp::Delete { page, id } => Edit::Hide { page, id },
+        };
+        let page = edit.page();
+        let inverse = annot_edit::apply_edit(&self.inner, &mut self.history.hidden, edit)?;
+        self.history.record(inverse);
+        Ok(vec![page])
+    }
+
+    /// Desfaz a última operação; devolve as páginas mudadas (vazio se não havia o que desfazer).
+    pub fn undo(&mut self) -> Result<Vec<i32>> {
+        Ok(self.history.undo(&self.inner)?.into_iter().collect())
+    }
+
+    pub fn redo(&mut self) -> Result<Vec<i32>> {
+        Ok(self.history.redo(&self.inner)?.into_iter().collect())
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo()
+    }
+
+    /// Há edições desde a última gravação?
+    pub fn is_dirty(&self) -> bool {
+        self.history.can_undo()
     }
 
     pub fn outline(&self) -> Result<Vec<OutlineItem>> {
