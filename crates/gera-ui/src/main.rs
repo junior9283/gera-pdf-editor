@@ -2,6 +2,7 @@ mod app;
 mod canvas;
 mod edit;
 mod search;
+mod sidebar;
 mod view;
 
 use std::path::PathBuf;

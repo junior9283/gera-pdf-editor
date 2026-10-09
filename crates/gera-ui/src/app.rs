@@ -1,10 +1,11 @@
 use crate::canvas::{self, CanvasFrame};
 use crate::edit::{screen_rect, EditState};
 use crate::search::SearchState;
+use crate::sidebar::{self, SidebarAction, SidebarTab};
 use crate::view::DocView;
 use app_state::tools::Tool;
 use app_state::zoom;
-use pdf_core::{AnnotInfo, DocSummary, Request, Response, Worker};
+use pdf_core::{AnnotInfo, DocSummary, OutlineItem, PdfError, Request, Response, Worker};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -24,6 +25,12 @@ pub struct GeraApp {
     pub(crate) saved_annots: Vec<AnnotInfo>,
     /// Janela "descartar alterações?" aberta (o usuário tentou fechar com anotações pendentes).
     confirm_close: bool,
+    tab: SidebarTab,
+    outline: Vec<OutlineItem>,
+    /// Caminho que está sendo aberto (para pedir a senha de um PDF protegido).
+    opening: Option<PathBuf>,
+    /// Pedido de senha: (caminho, senha digitada).
+    password_prompt: Option<(PathBuf, String)>,
     /// Modo de medição (`--bench-open`): instante de início do processo.
     bench: Option<Instant>,
 }
@@ -46,6 +53,10 @@ impl GeraApp {
             edit: EditState::default(),
             saved_annots: Vec::new(),
             confirm_close: false,
+            tab: SidebarTab::default(),
+            outline: Vec::new(),
+            opening: None,
+            password_prompt: None,
             bench,
         };
         if let Some(path) = path {
@@ -55,22 +66,29 @@ impl GeraApp {
     }
 
     pub(crate) fn open(&mut self, path: PathBuf) {
+        self.open_with(path, None);
+    }
+
+    fn open_with(&mut self, path: PathBuf, password: Option<String>) {
         self.status = format!("Abrindo {}…", path.display());
-        self.worker.send(Request::Open {
-            path,
-            password: None,
-        });
+        self.opening = Some(path.clone());
+        self.worker.send(Request::Open { path, password });
     }
 
     fn on_opened(&mut self, summary: DocSummary) {
         self.saved_annots = summary.annots;
+        self.outline = summary.outline;
+        self.password_prompt = None;
         self.edit.reset();
         self.status = format!(
             "{} — {} páginas",
             summary.path.display(),
             summary.sizes.len()
         );
-        self.view = Some(DocView::new(summary.path, summary.sizes));
+        let dark = self.view.as_ref().is_some_and(|v| v.dark); // o tema escuro vale para a sessão
+        let mut view = DocView::new(summary.path, summary.sizes);
+        view.dark = dark;
+        self.view = Some(view);
         self.search.text.clear(); // descarta a busca (e os destaques) do documento anterior
         self.search.start(&self.worker);
         self.last = CanvasFrame::default();
@@ -82,6 +100,12 @@ impl GeraApp {
         while let Ok(response) = self.worker.rx.try_recv() {
             match response {
                 Response::Opened(summary) => self.on_opened(summary),
+                Response::OpenFailed(
+                    e @ (PdfError::PasswordRequired | PdfError::WrongPassword),
+                ) => {
+                    self.status = e.to_string();
+                    self.password_prompt = self.opening.clone().map(|p| (p, String::new()));
+                }
                 Response::OpenFailed(e) => self.status = format!("Erro: {e}"),
                 Response::Rendered {
                     page,
@@ -192,6 +216,18 @@ impl GeraApp {
                 self.edit.save(&self.worker, view.path.clone());
             }
             ui.separator();
+            if ui
+                .button(if view.dark { "Claro" } else { "Escuro" })
+                .clicked()
+            {
+                view.dark = !view.dark;
+                view.clear_cache();
+                ui.ctx().set_visuals(if view.dark {
+                    egui::Visuals::dark()
+                } else {
+                    egui::Visuals::light()
+                });
+            }
             let mut new_zoom = None;
             if ui.button("−").clicked() {
                 new_zoom = Some(zoom::zoom_out(view.zoom));
@@ -236,6 +272,53 @@ impl GeraApp {
                 }
             }
         });
+    }
+
+    /// Painel lateral (miniaturas, índice, anotações); clicar leva à página.
+    fn sidebar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::left("sidebar")
+            .default_size(150.0)
+            .show(ui, |ui| {
+                let Some(view) = self.view.as_mut() else {
+                    return;
+                };
+                let action = sidebar::show(
+                    ui,
+                    &mut self.tab,
+                    view,
+                    &self.worker,
+                    &self.outline,
+                    &self.saved_annots,
+                    self.edit.pending.items(),
+                );
+                if let SidebarAction::JumpToPage(page) = action {
+                    if let Some(y) = view.scroll_target(page as i32, 0.0) {
+                        self.jump_to = Some(y);
+                    }
+                }
+            });
+    }
+
+    /// Pedido de senha para abrir um PDF protegido (a senha não é registrada em lugar nenhum).
+    fn password_window(&mut self, ui: &mut egui::Ui) {
+        let Some((path, mut password)) = self.password_prompt.take() else {
+            return;
+        };
+        let (mut submit, mut cancel) = (false, false);
+        egui::Window::new("PDF protegido por senha")
+            .collapsible(false)
+            .show(ui, |ui| {
+                ui.label(&self.status); // "protegido por senha" ou "senha incorreta"
+                let edit = ui.add(egui::TextEdit::singleline(&mut password).password(true));
+                submit = ui.button("Abrir").clicked()
+                    || (edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                cancel = ui.button("Cancelar").clicked();
+            });
+        if submit {
+            self.open_with(path, Some(password));
+        } else if !cancel {
+            self.password_prompt = Some((path, password));
+        }
     }
 
     /// Confirmação de saída com anotações não salvas.
@@ -333,9 +416,13 @@ impl eframe::App for GeraApp {
             };
             ui.label(text);
         });
+        if self.view.is_some() {
+            self.sidebar(ui);
+        }
         egui::CentralPanel::default().show(ui, |ui| self.canvas(ui));
         self.edit.note_window(ui);
         self.confirm_close_window(ui);
+        self.password_window(ui);
         if let Some(view) = self.view.as_mut() {
             view.end_frame();
         }
