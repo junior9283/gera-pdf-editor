@@ -165,3 +165,21 @@ fn highlight_on_a_rotated_page_lands_on_the_found_text() {
         "o destaque não deve atingir o canto da página"
     );
 }
+
+#[test]
+fn strikeout_is_saved_and_read_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_sample(&dir, "r.pdf", 1, 0);
+    let mut doc = PdfDoc::open(&path, None).unwrap();
+    let r = PdfRect::new(70.0, 90.0, 200.0, 110.0);
+    doc.save_with(
+        &[NewAnnot::StrikeOut {
+            page: 0,
+            rects: vec![r],
+        }],
+        &path,
+    )
+    .unwrap();
+    let again = PdfDoc::open(&path, None).unwrap();
+    assert_eq!(again.annotations(0).unwrap()[0].kind, AnnotKind::StrikeOut);
+}

@@ -1,10 +1,12 @@
 use crate::error::{PdfError, Result};
 use crate::types::{
-    AnnotInfo, AnnotKind, DocSummary, NewAnnot, OutlineItem, PageSize, PdfRect, RenderedPage,
-    Rotation, TextSelection, Word,
+    AnnotInfo, AnnotKind, DocProperties, DocSummary, NewAnnot, OutlineItem, PageSize, PdfRect,
+    RenderedPage, Rotation, TextSelection, Word,
 };
 use mupdf::pdf::{Encryption, PdfAnnotationType, PdfDocument, PdfPage, PdfWriteOptions};
-use mupdf::{Colorspace, Matrix, Point, Quad, Rect, TextExtractOptions, TextPageFlags};
+use mupdf::{
+    Colorspace, Matrix, MetadataName, Point, Quad, Rect, TextExtractOptions, TextPageFlags,
+};
 use std::path::{Path, PathBuf};
 
 /// Limite de pixels por imagem renderizada (evita estourar a memória).
@@ -186,6 +188,60 @@ impl PdfDoc {
         Ok(TextSelection { quads, text })
     }
 
+    pub fn properties(&self) -> Result<DocProperties> {
+        let meta = |name| self.inner.metadata(name).unwrap_or_default();
+        Ok(DocProperties {
+            path: self.path.clone(),
+            title: meta(MetadataName::Title),
+            author: meta(MetadataName::Author),
+            subject: meta(MetadataName::Subject),
+            keywords: meta(MetadataName::Keywords),
+            creator: meta(MetadataName::Creator),
+            producer: meta(MetadataName::Producer),
+            created: meta(MetadataName::CreationDate),
+            modified: meta(MetadataName::ModDate),
+            format: meta(MetadataName::Format),
+            encrypted: self.password.is_some()
+                || !matches!(meta(MetadataName::Encryption).as_str(), "" | "None"),
+            pages: self.page_count()?,
+            first_page: self.page_size(0)?,
+            file_size: std::fs::metadata(&self.path).map_or(0, |m| m.len()),
+        })
+    }
+
+    /// Cópia para imprimir: o arquivo do disco mais as pendentes (ou sem nenhuma anotação),
+    /// gravada sem criptografia, porque o CUPS precisa ler. O documento aberto não muda.
+    pub fn export_for_print(
+        &self,
+        pending: &[NewAnnot],
+        dest: &Path,
+        with_annots: bool,
+    ) -> Result<()> {
+        let copy = open_authenticated(&self.path, self.password.as_deref())?;
+        for p in 0..copy.page_count()? {
+            let mut page = copy.load_pdf_page(p)?;
+            if with_annots {
+                for a in pending.iter().filter(|a| a.page() == p) {
+                    add_one(&mut page, a)?;
+                }
+            } else {
+                let all: Vec<_> = page.annotations().collect();
+                for a in all {
+                    page.delete_annotation(a)?;
+                }
+            }
+            page.update()?;
+        }
+        let dest = dest
+            .to_str()
+            .ok_or_else(|| PdfError::Engine("caminho não é UTF-8 válido".into()))?;
+        // o padrão do MuPDF é manter a criptografia; o CUPS precisa de uma cópia legível
+        let mut opts = PdfWriteOptions::default();
+        opts.set_encryption(Encryption::None);
+        copy.save_with_options(dest, opts)?;
+        Ok(())
+    }
+
     /// Texto do documento inteiro (Selecionar tudo), página após página.
     pub fn document_text(&self) -> Result<String> {
         let mut out = String::new();
@@ -225,6 +281,9 @@ fn add_one(page: &mut PdfPage, a: &NewAnnot) -> Result<()> {
         NewAnnot::Underline { rects, .. } => {
             page.add_underline_annotation(quads(rects)?)?;
         }
+        NewAnnot::StrikeOut { rects, .. } => {
+            page.add_strikeout_annotation(quads(rects)?)?;
+        }
         NewAnnot::Note { at, text, .. } => {
             page.add_text_annotation(Rect::new(at.0, at.1, at.0 + 24.0, at.1 + 24.0), text)?;
         }
@@ -245,6 +304,7 @@ fn kind_of(t: PdfAnnotationType) -> Option<AnnotKind> {
         PdfAnnotationType::Underline => Some(AnnotKind::Underline),
         PdfAnnotationType::Text => Some(AnnotKind::Note),
         PdfAnnotationType::Ink => Some(AnnotKind::Ink),
+        PdfAnnotationType::StrikeOut => Some(AnnotKind::StrikeOut),
         _ => None,
     }
 }

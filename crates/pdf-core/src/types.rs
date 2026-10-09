@@ -61,6 +61,7 @@ pub enum AnnotKind {
     Underline,
     Note,
     Ink,
+    StrikeOut,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -81,6 +82,10 @@ pub enum NewAnnot {
         page: i32,
         rects: Vec<PdfRect>,
     },
+    StrikeOut {
+        page: i32,
+        rects: Vec<PdfRect>,
+    },
     Note {
         page: i32,
         at: (f32, f32),
@@ -97,6 +102,7 @@ impl NewAnnot {
         match self {
             Self::Highlight { page, .. }
             | Self::Underline { page, .. }
+            | Self::StrikeOut { page, .. }
             | Self::Note { page, .. }
             | Self::Ink { page, .. } => *page,
         }
@@ -105,7 +111,9 @@ impl NewAnnot {
     /// Anotação sem conteúdo desenhável (não deve ser guardada).
     pub fn is_empty(&self) -> bool {
         match self {
-            Self::Highlight { rects, .. } | Self::Underline { rects, .. } => rects.is_empty(),
+            Self::Highlight { rects, .. }
+            | Self::Underline { rects, .. }
+            | Self::StrikeOut { rects, .. } => rects.is_empty(),
             Self::Note { text, .. } => text.trim().is_empty(),
             Self::Ink { strokes, .. } => strokes.iter().all(|s| s.len() < 2),
         }
@@ -173,4 +181,26 @@ impl Rotation {
 pub struct TextSelection {
     pub quads: Vec<PdfRect>,
     pub text: String,
+}
+
+/// Propriedades do documento (Arquivo → Propriedades). As datas vêm cruas (`D:AAAAMMDD…`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocProperties {
+    pub path: PathBuf,
+    pub title: String,
+    pub author: String,
+    pub subject: String,
+    pub keywords: String,
+    /// Aplicativo que criou o documento original.
+    pub creator: String,
+    /// Programa que gerou o PDF.
+    pub producer: String,
+    pub created: String,
+    pub modified: String,
+    /// Ex.: "PDF 1.7".
+    pub format: String,
+    pub encrypted: bool,
+    pub pages: i32,
+    pub first_page: PageSize,
+    pub file_size: u64,
 }

@@ -191,6 +191,16 @@ impl EditState {
                         );
                     }
                 }
+                NewAnnot::StrikeOut { rects, .. } => {
+                    for r in rects {
+                        let r = screen_rect(r, map);
+                        let y = r.center().y;
+                        painter.line_segment(
+                            [egui::pos2(r.left(), y), egui::pos2(r.right(), y)],
+                            egui::Stroke::new(1.5, egui::Color32::RED),
+                        );
+                    }
+                }
                 NewAnnot::Note { at, .. } => {
                     let icon = egui::Rect::from_min_size(
                         map.to_screen(*at).into(),

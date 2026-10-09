@@ -42,6 +42,7 @@ fn kind_label(kind: AnnotKind) -> &'static str {
         AnnotKind::Underline => "Sublinhado",
         AnnotKind::Note => "Nota",
         AnnotKind::Ink => "Desenho",
+        AnnotKind::StrikeOut => "Riscado",
     }
 }
 
@@ -55,6 +56,7 @@ fn pending_label(a: &NewAnnot) -> String {
         NewAnnot::Underline { .. } => "Sublinhado",
         NewAnnot::Note { .. } => "Nota",
         NewAnnot::Ink { .. } => "Desenho",
+        NewAnnot::StrikeOut { .. } => "Riscado",
     };
     annot_label(kind, a.page(), "", true)
 }
