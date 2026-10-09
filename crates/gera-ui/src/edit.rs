@@ -879,6 +879,7 @@ mod tests {
             color: None,
             opacity: 1.0,
             width: None,
+            ..Default::default()
         }
     }
 

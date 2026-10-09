@@ -813,6 +813,7 @@ mod tests {
             color: None,
             opacity: 1.0,
             width: None,
+            ..Default::default()
         };
         let mut all = vec![a(0, 1), a(1, 2), a(1, 3), a(2, 4)];
         replace_pages(&mut all, &[1], vec![a(1, 3), a(1, 5)]);

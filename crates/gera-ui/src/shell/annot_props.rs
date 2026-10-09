@@ -170,6 +170,7 @@ mod tests {
             color: Some([1.0, 0.9, 0.0]),
             opacity: 0.4,
             width: None,
+            ..Default::default()
         };
         let mut d = PropsDraft::new(&info);
         d.sync(&info);

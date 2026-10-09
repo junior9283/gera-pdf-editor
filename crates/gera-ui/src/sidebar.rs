@@ -38,6 +38,11 @@ fn kind_label(kind: AnnotKind) -> &'static str {
         AnnotKind::Note => "Nota",
         AnnotKind::Ink => "Desenho",
         AnnotKind::StrikeOut => "Riscado",
+        AnnotKind::TextBox => "Caixa de texto",
+        AnnotKind::Rect => "Retângulo",
+        AnnotKind::Ellipse => "Elipse",
+        AnnotKind::Line => "Linha",
+        AnnotKind::Stamp => "Carimbo",
         AnnotKind::Other => "Anotação",
     }
 }
@@ -202,6 +207,7 @@ mod tests {
             page: 1,
             rect: PdfRect::new(0.0, 0.0, 1.0, 1.0),
             contents: String::new(),
+            ..Default::default()
         };
         assert_eq!(annot_label(&a), "Sublinhado — p. 2");
         a.kind = AnnotKind::Note;
