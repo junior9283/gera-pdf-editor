@@ -85,7 +85,7 @@ impl Bench {
             self.run = None;
             return None;
         }
-        let target = view.scroll_target(*next as i32, 0.0);
+        let target = view.go_to(*next as i32, None);
         *next += 1;
         target
     }
