@@ -3,13 +3,15 @@ use crate::doc_tab::DocTab;
 use crate::open_dialog::{FileDialogs, Picked};
 use crate::shell::close::{self, CloseFlow, Step};
 use crate::shell::commands::{self, Command};
+use crate::shell::home::{self, HomeAction};
 use crate::shell::menus::{self, MenuState};
 use crate::shell::tabs::{self as tab_bar, TabAction, TabLabel};
-use crate::shell::{help, toolbar};
+use crate::shell::{help, toolbar, tools_hub};
 use app_state::prefs::Prefs;
 use app_state::recents::{now_secs, RecentFiles};
 use app_state::store;
 use app_state::tabs::{canonical, tab_title, TabList, FIXED, HOME, TOOLS};
+use app_state::tools_catalog;
 use std::path::PathBuf;
 
 const RECENTS_FILE: &str = "recentes.json";
@@ -28,6 +30,10 @@ pub struct GeraApp {
     /// Saída já confirmada: não interceptar o fechamento da janela de novo.
     allow_close: bool,
     fullscreen: bool,
+    /// Ligar a linha Comentar no próximo documento aberto pelo seletor.
+    comment_after_open: bool,
+    /// Último documento que esteve na frente (para o hub voltar a ele).
+    last_doc: Option<PathBuf>,
     show_shortcuts: bool,
     show_about: bool,
     bench: Option<Bench>,
@@ -57,6 +63,8 @@ impl GeraApp {
             closing: None,
             allow_close: false,
             fullscreen: false,
+            comment_after_open: false,
+            last_doc: None,
             show_shortcuts: false,
             show_about: false,
             bench,
@@ -175,11 +183,17 @@ impl GeraApp {
                     for f in files {
                         self.open_path(ctx, f);
                     }
+                    if std::mem::take(&mut self.comment_after_open) {
+                        if let Some(doc) = self.active_doc() {
+                            doc.comment_tools = true;
+                        }
+                    }
                 }
                 Picked::SaveAs { doc, dest } => self.save_as(doc, dest),
-                Picked::Cancelled => {}
+                Picked::Cancelled => self.comment_after_open = false,
                 Picked::Failed => {
-                    self.status = "Não foi possível abrir o seletor de arquivos.".into()
+                    self.comment_after_open = false;
+                    self.status = "Não foi possível abrir o seletor de arquivos.".into();
                 }
             }
         }
@@ -362,20 +376,32 @@ impl GeraApp {
             .collect()
     }
 
-    fn home(&mut self, ui: &mut egui::Ui) {
-        ui.vertical_centered(|ui| {
-            ui.add_space(40.0);
-            ui.heading("Gera PDF Editor");
-            ui.add_space(16.0);
-            let open = egui::Button::new("📂  Abrir arquivo…").min_size(egui::vec2(220.0, 40.0));
-            if ui.add(open).clicked() {
-                self.dialogs.open(ui.ctx());
+    /// Cartão ou item de ferramenta clicado. Só "Comentar" existe nesta fase.
+    fn run_tool(&mut self, ctx: &egui::Context, id: &str) {
+        if id != tools_catalog::COMMENT {
+            return;
+        }
+        match self.last_doc.clone().and_then(|p| self.tabs.find(&p)) {
+            Some(tab) => {
+                self.activate(tab);
+                if let Some(doc) = self.active_doc() {
+                    doc.comment_tools = true;
+                }
             }
-            if !self.status.is_empty() {
-                ui.add_space(12.0);
-                ui.label(&self.status);
+            None => {
+                self.comment_after_open = true;
+                self.dialogs.open(ctx);
             }
-        });
+        }
+    }
+
+    fn forget(&mut self, path: &std::path::Path) {
+        self.recents.remove(path);
+        if let Some(file) = store::config_file(RECENTS_FILE) {
+            if let Err(e) = self.recents.save(&file) {
+                self.status = format!("Não foi possível gravar os recentes: {e}");
+            }
+        }
     }
 }
 
@@ -443,14 +469,27 @@ impl eframe::App for GeraApp {
                 None => {}
             }
         }
-        match self.tabs.active() {
+        let active = self.tabs.active();
+        if let Some(i) = self.tabs.doc_index(active) {
+            self.last_doc = Some(self.tabs.docs()[i].clone());
+        }
+        match active {
             HOME => {
-                egui::CentralPanel::default().show(ui, |ui| self.home(ui));
+                let action = egui::CentralPanel::default()
+                    .show(ui, |ui| home::show(ui, &self.recents, &self.status))
+                    .inner;
+                match action {
+                    Some(HomeAction::OpenDialog) => self.dialogs.open(ui.ctx()),
+                    Some(HomeAction::Open(p)) => self.open_path(ui.ctx(), p),
+                    Some(HomeAction::Forget(p)) => self.forget(&p),
+                    None => {}
+                }
             }
             TOOLS => {
-                egui::CentralPanel::default().show(ui, |ui| {
-                    ui.heading("Ferramentas");
-                });
+                let picked = egui::CentralPanel::default().show(ui, tools_hub::hub).inner;
+                if let Some(id) = picked {
+                    self.run_tool(ui.ctx(), id);
+                }
             }
             _ if !self.fullscreen => {
                 let mut cmd = None;

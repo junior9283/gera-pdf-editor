@@ -8,5 +8,6 @@ pub mod recents;
 pub mod store;
 pub mod tabs;
 pub mod tools;
+pub mod tools_catalog;
 pub mod transform;
 pub mod zoom;
