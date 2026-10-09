@@ -340,6 +340,13 @@ impl DocTab {
                     self.save_dest = None;
                     self.status = format!("Não foi possível salvar: {msg}");
                 }
+                // ligados à interface nas próximas tarefas (seleção, propriedades, impressão)
+                Response::Selection { .. }
+                | Response::DocumentText { .. }
+                | Response::Properties(_)
+                | Response::PropertiesFailed(_)
+                | Response::Exported { .. }
+                | Response::ExportFailed(_) => {}
             }
         }
     }

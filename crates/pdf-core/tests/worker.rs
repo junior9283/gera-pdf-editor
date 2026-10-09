@@ -157,3 +157,54 @@ fn render_is_served_while_a_long_search_is_running() {
         "o render ficou preso atrás da busca inteira"
     );
 }
+
+#[test]
+fn selection_text_and_properties_through_the_worker() {
+    let (_d, w, _) = opened(2);
+    w.send(Request::SelectText {
+        tag: 7,
+        page: 0,
+        a: (0.0, 0.0),
+        b: (10_000.0, 10_000.0),
+    });
+    match recv(&w) {
+        Response::Selection {
+            tag,
+            page,
+            selection,
+        } => {
+            assert_eq!((tag, page), (7, 0));
+            assert!(selection.text.contains("Hello"), "{:?}", selection.text);
+        }
+        other => panic!("{other:?}"),
+    }
+    w.send(Request::DocumentText { tag: 8 });
+    match recv(&w) {
+        Response::DocumentText { tag, text } => {
+            assert_eq!(tag, 8);
+            assert!(text.contains("Page 2"));
+        }
+        other => panic!("{other:?}"),
+    }
+    w.send(Request::Properties);
+    match recv(&w) {
+        Response::Properties(p) => assert_eq!(p.pages, 2),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn export_for_print_through_the_worker() {
+    let (dir, w, _) = opened(1);
+    let dest = dir.path().join("imprimir.pdf");
+    w.send(Request::ExportForPrint {
+        pending: vec![],
+        dest: dest.clone(),
+        with_annots: true,
+    });
+    match recv(&w) {
+        Response::Exported { dest: d } => assert_eq!(d, dest),
+        other => panic!("{other:?}"),
+    }
+    assert!(dest.exists());
+}

@@ -1,5 +1,8 @@
 use crate::error::PdfError;
-use crate::types::{AnnotInfo, DocSummary, NewAnnot, PdfRect, RenderedPage, Rotation, Word};
+use crate::types::{
+    AnnotInfo, DocProperties, DocSummary, NewAnnot, PdfRect, RenderedPage, Rotation, TextSelection,
+    Word,
+};
 use crate::PdfDoc;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,6 +51,24 @@ pub enum Request {
         pending: Vec<NewAnnot>,
         dest: PathBuf,
     },
+    /// Seleção pelo fluxo do texto entre `a` e `b` (pontos da página).
+    SelectText {
+        tag: u64,
+        page: i32,
+        a: (f32, f32),
+        b: (f32, f32),
+    },
+    /// Texto do documento inteiro (Selecionar tudo).
+    DocumentText {
+        tag: u64,
+    },
+    Properties,
+    /// Cópia para imprimir em `dest` (com as pendentes ou sem nenhuma anotação).
+    ExportForPrint {
+        pending: Vec<NewAnnot>,
+        dest: PathBuf,
+        with_annots: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -82,7 +103,24 @@ pub enum Response {
         annots: Vec<AnnotInfo>,
     },
     SaveFailed(String),
+    Selection {
+        tag: u64,
+        page: i32,
+        selection: TextSelection,
+    },
+    DocumentText {
+        tag: u64,
+        text: String,
+    },
+    Properties(DocProperties),
+    PropertiesFailed(String),
+    Exported {
+        dest: PathBuf,
+    },
+    ExportFailed(String),
 }
+
+const NO_DOC: &str = "nenhum documento aberto";
 
 /// Thread dedicada ao documento: o `Document` do MuPDF não é `Send`, então só ela o toca.
 pub struct Worker {
@@ -187,7 +225,7 @@ impl State {
             }
             Request::Save { pending, dest } => {
                 let Some(d) = self.doc.as_mut() else {
-                    send(Response::SaveFailed("nenhum documento aberto".into()));
+                    send(Response::SaveFailed(NO_DOC.into()));
                     return;
                 };
                 match d.save_with(&pending, &dest) {
@@ -197,6 +235,44 @@ impl State {
                     Err(e) => send(Response::SaveFailed(e.to_string())),
                 }
             }
+            Request::SelectText { tag, page, a, b } => {
+                let selection = self
+                    .doc
+                    .as_ref()
+                    .and_then(|d| d.select_text(page, a, b).ok())
+                    .unwrap_or_default();
+                send(Response::Selection {
+                    tag,
+                    page,
+                    selection,
+                });
+            }
+            Request::DocumentText { tag } => {
+                let text = self
+                    .doc
+                    .as_ref()
+                    .and_then(|d| d.document_text().ok())
+                    .unwrap_or_default();
+                send(Response::DocumentText { tag, text });
+            }
+            Request::Properties => match self.doc.as_ref().map(PdfDoc::properties) {
+                Some(Ok(p)) => send(Response::Properties(p)),
+                Some(Err(e)) => send(Response::PropertiesFailed(e.to_string())),
+                None => send(Response::PropertiesFailed(NO_DOC.into())),
+            },
+            Request::ExportForPrint {
+                pending,
+                dest,
+                with_annots,
+            } => match self
+                .doc
+                .as_ref()
+                .map(|d| d.export_for_print(&pending, &dest, with_annots))
+            {
+                Some(Ok(())) => send(Response::Exported { dest }),
+                Some(Err(e)) => send(Response::ExportFailed(e.to_string())),
+                None => send(Response::ExportFailed(NO_DOC.into())),
+            },
         }
     }
 
