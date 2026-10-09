@@ -85,6 +85,9 @@ pub enum AnnotKind {
     Other,
 }
 
+/// Início e fim de uma linha (pontos da página).
+pub type Segment = ((f32, f32), (f32, f32));
+
 /// Ponta de uma linha ou seta.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineEnd {
@@ -107,7 +110,7 @@ pub struct AnnotInfo {
     /// Cor de preenchimento (formas e caixa de texto).
     pub fill: Option<[f32; 3]>,
     /// Pontos de início e fim (linha e seta).
-    pub line: Option<((f32, f32), (f32, f32))>,
+    pub line: Option<Segment>,
     /// Tamanho e cor do texto (caixa de texto).
     pub font: Option<(f32, [f32; 3])>,
     /// Autor (/T); vazio quando não há.
@@ -314,6 +317,26 @@ pub enum AnnotOp {
     Delete {
         page: i32,
         id: i32,
+    },
+    /// Leva uma ponta da linha/seta para `to`.
+    MoveLinePoint {
+        page: i32,
+        id: i32,
+        end: LineEnd,
+        to: (f32, f32),
+    },
+    /// Preenchimento (formas) ou fundo (caixa de texto); `None` tira.
+    Fill {
+        page: i32,
+        id: i32,
+        color: Option<[f32; 3]>,
+    },
+    /// Tamanho e cor do texto da caixa de texto (a borda segue a cor do texto).
+    Font {
+        page: i32,
+        id: i32,
+        size: f32,
+        color: [f32; 3],
     },
 }
 

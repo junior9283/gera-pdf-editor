@@ -1,8 +1,8 @@
 use crate::annot_edit::{self, ColorEdit, Edit, History};
 use crate::error::{PdfError, Result};
 use crate::types::{
-    AnnotInfo, AnnotKind, AnnotOp, DocProperties, DocSummary, HistoryState, NewAnnot, OutlineItem,
-    PageSize, PdfRect, RenderedPage, Rotation, TextSelection, Word,
+    AnnotInfo, AnnotKind, AnnotOp, DocProperties, DocSummary, HistoryState, LineEnd, NewAnnot,
+    OutlineItem, PageSize, PdfRect, RenderedPage, Rotation, TextSelection, Word,
 };
 use mupdf::color::AnnotationColor;
 use mupdf::pdf::{
@@ -356,6 +356,13 @@ fn utf8_path(path: &Path) -> Result<&str> {
         .ok_or_else(|| PdfError::Engine("caminho não é UTF-8 válido".into()))
 }
 
+/// Cor RGB pedida pela interface como edição; `None` vira `absent`.
+fn rgb_edit(color: Option<[f32; 3]>, absent: ColorEdit) -> ColorEdit {
+    color.map_or(absent, |[red, green, blue]| {
+        ColorEdit::Set(AnnotationColor::Rgb { red, green, blue })
+    })
+}
+
 /// Contorno padrão das formas, linhas e caixa de texto: vermelho, 1 pt (como no Acrobat).
 fn outlined(mut a: PdfAnnotation) -> Result<PdfAnnotation> {
     a.set_color(AnnotationColor::Rgb {
@@ -573,15 +580,50 @@ impl PdfDoc {
                 return Ok(vec![page]);
             }
             AnnotOp::Move { page, id, dx, dy } => {
-                let (rect, ink) = annot_edit::geometry_of(&self.inner, page, id)?;
-                let (rect, ink) = annot_edit::moved(rect, ink, dx, dy);
-                Edit::Geometry {
-                    page,
-                    id,
-                    rect,
-                    ink,
+                if let Some((a, b)) = annot_edit::line_of(&self.inner, page, id)? {
+                    let shift = |p: (f32, f32)| (p.0 + dx, p.1 + dy);
+                    Edit::LinePoints {
+                        page,
+                        id,
+                        a: shift(a),
+                        b: shift(b),
+                    }
+                } else {
+                    let (rect, ink) = annot_edit::geometry_of(&self.inner, page, id)?;
+                    let (rect, ink) = annot_edit::moved(rect, ink, dx, dy);
+                    Edit::Geometry {
+                        page,
+                        id,
+                        rect,
+                        ink,
+                    }
                 }
             }
+            AnnotOp::MoveLinePoint { page, id, end, to } => {
+                let (a, b) = annot_edit::line_of(&self.inner, page, id)?
+                    .ok_or_else(|| PdfError::InvalidAnnotation("não é uma linha".into()))?;
+                let (a, b) = match end {
+                    LineEnd::Start => (to, b),
+                    LineEnd::End => (a, to),
+                };
+                Edit::LinePoints { page, id, a, b }
+            }
+            AnnotOp::Fill { page, id, color } => Edit::Fill {
+                page,
+                id,
+                color: rgb_edit(color, ColorEdit::Clear),
+            },
+            AnnotOp::Font {
+                page,
+                id,
+                size,
+                color,
+            } => Edit::Font {
+                page,
+                id,
+                size: size.clamp(4.0, 144.0),
+                color,
+            },
             AnnotOp::Resize { page, id, rect } => {
                 let (old, ink) = annot_edit::geometry_of(&self.inner, page, id)?;
                 let ink = annot_edit::scaled(old, rect, ink);
@@ -601,9 +643,7 @@ impl PdfDoc {
             } => Edit::Style {
                 page,
                 id,
-                color: color.map_or(ColorEdit::Keep, |[red, green, blue]| {
-                    ColorEdit::Set(AnnotationColor::Rgb { red, green, blue })
-                }),
+                color: rgb_edit(color, ColorEdit::Keep),
                 opacity,
                 width,
             },

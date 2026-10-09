@@ -3,9 +3,9 @@
 //! Cada mudança é uma [`Edit`] reversível: aplicá-la devolve a inversa. Apagar (e desfazer uma
 //! criação) só **esconde** a anotação (flag Hidden) — assim desfazer a traz de volta idêntica,
 //! mesmo que venha de outro programa. Ao salvar, as escondidas por nós saem de verdade.
-use crate::doc::annot_id;
+use crate::doc::{annot_id, rgb_of};
 use crate::error::{PdfError, Result};
-use crate::types::PdfRect;
+use crate::types::{PdfRect, Segment};
 use mupdf::color::AnnotationColor;
 use mupdf::pdf::{AnnotationFlags, PdfAnnotation, PdfAnnotationType, PdfDocument, PdfPage};
 use mupdf::{Point, Rect};
@@ -52,6 +52,26 @@ pub(crate) enum Edit {
         id: i32,
         text: String,
     },
+    /// Pontos da linha/seta (mover e puxar uma ponta).
+    LinePoints {
+        page: i32,
+        id: i32,
+        a: (f32, f32),
+        b: (f32, f32),
+    },
+    /// Preenchimento das formas (/IC) ou fundo da caixa de texto (/C).
+    Fill {
+        page: i32,
+        id: i32,
+        color: ColorEdit,
+    },
+    /// Fonte da caixa de texto (/DA).
+    Font {
+        page: i32,
+        id: i32,
+        size: f32,
+        color: [f32; 3],
+    },
 }
 
 impl Edit {
@@ -60,7 +80,10 @@ impl Edit {
             Self::Visibility { page, .. }
             | Self::Geometry { page, .. }
             | Self::Style { page, .. }
-            | Self::Contents { page, .. } => *page,
+            | Self::Contents { page, .. }
+            | Self::LinePoints { page, .. }
+            | Self::Fill { page, .. }
+            | Self::Font { page, .. } => *page,
         }
     }
 }
@@ -162,6 +185,20 @@ fn geometry(a: &PdfAnnotation) -> Result<(PdfRect, Option<Strokes>)> {
     }
 }
 
+/// Pontos atuais da linha `id`, ou `None` se a anotação não é linha.
+pub(crate) fn line_of(
+    doc: &PdfDocument,
+    page: i32,
+    id: i32,
+) -> Result<Option<Segment>> {
+    let (_, a) = find(doc, page, id)?;
+    if a.r#type()? != PdfAnnotationType::Line {
+        return Ok(None);
+    }
+    let (p, q) = a.line()?;
+    Ok(Some(((p.x, p.y), (q.x, q.y))))
+}
+
 /// Geometria atual da anotação `id`.
 pub(crate) fn geometry_of(
     doc: &PdfDocument,
@@ -181,7 +218,10 @@ pub(crate) fn apply_edit(
         Edit::Visibility { page, id, .. }
         | Edit::Geometry { page, id, .. }
         | Edit::Style { page, id, .. }
-        | Edit::Contents { page, id, .. } => (*page, *id),
+        | Edit::Contents { page, id, .. }
+        | Edit::LinePoints { page, id, .. }
+        | Edit::Fill { page, id, .. }
+        | Edit::Font { page, id, .. } => (*page, *id),
     };
     let (mut page_ref, mut a) = find(doc, page, id)?;
     let inverse = match edit {
@@ -219,11 +259,8 @@ pub(crate) fn apply_edit(
             width,
             ..
         } => {
-            let old_width = if is_ink(&a)? {
-                Some(a.border_width()?)
-            } else {
-                None
-            };
+            // só a espessura que vai mudar precisa voltar (vale para qualquer tipo com borda)
+            let old_width = width.map(|_| a.border_width()).transpose()?;
             let old_color = match a.color()? {
                 Some(c) => ColorEdit::Set(c),
                 None => ColorEdit::Clear,
@@ -240,6 +277,55 @@ pub(crate) fn apply_edit(
                 color: old_color,
                 opacity: old_opacity,
                 width: old_width,
+            }
+        }
+        Edit::LinePoints { a: p, b: q, .. } => {
+            let (op, oq) = a.line()?;
+            a.set_line(Point::new(p.0, p.1), Point::new(q.0, q.1))?;
+            Edit::LinePoints {
+                page,
+                id,
+                a: (op.x, op.y),
+                b: (oq.x, oq.y),
+            }
+        }
+        Edit::Fill { color, .. } => {
+            // a caixa de texto guarda o fundo em /C; as formas, em /IC
+            let text_box = a.r#type()? == PdfAnnotationType::FreeText;
+            let (key, current) = if text_box {
+                ("C", a.color()?)
+            } else {
+                ("IC", a.interior_color()?)
+            };
+            let old = current.map_or(ColorEdit::Clear, ColorEdit::Set);
+            match color {
+                ColorEdit::Keep => {}
+                ColorEdit::Set(c) if text_box => a.set_color(c)?,
+                ColorEdit::Set(c) => a.set_interior_color(c)?,
+                ColorEdit::Clear => a.object().dict_delete(key)?,
+            }
+            Edit::Fill {
+                page,
+                id,
+                color: old,
+            }
+        }
+        Edit::Font {
+            size,
+            color: [red, green, blue],
+            ..
+        } => {
+            let da = a
+                .default_appearance()?
+                .ok_or_else(|| PdfError::InvalidAnnotation("anotação sem fonte".into()))?;
+            let old = da.color.map(rgb_of).unwrap_or([0.0; 3]);
+            let color = AnnotationColor::Rgb { red, green, blue };
+            a.set_default_appearance(&da.font_name, size, Some(color))?;
+            Edit::Font {
+                page,
+                id,
+                size: da.size,
+                color: old,
             }
         }
         Edit::Contents { text, .. } => {
