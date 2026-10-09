@@ -8,6 +8,7 @@ pub mod pdf_date;
 pub mod prefs;
 pub mod print;
 pub mod recents;
+pub mod stamps;
 pub mod store;
 pub mod tabs;
 pub mod tools;

@@ -6,15 +6,28 @@ pub enum Tool {
     Underline,
     Note,
     Ink,
+    TextBox,
+    Rect,
+    Ellipse,
+    Line,
+    Arrow,
+    /// O carimbo escolhido fica no estado de edição.
+    Stamp,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 5] = [
+    pub const ALL: [Tool; 11] = [
         Tool::Select,
         Tool::Highlight,
         Tool::Underline,
         Tool::Note,
         Tool::Ink,
+        Tool::TextBox,
+        Tool::Rect,
+        Tool::Ellipse,
+        Tool::Line,
+        Tool::Arrow,
+        Tool::Stamp,
     ];
 
     pub fn label(self) -> &'static str {
@@ -24,6 +37,12 @@ impl Tool {
             Tool::Underline => "Sublinhar",
             Tool::Note => "Nota",
             Tool::Ink => "Desenhar",
+            Tool::TextBox => "Caixa de texto",
+            Tool::Rect => "Retângulo",
+            Tool::Ellipse => "Elipse",
+            Tool::Line => "Linha",
+            Tool::Arrow => "Seta",
+            Tool::Stamp => "Carimbo",
         }
     }
 }
@@ -37,7 +56,7 @@ mod tests {
         let mut labels: Vec<_> = Tool::ALL.iter().map(|t| t.label()).collect();
         labels.sort_unstable();
         labels.dedup();
-        assert_eq!(labels.len(), 5, "rótulos repetidos");
+        assert_eq!(labels.len(), Tool::ALL.len(), "rótulos repetidos");
         assert_eq!(Tool::default(), Tool::Select);
     }
 }

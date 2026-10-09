@@ -337,6 +337,9 @@ impl EditState {
                 }
             }
             Tool::Ink => self.draw_ink(ui, &response, pointer, page, map),
+            // gestos de criação chegam na tarefa 5 do plano da v1.1-B2b
+            Tool::TextBox | Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Arrow | Tool::Stamp => {
+            }
         }
         self.paint_selection(ui.painter(), page, map);
         self.paint_selected(ui.painter(), annots, page, map);
