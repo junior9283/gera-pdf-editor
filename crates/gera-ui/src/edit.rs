@@ -55,7 +55,7 @@ impl AnnotDrag {
         let (dx, dy) = self.offset();
         let r = self.rect;
         match self.grab {
-            Grab::Move => PdfRect::new(r.x0 + dx, r.y0 + dy, r.x1 + dx, r.y1 + dy),
+            Grab::Move => r.translated(dx, dy),
             Grab::Resize(h) => {
                 let (x, y) = h.point(r);
                 resized(r, h, (x + dx, y + dy), MIN_SIZE)
@@ -144,13 +144,17 @@ pub struct EditState {
     props: Option<PropsDraft>,
 }
 
-/// Anotações da página como (id, retângulo), na ordem de desenho.
-fn rects_on(annots: &[AnnotInfo], page: i32) -> Vec<(i32, PdfRect)> {
-    annots
+/// Folga do clique sobre uma anotação, em pixels da tela.
+const HIT_TOL: f32 = 3.0;
+
+/// A anotação da página sob `p` (a de cima), como (página, id). Só roda quando há clique.
+fn hit_at(annots: &[AnnotInfo], page: i32, p: (f32, f32), map: &PageMap) -> Option<(i32, i32)> {
+    let rects: Vec<_> = annots
         .iter()
         .filter(|a| a.page == page)
         .map(|a| (a.id, a.rect))
-        .collect()
+        .collect();
+    annot_hit(&rects, p, HIT_TOL / map.zoom).map(|id| (page, id))
 }
 
 fn find(annots: &[AnnotInfo], (page, id): (i32, i32)) -> Option<&AnnotInfo> {
@@ -172,8 +176,11 @@ fn paint_stroke(painter: &egui::Painter, points: &[(f32, f32)], map: &PageMap) {
 
 impl EditState {
     /// Cria uma anotação (vai ao worker, que a grava no documento em memória).
+    /// Vazia (nota em branco, clique sem traço) é ignorada sem aviso.
     pub fn add(&mut self, annot: NewAnnot) {
-        self.ops.push(AnnotOp::Create(annot));
+        if !annot.is_empty() {
+            self.ops.push(AnnotOp::Create(annot));
+        }
     }
 
     /// As edições geradas desde a última chamada, na ordem.
@@ -202,17 +209,11 @@ impl EditState {
         }
     }
 
-    /// Lista nova do worker: a seleção (e a janela de propriedades) só fica se a anotação existe.
+    /// Lista nova do worker: a seleção só fica se a anotação ainda existe (a janela de
+    /// propriedades se fecha sozinha em `props_window`).
     pub fn keep_valid_selection(&mut self, annots: &[AnnotInfo]) {
         if self.selected.is_some_and(|s| find(annots, s).is_none()) {
             self.selected = None;
-        }
-        if self
-            .props
-            .as_ref()
-            .is_some_and(|d| find(annots, (d.page, d.id)).is_none())
-        {
-            self.props = None;
         }
     }
 
@@ -344,8 +345,7 @@ impl EditState {
         page: i32,
         map: &PageMap,
     ) -> bool {
-        let rects = rects_on(annots, page);
-        let hit = |p| annot_hit(&rects, p, 3.0 / map.zoom).map(|id| (page, id));
+        let hit = |p| hit_at(annots, page, p, map);
         if response.double_clicked() {
             if let Some(note) = pointer
                 .and_then(hit)
@@ -424,11 +424,10 @@ impl EditState {
         map: &PageMap,
     ) {
         if response.secondary_clicked() {
-            let rects = rects_on(annots, page);
-            let hit = pointer.and_then(|p| annot_hit(&rects, p, 3.0 / map.zoom));
+            let hit = pointer.and_then(|p| hit_at(annots, page, p, map));
             self.menu_on_annot = hit.is_some();
-            if let Some(id) = hit {
-                self.selected = Some((page, id));
+            if hit.is_some() {
+                self.selected = hit;
             }
         }
         let on_annot = self.menu_on_annot && self.selected.is_some_and(|(p, _)| p == page);
@@ -645,10 +644,12 @@ impl EditState {
         match choice {
             Some(true) => {
                 let (page, text) = (draft.page, draft.text);
-                self.ops.push(match draft.target {
-                    NoteTarget::New(at) => AnnotOp::Create(NewAnnot::Note { page, at, text }),
-                    NoteTarget::Existing(id) => AnnotOp::SetContents { page, id, text },
-                });
+                match draft.target {
+                    NoteTarget::New(at) => self.add(NewAnnot::Note { page, at, text }),
+                    NoteTarget::Existing(id) => {
+                        self.ops.push(AnnotOp::SetContents { page, id, text })
+                    }
+                }
             }
             Some(false) => {}
             None => self.note_draft = Some(draft),
@@ -657,11 +658,14 @@ impl EditState {
 
     /// Pede ao worker para gravar o documento em `dest`; ignora se já está salvando. As edições
     /// feitas durante a gravação chegam ao worker depois dela e ficam como alterações novas.
-    pub fn save(&mut self, worker: &Worker, dest: PathBuf) {
-        if !self.saving {
-            self.saving = true;
-            worker.send(Request::Save { dest });
+    /// Devolve se o pedido foi enviado.
+    pub fn save(&mut self, worker: &Worker, dest: PathBuf) -> bool {
+        if self.saving {
+            return false;
         }
+        self.saving = true;
+        worker.send(Request::Save { dest });
+        true
     }
 }
 
@@ -702,8 +706,8 @@ mod tests {
     fn a_second_save_waits_for_the_first() {
         let worker = Worker::spawn(|| {});
         let mut edit = EditState::default();
-        edit.save(&worker, "x.pdf".into());
-        assert!(edit.saving);
+        assert!(edit.save(&worker, "x.pdf".into()));
+        assert!(!edit.save(&worker, "y.pdf".into()), "um salvamento por vez");
         edit.add(NewAnnot::Note {
             page: 0,
             at: (0.0, 0.0),

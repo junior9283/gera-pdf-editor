@@ -13,7 +13,8 @@ use app_state::print::{any_oversized, lp_args, PrintOptions};
 use app_state::transform::PageMap;
 use app_state::zoom::{self, Fit};
 use pdf_core::{
-    AnnotInfo, DocProperties, DocSummary, OutlineItem, PdfError, Request, Response, Worker,
+    AnnotInfo, DocProperties, DocSummary, HistoryState, OutlineItem, PdfError, Request, Response,
+    Worker,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -91,9 +92,7 @@ pub struct DocTab {
     /// Anotações visíveis do documento em memória (o worker manda a lista a cada mudança).
     pub(crate) annots: Vec<AnnotInfo>,
     /// Estado do histórico de edições no worker.
-    dirty: bool,
-    can_undo: bool,
-    can_redo: bool,
+    history: HistoryState,
     /// O motor de PDF (thread do worker) parou; já avisado.
     engine_stopped: bool,
     outline: Vec<OutlineItem>,
@@ -135,9 +134,7 @@ impl DocTab {
             search: SearchState::default(),
             edit: EditState::default(),
             annots: Vec::new(),
-            dirty: false,
-            can_undo: false,
-            can_redo: false,
+            history: HistoryState::default(),
             engine_stopped: false,
             outline: Vec::new(),
             opening: None,
@@ -155,7 +152,7 @@ impl DocTab {
 
     /// Há edições ainda não gravadas no arquivo?
     pub fn is_dirty(&self) -> bool {
-        self.dirty
+        self.history.dirty
     }
 
     /// Fechar esta aba precisa de confirmação (pendências ou salvamento em andamento)?
@@ -170,8 +167,8 @@ impl DocTab {
         };
         match cmd {
             DocCommand::Save => self.save(),
-            DocCommand::Undo if self.can_undo => self.worker.send(Request::Undo),
-            DocCommand::Redo if self.can_redo => self.worker.send(Request::Redo),
+            DocCommand::Undo if self.history.can_undo => self.worker.send(Request::Undo),
+            DocCommand::Redo if self.history.can_redo => self.worker.send(Request::Redo),
             DocCommand::Undo | DocCommand::Redo => {}
             DocCommand::Find => self.focus_search = true,
             DocCommand::Copy => self.edit.copy(ctx),
@@ -217,7 +214,7 @@ impl DocTab {
 
     /// Salvar: só quando há o que gravar.
     pub fn save(&mut self) {
-        if let Some(view) = self.view.as_ref().filter(|_| self.dirty) {
+        if let Some(view) = self.view.as_ref().filter(|_| self.history.dirty) {
             self.edit.save(&self.worker, view.path.clone());
         }
     }
@@ -246,9 +243,8 @@ impl DocTab {
     }
 
     pub fn save_as(&mut self, dest: PathBuf) {
-        if self.view.is_some() && !self.edit.saving {
-            self.save_dest = Some(dest.clone());
-            self.edit.save(&self.worker, dest);
+        if self.view.is_some() && self.edit.save(&self.worker, dest.clone()) {
+            self.save_dest = Some(dest);
         }
     }
 
@@ -277,7 +273,7 @@ impl DocTab {
 
     fn on_opened(&mut self, summary: DocSummary) {
         self.annots = summary.annots;
-        (self.dirty, self.can_undo, self.can_redo) = (false, false, false);
+        self.history = HistoryState::default();
         self.outline = summary.outline;
         self.password_prompt = None;
         self.edit.reset();
@@ -377,10 +373,10 @@ impl DocTab {
                     selection,
                 } => self.edit.on_selection(tag, page, selection),
                 Response::DocumentText { tag, text } => self.edit.on_document_text(tag, text),
-                Response::Saved { annots } => {
+                Response::Saved { annots, history } => {
                     self.edit.saving = false;
                     self.annots = annots;
-                    (self.dirty, self.can_undo, self.can_redo) = (false, false, false);
+                    self.history = history;
                     self.status = "Salvo.".into();
                     if let Some(dest) = self.save_dest.take() {
                         if let Some(view) = self.view.as_mut() {
@@ -389,12 +385,11 @@ impl DocTab {
                         self.events.push(DocEvent::Renamed(dest));
                     }
                 }
-                Response::SaveFailed(msg) => {
-                    // as edições continuam no documento (ainda sujo), mas o histórico recomeçou
+                Response::SaveFailed { error, history } => {
                     self.edit.saving = false;
-                    (self.can_undo, self.can_redo) = (false, false);
+                    self.history = history;
                     self.save_dest = None;
-                    self.status = format!("Não foi possível salvar: {msg}");
+                    self.status = format!("Não foi possível salvar: {error}");
                 }
                 Response::Properties(p) => {
                     self.properties = Some(p);
@@ -408,15 +403,13 @@ impl DocTab {
                     self.status = format!("Não foi possível preparar a impressão: {msg}");
                 }
                 Response::AnnotsChanged {
-                    annots,
                     pages,
-                    can_undo,
-                    can_redo,
-                    dirty,
+                    annots,
+                    history,
                 } => {
-                    self.edit.keep_valid_selection(&annots);
-                    self.annots = annots;
-                    (self.dirty, self.can_undo, self.can_redo) = (dirty, can_undo, can_redo);
+                    replace_pages(&mut self.annots, &pages, annots);
+                    self.edit.keep_valid_selection(&self.annots);
+                    self.history = history;
                     if let Some(view) = self.view.as_mut() {
                         for page in pages {
                             view.invalidate_page(page);
@@ -499,7 +492,7 @@ impl DocTab {
     /// Barra de status (some na tela cheia).
     /// Barra de status; `shell` é a mensagem da casca (erros do seletor, de abertura...).
     pub fn show_status(&mut self, ui: &mut egui::Ui, shell: &str) {
-        let text = status_line(shell, &self.status, self.dirty);
+        let text = status_line(shell, &self.status, self.history.dirty);
         egui::Panel::bottom("status").show(ui, |ui| ui.label(text));
     }
 
@@ -731,6 +724,13 @@ impl DocTab {
     }
 }
 
+/// Troca na lista as anotações das `pages` pelas novas, mantendo a ordem por página.
+fn replace_pages(all: &mut Vec<AnnotInfo>, pages: &[i32], new: Vec<AnnotInfo>) {
+    all.retain(|a| !pages.contains(&a.page));
+    all.extend(new);
+    all.sort_by_key(|a| a.page); // estável: a ordem dentro da página é a de desenho
+}
+
 /// Texto da barra de status: a mensagem da casca (se houver) vem antes da do documento.
 fn status_line(shell: &str, doc: &str, unsaved: bool) -> String {
     let mut line = match (shell.is_empty(), doc.is_empty()) {
@@ -798,5 +798,23 @@ mod tests {
             false,
         );
         assert!(line.starts_with("Esse arquivo já está aberto"), "{line}");
+    }
+
+    #[test]
+    fn changed_pages_replace_only_their_annotations() {
+        let a = |page, id| AnnotInfo {
+            id,
+            kind: pdf_core::AnnotKind::Note,
+            page,
+            rect: pdf_core::PdfRect::new(0.0, 0.0, 1.0, 1.0),
+            contents: String::new(),
+            color: None,
+            opacity: 1.0,
+            width: None,
+        };
+        let mut all = vec![a(0, 1), a(1, 2), a(1, 3), a(2, 4)];
+        replace_pages(&mut all, &[1], vec![a(1, 3), a(1, 5)]);
+        let ids: Vec<_> = all.iter().map(|x| x.id).collect();
+        assert_eq!(ids, [1, 3, 5, 4]);
     }
 }

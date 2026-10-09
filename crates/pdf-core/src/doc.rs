@@ -1,8 +1,8 @@
 use crate::annot_edit::{self, Edit, History};
 use crate::error::{PdfError, Result};
 use crate::types::{
-    AnnotInfo, AnnotKind, AnnotOp, DocProperties, DocSummary, NewAnnot, OutlineItem, PageSize,
-    PdfRect, RenderedPage, Rotation, TextSelection, Word,
+    AnnotInfo, AnnotKind, AnnotOp, DocProperties, DocSummary, HistoryState, NewAnnot, OutlineItem,
+    PageSize, PdfRect, RenderedPage, Rotation, TextSelection, Word,
 };
 use mupdf::color::AnnotationColor;
 use mupdf::pdf::{
@@ -37,7 +37,7 @@ const MAX_HITS_PER_PAGE: u32 = 512;
 pub struct PdfDoc {
     pub(crate) inner: PdfDocument,
     pub(crate) path: PathBuf,
-    /// Guardada só em memória, para reabrir o arquivo (ex.: descartar mudanças após falha ao salvar).
+    /// Guardada só em memória, para reabrir o arquivo (`save_with` descarta as mudanças em erro).
     pub(crate) password: Option<String>,
     /// Desfazer/refazer das edições de anotação desde a última gravação.
     history: History,
@@ -295,11 +295,9 @@ fn add_one(page: &mut PdfPage, a: &NewAnnot) -> Result<PdfAnnotation> {
         NewAnnot::Note { at, text, .. } => {
             page.add_text_annotation(Rect::new(at.0, at.1, at.0 + 24.0, at.1 + 24.0), text)?
         }
-        NewAnnot::Ink { strokes, .. } => page.add_ink_annotation(
-            strokes
-                .iter()
-                .map(|s| s.iter().map(|&(x, y)| Point::new(x, y))),
-        )?,
+        NewAnnot::Ink { strokes, .. } => {
+            page.add_ink_annotation(annot_edit::ink_points(strokes))?
+        }
     })
 }
 
@@ -389,14 +387,6 @@ impl PdfDoc {
     /// Cria as anotações `pending` e grava (atalho dos testes). Em qualquer erro descarta as
     /// mudanças em memória (relê do disco) e devolve o erro.
     pub fn save_with(&mut self, pending: &[NewAnnot], dest: &Path) -> Result<()> {
-        let count = self.page_count()?;
-        if let Some(bad) = pending
-            .iter()
-            .map(NewAnnot::page)
-            .find(|p| *p < 0 || *p >= count)
-        {
-            return Err(PdfError::PageOutOfRange(bad));
-        }
         let result = pending
             .iter()
             .try_for_each(|a| self.apply(AnnotOp::Create(a.clone())).map(drop))
@@ -466,11 +456,18 @@ impl PdfDoc {
             AnnotOp::Create(a) => {
                 let page = a.page();
                 self.check_page(page)?;
+                if a.is_empty() {
+                    return Err(PdfError::InvalidAnnotation("anotação vazia".into()));
+                }
                 let mut page_ref = self.inner.load_pdf_page(page)?;
                 let annot = add_one(&mut page_ref, &a)?;
                 page_ref.update()?;
                 let id = annot_id(&annot)?;
-                self.history.record(Edit::Hide { page, id });
+                self.history.record(Edit::Visibility {
+                    page,
+                    id,
+                    hidden: true,
+                });
                 return Ok(vec![page]);
             }
             AnnotOp::Move { page, id, dx, dy } => {
@@ -507,7 +504,11 @@ impl PdfDoc {
                 width,
             },
             AnnotOp::SetContents { page, id, text } => Edit::Contents { page, id, text },
-            AnnotOp::Delete { page, id } => Edit::Hide { page, id },
+            AnnotOp::Delete { page, id } => Edit::Visibility {
+                page,
+                id,
+                hidden: true,
+            },
         };
         let page = edit.page();
         let inverse = annot_edit::apply_edit(&self.inner, &mut self.history.hidden, edit)?;
@@ -533,6 +534,14 @@ impl PdfDoc {
     }
 
     /// Há edições desde a última gravação?
+    pub fn history_state(&self) -> HistoryState {
+        HistoryState {
+            can_undo: self.can_undo(),
+            can_redo: self.can_redo(),
+            dirty: self.is_dirty(),
+        }
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.unsaved || self.history.can_undo()
     }

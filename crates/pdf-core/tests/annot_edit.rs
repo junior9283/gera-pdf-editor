@@ -273,3 +273,21 @@ fn failed_save_keeps_the_edits_and_stays_dirty() {
         1
     );
 }
+
+#[test]
+fn empty_annotations_are_refused() {
+    let (_d, _p, mut d) = doc();
+    let blank = NewAnnot::Note {
+        page: 0,
+        at: (10.0, 10.0),
+        text: "  ".into(),
+    };
+    let dot = NewAnnot::Ink {
+        page: 0,
+        strokes: vec![vec![(5.0, 5.0)]],
+    };
+    for a in [blank, dot] {
+        assert!(d.apply(AnnotOp::Create(a)).is_err());
+    }
+    assert!(d.annotations(0).unwrap().is_empty() && !d.is_dirty());
+}

@@ -26,6 +26,11 @@ impl PdfRect {
         self.y1 - self.y0
     }
 
+    /// O mesmo retângulo deslocado de (`dx`, `dy`).
+    pub fn translated(&self, dx: f32, dy: f32) -> PdfRect {
+        PdfRect::new(self.x0 + dx, self.y0 + dy, self.x1 + dx, self.y1 + dy)
+    }
+
     pub fn intersects(&self, o: &PdfRect) -> bool {
         self.x0 < o.x1 && o.x0 < self.x1 && self.y0 < o.y1 && o.y0 < self.y1
     }
@@ -296,4 +301,13 @@ mod tests {
             assert!(!info(k).movable() && !info(k).resizable(), "{k:?}");
         }
     }
+}
+
+/// Estado do desfazer/refazer das edições de anotação.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HistoryState {
+    pub can_undo: bool,
+    pub can_redo: bool,
+    /// Há edições ainda não gravadas no arquivo.
+    pub dirty: bool,
 }

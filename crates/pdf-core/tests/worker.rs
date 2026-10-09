@@ -96,13 +96,16 @@ fn save_and_failed_open() {
     assert!(matches!(recv(&w), Response::AnnotsChanged { .. }));
     w.send(Request::Save { dest: path });
     match recv(&w) {
-        Response::Saved { annots } => assert_eq!(annots.len(), 1),
+        Response::Saved { annots, history } => {
+            assert_eq!(annots.len(), 1);
+            assert!(!history.dirty && !history.can_undo);
+        }
         other => panic!("{other:?}"),
     }
     w.send(Request::Save {
         dest: dir.path().join("nada").join("x.pdf"),
     });
-    assert!(matches!(recv(&w), Response::SaveFailed(_)));
+    assert!(matches!(recv(&w), Response::SaveFailed { .. }));
     w.send(Request::Open {
         path: dir.path().join("nao_existe.pdf"),
         password: None,
@@ -122,19 +125,17 @@ fn annotation_edits_through_the_worker() {
         Response::AnnotsChanged {
             annots,
             pages,
-            can_undo,
-            dirty,
-            ..
+            history,
         } => {
             assert_eq!(pages, vec![0]);
-            assert!(can_undo && dirty);
+            assert!(history.can_undo && history.dirty);
             annots[0].id
         }
         other => panic!("{other:?}"),
     };
     w.send(Request::Undo);
     assert!(
-        matches!(recv(&w), Response::AnnotsChanged { ref annots, can_redo: true, .. } if annots.is_empty())
+        matches!(recv(&w), Response::AnnotsChanged { ref annots, history, .. } if annots.is_empty() && history.can_redo)
     );
     w.send(Request::Annot(AnnotOp::Delete {
         page: 0,

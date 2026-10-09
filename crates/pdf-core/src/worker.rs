@@ -1,6 +1,7 @@
 use crate::error::PdfError;
 use crate::types::{
-    AnnotInfo, AnnotOp, DocProperties, DocSummary, PdfRect, RenderedPage, Rotation, TextSelection,
+    AnnotInfo, AnnotOp, DocProperties, DocSummary, HistoryState, PdfRect, RenderedPage, Rotation,
+    TextSelection,
 };
 use crate::PdfDoc;
 use std::path::PathBuf;
@@ -61,7 +62,7 @@ pub enum Request {
         tag: u64,
     },
     Properties,
-    /// Cópia para imprimir em `dest` (com as pendentes ou sem nenhuma anotação).
+    /// Cópia para imprimir em `dest` (o documento em memória, com ou sem as anotações).
     ExportForPrint {
         dest: PathBuf,
         with_annots: bool,
@@ -93,8 +94,13 @@ pub enum Response {
     },
     Saved {
         annots: Vec<AnnotInfo>,
+        history: HistoryState,
     },
-    SaveFailed(String),
+    /// Gravação falhou: as edições continuam em memória, o histórico pode ter recomeçado.
+    SaveFailed {
+        error: String,
+        history: HistoryState,
+    },
     Selection {
         tag: u64,
         page: i32,
@@ -110,14 +116,12 @@ pub enum Response {
         dest: PathBuf,
     },
     ExportFailed(String),
-    /// As anotações mudaram (edição, desfazer ou refazer): lista visível completa, páginas a
-    /// renderizar de novo e o estado do histórico.
+    /// As anotações mudaram (edição, desfazer ou refazer): páginas mudadas (a renderizar de
+    /// novo), as anotações visíveis delas e o estado do histórico.
     AnnotsChanged {
-        annots: Vec<AnnotInfo>,
         pages: Vec<i32>,
-        can_undo: bool,
-        can_redo: bool,
-        dirty: bool,
+        annots: Vec<AnnotInfo>,
+        history: HistoryState,
     },
     AnnotFailed(String),
 }
@@ -219,15 +223,24 @@ impl State {
             }
             Request::Save { dest } => {
                 let Some(d) = self.doc.as_mut() else {
-                    send(Response::SaveFailed(NO_DOC.into()));
+                    send(Response::SaveFailed {
+                        error: NO_DOC.into(),
+                        history: HistoryState::default(),
+                    });
                     return;
                 };
-                match d.save(&dest) {
-                    Ok(()) => send(Response::Saved {
+                let result = d.save(&dest);
+                let history = d.history_state();
+                send(match result {
+                    Ok(()) => Response::Saved {
                         annots: d.all_annotations().unwrap_or_default(),
-                    }),
-                    Err(e) => send(Response::SaveFailed(e.to_string())),
-                }
+                        history,
+                    },
+                    Err(e) => Response::SaveFailed {
+                        error: e.to_string(),
+                        history,
+                    },
+                });
             }
             Request::Annot(op) => self.edit(send, |d| d.apply(op)),
             Request::Undo => self.edit(send, PdfDoc::undo),
@@ -277,11 +290,12 @@ impl State {
         };
         match f(d) {
             Ok(pages) => send(Response::AnnotsChanged {
-                annots: d.all_annotations().unwrap_or_default(),
+                annots: pages
+                    .iter()
+                    .flat_map(|&p| d.annotations(p).unwrap_or_default())
+                    .collect(),
                 pages,
-                can_undo: d.can_undo(),
-                can_redo: d.can_redo(),
-                dirty: d.is_dirty(),
+                history: d.history_state(),
             }),
             Err(e) => send(Response::AnnotFailed(e.to_string())),
         }

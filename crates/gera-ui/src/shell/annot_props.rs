@@ -1,5 +1,5 @@
 //! Janela "Propriedades da anotação": cor, opacidade e espessura, aplicadas na hora.
-use pdf_core::{AnnotInfo, AnnotKind, AnnotOp};
+use pdf_core::{AnnotInfo, AnnotOp};
 
 /// As cores da paleta de comentários do Acrobat.
 pub const PALETTE: [(&str, [f32; 3]); 8] = [
@@ -66,7 +66,7 @@ impl PropsDraft {
             id: info.id,
             color,
             opacity: from_percent(self.opacity),
-            width: (info.kind == AnnotKind::Ink).then_some(self.width),
+            width: info.width.map(|_| self.width),
         }
     }
 }
@@ -124,7 +124,7 @@ pub fn window(
             if committed(&r) {
                 op = Some(draft.style(info, info.color));
             }
-            if info.kind == AnnotKind::Ink {
+            if info.width.is_some() {
                 let r = ui.add(
                     egui::Slider::new(&mut draft.width, WIDTHS)
                         .suffix(" pt")
@@ -142,7 +142,7 @@ pub fn window(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pdf_core::PdfRect;
+    use pdf_core::{AnnotKind, PdfRect};
 
     #[test]
     fn palette_has_eight_distinct_colors() {
@@ -160,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn style_keeps_width_only_for_ink() {
+    fn style_carries_width_only_when_the_annotation_has_one() {
         let mut info = AnnotInfo {
             id: 7,
             kind: AnnotKind::Highlight,
@@ -169,7 +169,7 @@ mod tests {
             contents: String::new(),
             color: Some([1.0, 0.9, 0.0]),
             opacity: 0.4,
-            width: Some(3.0),
+            width: None,
         };
         let mut d = PropsDraft::new(&info);
         d.sync(&info);
@@ -177,7 +177,8 @@ mod tests {
             d.style(&info, None),
             AnnotOp::Style { id: 7, page: 1, width: None, opacity, .. } if opacity == 0.4
         ));
-        info.kind = AnnotKind::Ink;
+        info.width = Some(3.0);
+        d.sync(&info);
         assert!(matches!(
             d.style(&info, None),
             AnnotOp::Style { width: Some(w), .. } if w == 3.0

@@ -17,13 +17,11 @@ pub(crate) type Strokes = Vec<Vec<(f32, f32)>>;
 /// Mudança elementar e reversível numa anotação.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Edit {
-    Hide {
+    /// Esconde (apagar, desfazer criar) ou mostra de novo.
+    Visibility {
         page: i32,
         id: i32,
-    },
-    Show {
-        page: i32,
-        id: i32,
+        hidden: bool,
     },
     /// Retângulo e, para desenho, os traços (mover e redimensionar).
     Geometry {
@@ -49,8 +47,7 @@ pub(crate) enum Edit {
 impl Edit {
     pub(crate) fn page(&self) -> i32 {
         match self {
-            Self::Hide { page, .. }
-            | Self::Show { page, .. }
+            Self::Visibility { page, .. }
             | Self::Geometry { page, .. }
             | Self::Style { page, .. }
             | Self::Contents { page, .. } => *page,
@@ -84,36 +81,33 @@ impl History {
 
     /// Desfaz o último passo; devolve a página mudada (`None` se não havia o que desfazer).
     pub(crate) fn undo(&mut self, doc: &PdfDocument) -> Result<Option<i32>> {
-        let Some(inverse) = self.undo.pop() else {
-            return Ok(None);
-        };
-        let page = inverse.page();
-        match apply_edit(doc, &mut self.hidden, inverse.clone()) {
-            Ok(forward) => {
-                self.redo.push(forward);
-                Ok(Some(page))
-            }
-            Err(e) => {
-                self.undo.push(inverse);
-                Err(e)
-            }
-        }
+        step(doc, &mut self.hidden, &mut self.undo, &mut self.redo)
     }
 
     pub(crate) fn redo(&mut self, doc: &PdfDocument) -> Result<Option<i32>> {
-        let Some(forward) = self.redo.pop() else {
-            return Ok(None);
-        };
-        let page = forward.page();
-        match apply_edit(doc, &mut self.hidden, forward.clone()) {
-            Ok(inverse) => {
-                self.undo.push(inverse);
-                Ok(Some(page))
-            }
-            Err(e) => {
-                self.redo.push(forward);
-                Err(e)
-            }
+        step(doc, &mut self.hidden, &mut self.redo, &mut self.undo)
+    }
+}
+
+/// Aplica o topo de `from` e guarda a inversa em `to`; em erro, nada muda.
+fn step(
+    doc: &PdfDocument,
+    hidden: &mut HashSet<(i32, i32)>,
+    from: &mut Vec<Edit>,
+    to: &mut Vec<Edit>,
+) -> Result<Option<i32>> {
+    let Some(edit) = from.pop() else {
+        return Ok(None);
+    };
+    let page = edit.page();
+    match apply_edit(doc, hidden, edit.clone()) {
+        Ok(inverse) => {
+            to.push(inverse);
+            Ok(Some(page))
+        }
+        Err(e) => {
+            from.push(edit);
+            Err(e)
         }
     }
 }
@@ -139,19 +133,32 @@ fn strokes_of(a: &PdfAnnotation) -> Result<Strokes> {
         .collect())
 }
 
+/// Traços no formato do MuPDF (o inverso de `strokes_of`).
+pub(crate) fn ink_points(
+    strokes: &[Vec<(f32, f32)>],
+) -> impl Iterator<Item = impl Iterator<Item = Point> + '_> + '_ {
+    strokes
+        .iter()
+        .map(|s| s.iter().map(|&(x, y)| Point::new(x, y)))
+}
+
 /// Retângulo e traços atuais (o estado que uma `Geometry` restaura).
+fn geometry(a: &PdfAnnotation) -> Result<(PdfRect, Option<Strokes>)> {
+    // o desenho não tem /Rect próprio: o MuPDF o calcula a partir dos traços
+    if is_ink(a)? {
+        Ok((a.bounds()?.into(), Some(strokes_of(a)?)))
+    } else {
+        Ok((a.rect()?.into(), None))
+    }
+}
+
+/// Geometria atual da anotação `id`.
 pub(crate) fn geometry_of(
     doc: &PdfDocument,
     page: i32,
     id: i32,
 ) -> Result<(PdfRect, Option<Strokes>)> {
-    let (_, a) = find(doc, page, id)?;
-    // o desenho não tem /Rect próprio: o MuPDF o calcula a partir dos traços
-    if is_ink(&a)? {
-        Ok((a.bounds()?.into(), Some(strokes_of(&a)?)))
-    } else {
-        Ok((a.rect()?.into(), None))
-    }
+    geometry(&find(doc, page, id)?.1)
 }
 
 /// Aplica `edit` e devolve a mudança inversa (lida do estado de antes).
@@ -160,41 +167,35 @@ pub(crate) fn apply_edit(
     hidden: &mut HashSet<(i32, i32)>,
     edit: Edit,
 ) -> Result<Edit> {
+    let (page, id) = match &edit {
+        Edit::Visibility { page, id, .. }
+        | Edit::Geometry { page, id, .. }
+        | Edit::Style { page, id, .. }
+        | Edit::Contents { page, id, .. } => (*page, *id),
+    };
+    let (mut page_ref, mut a) = find(doc, page, id)?;
     let inverse = match edit {
-        Edit::Hide { page, id } | Edit::Show { page, id } => {
-            let hide = matches!(edit, Edit::Hide { .. });
-            let (mut page_ref, mut a) = find(doc, page, id)?;
+        Edit::Visibility { hidden: hide, .. } => {
             let mut flags = a.flags()?;
             flags.set(AnnotationFlags::IS_HIDDEN, hide);
             a.set_flags(flags)?;
-            a.update()?;
-            page_ref.update()?;
             if hide {
                 hidden.insert((page, id));
-                Edit::Show { page, id }
             } else {
                 hidden.remove(&(page, id));
-                Edit::Hide { page, id }
+            }
+            Edit::Visibility {
+                page,
+                id,
+                hidden: !hide,
             }
         }
-        Edit::Geometry {
-            page,
-            id,
-            rect,
-            ink,
-        } => {
-            let (old_rect, old_ink) = geometry_of(doc, page, id)?;
-            let (mut page_ref, mut a) = find(doc, page, id)?;
+        Edit::Geometry { rect, ink, .. } => {
+            let (old_rect, old_ink) = geometry(&a)?;
             match &ink {
-                Some(strokes) => a.set_ink_list(
-                    strokes
-                        .iter()
-                        .map(|s| s.iter().map(|&(x, y)| Point::new(x, y))),
-                )?,
+                Some(strokes) => a.set_ink_list(ink_points(strokes))?,
                 None => a.set_rect(Rect::from(rect))?,
             }
-            a.update()?;
-            page_ref.update()?;
             Edit::Geometry {
                 page,
                 id,
@@ -203,13 +204,11 @@ pub(crate) fn apply_edit(
             }
         }
         Edit::Style {
-            page,
-            id,
             color,
             opacity,
             width,
+            ..
         } => {
-            let (mut page_ref, mut a) = find(doc, page, id)?;
             let old = Edit::Style {
                 page,
                 id,
@@ -228,16 +227,11 @@ pub(crate) fn apply_edit(
             if let Some(w) = width {
                 a.set_border_width(w.max(0.0))?;
             }
-            a.update()?;
-            page_ref.update()?;
             old
         }
-        Edit::Contents { page, id, text } => {
-            let (mut page_ref, mut a) = find(doc, page, id)?;
+        Edit::Contents { text, .. } => {
             let old = a.contents()?.unwrap_or_default().to_owned();
             a.set_contents(&text)?;
-            a.update()?;
-            page_ref.update()?;
             Edit::Contents {
                 page,
                 id,
@@ -245,6 +239,8 @@ pub(crate) fn apply_edit(
             }
         }
     };
+    a.update()?;
+    page_ref.update()?;
     Ok(inverse)
 }
 
@@ -255,7 +251,7 @@ pub(crate) fn moved(
     dx: f32,
     dy: f32,
 ) -> (PdfRect, Option<Strokes>) {
-    let r = PdfRect::new(rect.x0 + dx, rect.y0 + dy, rect.x1 + dx, rect.y1 + dy);
+    let r = rect.translated(dx, dy);
     let ink = ink.map(|s| {
         s.into_iter()
             .map(|st| st.into_iter().map(|(x, y)| (x + dx, y + dy)).collect())
