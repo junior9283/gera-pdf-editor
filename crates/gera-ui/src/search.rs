@@ -99,8 +99,10 @@ mod tests {
     }
 
     fn state() -> SearchState {
-        let mut s = SearchState::default();
-        s.id = 5;
+        let mut s = SearchState {
+            id: 5,
+            ..Default::default()
+        };
         s.on_hits(5, 0, vec![r(1.0)]);
         s.on_hits(5, 2, vec![r(2.0), r(3.0)]);
         s.on_done(5);
@@ -148,9 +150,11 @@ mod tests {
 
     #[test]
     fn empty_results_report_clearly() {
-        let mut s = SearchState::default();
-        s.text = "xyz".into();
-        s.id = 1;
+        let mut s = SearchState {
+            text: "xyz".into(),
+            id: 1,
+            ..Default::default()
+        };
         s.on_done(1);
         assert_eq!(s.summary(), "Sem resultados");
         s.text.clear();
