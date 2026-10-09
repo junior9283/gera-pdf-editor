@@ -22,20 +22,24 @@ else
 fi
 echo "amostra: $LABEL"
 
+# executa o app em modo de medição; sem resposta em 60 s a sessão gráfica provavelmente está bloqueada
+bench() {
+  timeout 60 "$BIN" "$@" "$SAMPLE" || { echo "FALHA: o app não respondeu em 60 s (sessão gráfica ativa e desbloqueada?)" >&2; exit 1; }
+}
 field() { grep -o "$1=[0-9]*" <<<"$2" | cut -d= -f2; } # extrai um campo numérico da saída BENCH
 median() { printf '%s\n' "$@" | sort -n | sed -n "$((($# + 1) / 2))p"; }
 
 # a primeira execução aquece o cache de disco; vale a mediana das seguintes
-"$BIN" --bench-open "$SAMPLE" >/dev/null
+bench --bench-open >/dev/null
 MS_LIST=(); RSS_LIST=()
 for _ in $(seq "$RUNS"); do
-  OUT=$("$BIN" --bench-open "$SAMPLE" | grep '^BENCH')
+  OUT=$(bench --bench-open | grep '^BENCH')
   MS_LIST+=("$(field open_ms "$OUT")"); RSS_LIST+=("$(field rss_kb "$OUT")")
 done
 MS=$(median "${MS_LIST[@]}"); RSS=$(median "${RSS_LIST[@]}")
 
 # percurso por todas as páginas: a memória não pode crescer sem limite ao rolar
-SCROLL=$("$BIN" --bench-scroll "$SAMPLE" | grep '^BENCH scroll')
+SCROLL=$(bench --bench-scroll | grep '^BENCH scroll')
 RSS_SCROLL=$(field rss_kb "$SCROLL")
 
 echo "binario_bytes=$SIZE (limite $MAX_BIN)"

@@ -63,6 +63,20 @@ fn paint_stroke(painter: &egui::Painter, points: &[(f32, f32)], origin: egui::Po
 }
 
 impl EditState {
+    /// Guarda uma anotação nova. Recusa durante o salvamento: o que for criado agora seria
+    /// descartado quando a resposta `Saved` limpar as pendentes.
+    pub fn add(&mut self, annot: NewAnnot) -> bool {
+        !self.saving && self.pending.add(annot)
+    }
+
+    pub fn undo(&mut self) -> bool {
+        !self.saving && self.pending.undo()
+    }
+
+    pub fn redo(&mut self) -> bool {
+        !self.saving && self.pending.redo()
+    }
+
     /// Descarta anotações pendentes e gestos (ao abrir outro documento ou depois de salvar).
     pub fn reset(&mut self) {
         self.pending.clear();
@@ -89,6 +103,11 @@ impl EditState {
         let pointer = response
             .interact_pointer_pos()
             .map(|p| page_point(p, rect.min, zoom));
+        if self.saving {
+            // durante o salvamento só mostra as pendentes: gestos novos seriam perdidos
+            self.paint_pending(ui.painter(), page, rect.min, zoom);
+            return;
+        }
         match self.tool {
             Tool::Select | Tool::Highlight | Tool::Underline => {
                 self.drag_select(ui, worker, &response, pointer, page, rect, zoom)
@@ -158,7 +177,7 @@ impl EditState {
         }
         if response.drag_stopped() {
             let stroke = std::mem::take(&mut self.stroke);
-            self.pending.add(NewAnnot::Ink {
+            self.add(NewAnnot::Ink {
                 page,
                 strokes: vec![stroke],
             });
@@ -215,12 +234,15 @@ impl EditState {
                 ctx.copy_text(selection_text(&words));
             }
         } else if let Some(annot) = annot_from_words(tool, page, words) {
-            self.pending.add(annot);
+            self.add(annot);
         }
     }
 
     /// Janelinha para digitar o texto de uma nota.
     pub fn note_window(&mut self, ui: &mut egui::Ui) {
+        if self.saving {
+            return; // o rascunho espera o fim do salvamento
+        }
         let Some((page, at, mut text)) = self.note_draft.take() else {
             return;
         };
@@ -240,7 +262,7 @@ impl EditState {
             });
         match choice {
             Some(true) => {
-                self.pending.add(NewAnnot::Note { page, at, text });
+                self.add(NewAnnot::Note { page, at, text });
             }
             Some(false) => {}
             None => self.note_draft = Some((page, at, text)),
@@ -340,6 +362,37 @@ mod tests {
             "Hello Gera"
         );
         assert_eq!(selection_text(&[]), "");
+    }
+
+    fn note(text: &str) -> NewAnnot {
+        NewAnnot::Note {
+            page: 0,
+            at: (0.0, 0.0),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn edits_made_while_saving_are_refused_instead_of_silently_lost() {
+        let worker = Worker::spawn(|| {});
+        let mut edit = EditState::default();
+        assert!(edit.add(note("a")));
+        edit.save(&worker, "x.pdf".into());
+        assert!(edit.saving);
+        assert!(!edit.add(note("b")), "nada novo durante o salvamento");
+        assert!(
+            !edit.undo() && !edit.redo(),
+            "desfazer/refazer também ficam bloqueados"
+        );
+        assert_eq!(
+            edit.pending.items().len(),
+            1,
+            "o que foi enviado continua intacto"
+        );
+        edit.reset(); // resposta Saved
+        assert!(!edit.pending.is_dirty());
+        assert!(edit.add(note("c")), "depois de salvar volta a aceitar");
+        assert!(edit.undo() && edit.redo());
     }
 
     #[test]

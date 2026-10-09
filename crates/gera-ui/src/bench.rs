@@ -69,7 +69,7 @@ impl Bench {
         ctx.request_repaint();
         if *next > 0
             && view
-                .texture_at(*next as i32 - 1, view.page_scale())
+                .texture_at(*next as i32 - 1, view.scale_for(*next - 1))
                 .is_none()
         {
             return None; // espera a página atual renderizar

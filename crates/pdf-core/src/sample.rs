@@ -3,6 +3,12 @@
 /// `rotate` é o valor de /Rotate (0, 90, 180, 270). Cada página tem o texto
 /// "Page N Hello Gera" e há um índice com um item "Capitulo N" por página.
 pub fn sample_pdf(pages: usize, rotate: i32) -> Vec<u8> {
+    sample_pdf_sized(pages, rotate, (612, 792))
+}
+
+/// Como `sample_pdf`, com `size` = (largura, altura) da MediaBox em pontos.
+pub fn sample_pdf_sized(pages: usize, rotate: i32, size: (u32, u32)) -> Vec<u8> {
+    let (w, h) = size;
     // Numeração dos objetos: 1 catálogo, 2 páginas, 3 fonte; cada página ocupa dois (página + conteúdo).
     let page_obj = |i: usize| 4 + 2 * i;
     let outlines_obj = page_obj(pages);
@@ -22,7 +28,7 @@ pub fn sample_pdf(pages: usize, rotate: i32) -> Vec<u8> {
     for i in 0..pages {
         let content = page_obj(i) + 1;
         objs.push(format!(
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate {rotate} /Contents {content} 0 R \
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] /Rotate {rotate} /Contents {content} 0 R \
              /Resources << /Font << /F1 3 0 R >> >> >>"
         ));
         let stream = format!("BT /F1 24 Tf 72 700 Td (Page {} Hello Gera) Tj ET", i + 1);

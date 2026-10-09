@@ -4,10 +4,12 @@ use crate::edit::{screen_rect, EditState};
 use crate::search::SearchState;
 use crate::sidebar::{self, SidebarAction, SidebarTab};
 use crate::view::DocView;
+use app_state::nav::{nav_target, NavKey};
 use app_state::tools::Tool;
 use app_state::zoom;
 use pdf_core::{AnnotInfo, DocSummary, OutlineItem, PdfError, Request, Response, Worker};
 use std::path::PathBuf;
+use std::sync::mpsc::TryRecvError;
 
 /// Texturas novas por quadro (cada uma custa conversão e envio à GPU na thread da UI).
 const MAX_RENDERS_PER_FRAME: usize = 2;
@@ -25,6 +27,8 @@ pub struct GeraApp {
     pub(crate) saved_annots: Vec<AnnotInfo>,
     /// Janela "descartar alterações?" aberta (o usuário tentou fechar com anotações pendentes).
     confirm_close: bool,
+    /// O motor de PDF (thread do worker) parou; já avisado.
+    engine_stopped: bool,
     tab: SidebarTab,
     outline: Vec<OutlineItem>,
     /// Caminho que está sendo aberto (para pedir a senha de um PDF protegido).
@@ -53,6 +57,7 @@ impl GeraApp {
             edit: EditState::default(),
             saved_annots: Vec::new(),
             confirm_close: false,
+            engine_stopped: false,
             tab: SidebarTab::default(),
             outline: Vec::new(),
             opening: None,
@@ -97,7 +102,21 @@ impl GeraApp {
 
     fn poll(&mut self, ctx: &egui::Context) {
         let mut renders = 0;
-        while let Ok(response) = self.worker.rx.try_recv() {
+        loop {
+            let response = match self.worker.rx.try_recv() {
+                Ok(response) => response,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    if !self.engine_stopped {
+                        self.engine_stopped = true;
+                        self.edit.saving = false;
+                        self.status =
+                            "O motor de PDF parou. Salve o que for possível e reabra o aplicativo."
+                                .into();
+                    }
+                    break;
+                }
+            };
             match response {
                 Response::Opened(summary) => self.on_opened(summary),
                 Response::OpenFailed(
@@ -116,7 +135,7 @@ impl GeraApp {
                     let mut is_page = false;
                     if let Some(view) = self.view.as_mut() {
                         view.on_rendered(ctx, page, scale, invert, image);
-                        is_page = view.is_page_scale(scale);
+                        is_page = view.is_page_scale(page as usize, scale);
                     }
                     if is_page {
                         // só a página do canvas conta, não as miniaturas
@@ -182,14 +201,18 @@ impl GeraApp {
                 ui.selectable_value(&mut self.edit.tool, tool, tool.label());
             }
             ui.separator();
+            let can_edit = !self.edit.saving;
             if ui
-                .add_enabled(self.edit.pending.is_dirty(), egui::Button::new("↶"))
+                .add_enabled(
+                    can_edit && self.edit.pending.is_dirty(),
+                    egui::Button::new("↶"),
+                )
                 .clicked()
             {
-                self.edit.pending.undo();
+                self.edit.undo();
             }
-            if ui.button("↷").clicked() {
-                self.edit.pending.redo();
+            if ui.add_enabled(can_edit, egui::Button::new("↷")).clicked() {
+                self.edit.redo();
             }
             let save_label = if self.edit.pending.is_dirty() {
                 "Salvar •"
@@ -231,11 +254,15 @@ impl GeraApp {
                 self.jump_to = Some(self.last.scroll_y * ratio);
             }
             ui.separator();
-            ui.label(format!(
-                "Página {} / {}",
-                self.last.current_page + 1,
-                view.layout.page_count()
-            ));
+            let count = view.layout.page_count().max(1);
+            let mut page = self.last.current_page + 1;
+            let go = ui.add(egui::DragValue::new(&mut page).range(1..=count).speed(0.2));
+            ui.label(format!("/ {count}"));
+            if go.changed() {
+                if let Some(y) = view.scroll_target(page as i32 - 1, 0.0) {
+                    self.jump_to = Some(y);
+                }
+            }
             ui.separator();
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut self.search.text)
@@ -374,21 +401,46 @@ impl eframe::App for GeraApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.confirm_close = true;
         }
-        // refazer (Ctrl+Shift+Z) antes de desfazer (Ctrl+Z), para um atalho não consumir o outro
+        // Ctrl+Z/Ctrl+Shift+Z desfazem/refazem anotações, a menos que o usuário esteja digitando
+        // (campo de busca, nota, senha): nesse caso o atalho é do campo de texto.
+        // Refazer vem antes de desfazer, para um atalho não consumir o outro.
+        let typing = ctx.egui_wants_keyboard_input();
+        if !typing {
+            let nav = [
+                (NavKey::PageUp, egui::Key::PageUp),
+                (NavKey::PageDown, egui::Key::PageDown),
+                (NavKey::Home, egui::Key::Home),
+                (NavKey::End, egui::Key::End),
+            ];
+            let pressed = ctx.input_mut(|i| {
+                nav.into_iter()
+                    .find(|&(_, k)| i.consume_key(egui::Modifiers::NONE, k))
+            });
+            if let (Some((key, _)), Some(view)) = (pressed, self.view.as_ref()) {
+                let (scroll, height) = (self.last.scroll_y, self.last.viewport_h);
+                self.jump_to = Some(nav_target(key, scroll, height, view.layout.total_height()));
+            }
+        }
+        let zoom_delta = ctx.input(|i| i.zoom_delta()); // Ctrl+roda e gesto de pinça
+        if let (true, Some(view)) = ((zoom_delta - 1.0).abs() > f32::EPSILON, self.view.as_mut()) {
+            let ratio = view.set_zoom(view.zoom * zoom_delta);
+            self.jump_to = Some(self.last.scroll_y * ratio);
+        }
         let (redo, undo, save) = ctx.input_mut(|i| {
             (
-                i.consume_key(
-                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                    egui::Key::Z,
-                ),
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z),
+                !typing
+                    && i.consume_key(
+                        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                        egui::Key::Z,
+                    ),
+                !typing && i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z),
                 i.consume_key(egui::Modifiers::COMMAND, egui::Key::S),
             )
         });
         if redo {
-            self.edit.pending.redo();
+            self.edit.redo();
         } else if undo {
-            self.edit.pending.undo();
+            self.edit.undo();
         }
         if let (true, Some(view)) = (save, self.view.as_ref()) {
             self.edit.save(&self.worker, view.path.clone());

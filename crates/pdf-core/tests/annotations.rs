@@ -129,3 +129,39 @@ fn failed_save_keeps_original_and_document_usable() {
     );
     assert_eq!(doc.render(0, 1.0, false).unwrap().width, 612);
 }
+
+#[test]
+fn highlight_on_a_rotated_page_lands_on_the_found_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_sample(&dir, "girada.pdf", 1, 90);
+    let mut doc = PdfDoc::open(&path, None).unwrap();
+    let before = doc.render(0, 1.0, false).unwrap();
+    let hit = doc.search(0, "Hello").unwrap()[0];
+    doc.save_with(&[highlight(hit)], &path).unwrap();
+    let after = PdfDoc::open(&path, None)
+        .unwrap()
+        .render(0, 1.0, false)
+        .unwrap();
+    assert_eq!((after.width, after.height), (792, 612));
+    let changed = |x: u32, y: u32| {
+        let i = ((y * after.width + x) * 3) as usize;
+        before.rgb[i..i + 3] != after.rgb[i..i + 3]
+    };
+    // a maior parte dos pixels dentro do retângulo encontrado muda de cor (os pixels pretos das
+    // letras continuam pretos sob o destaque); um ponto longe dele não muda
+    let (mut total, mut inside) = (0, 0);
+    for y in hit.y0 as u32..hit.y1 as u32 {
+        for x in hit.x0 as u32..hit.x1 as u32 {
+            total += 1;
+            inside += usize::from(changed(x, y));
+        }
+    }
+    assert!(
+        inside * 100 > total * 40,
+        "só {inside}/{total} pixels mudaram dentro de {hit:?}"
+    );
+    assert!(
+        !changed(5, 5),
+        "o destaque não deve atingir o canto da página"
+    );
+}

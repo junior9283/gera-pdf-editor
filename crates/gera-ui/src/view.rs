@@ -8,6 +8,12 @@ use std::path::PathBuf;
 /// (página, escala quantizada, invertido)
 pub type RenderKey = (i32, u32, bool);
 
+/// Orçamento de pixels de uma página renderizada na tela (16 Mpx = 64 MB em RGBA); além disso a
+/// página é só ampliada a partir de uma imagem com menos detalhe, em vez de gastar memória.
+const MAX_PAGE_PIXELS: f32 = 16_000_000.0;
+/// Maior lado de textura assumido até a interface informar o limite real da GPU.
+const DEFAULT_MAX_SIDE: f32 = 8192.0;
+
 /// Orçamento de texturas de página em memória (RGBA).
 const CACHE_BUDGET_BYTES: usize = 96 * 1024 * 1024;
 
@@ -30,6 +36,8 @@ pub struct DocView {
     pub layout: Layout,
     pub dark: bool,
     ppp: f32,
+    /// Maior lado de textura aceito pela GPU (em pixels).
+    max_side: f32,
     cache: LruCache<RenderKey, CachedTexture>,
     requested: HashMap<RenderKey, CancelToken>,
     wanted: HashSet<RenderKey>,
@@ -45,6 +53,7 @@ impl DocView {
             layout: Layout::default(),
             dark: false,
             ppp: 1.0,
+            max_side: DEFAULT_MAX_SIDE,
             cache: LruCache::new(CACHE_BUDGET_BYTES),
             requested: HashMap::new(),
             wanted: HashSet::new(),
@@ -78,14 +87,34 @@ impl DocView {
         }
     }
 
+    /// Limite de textura da GPU (`ctx.input(|i| i.max_texture_side)`).
+    pub fn set_max_side(&mut self, side: f32) {
+        if side.is_finite() && side >= 1.0 {
+            self.max_side = side;
+        }
+    }
+
+    /// Escala de renderização da página `page`: a do zoom, limitada pelo que a GPU, a memória e o
+    /// `pdf-core` aceitam para o tamanho dela (a página é ampliada a partir da imagem menor).
+    pub fn scale_for(&self, page: usize) -> f32 {
+        let Some(size) = self.sizes.get(page) else {
+            return self.page_scale();
+        };
+        let (w, h) = (size.width.max(1.0), size.height.max(1.0));
+        let cap = (self.max_side / w.max(h))
+            .min((MAX_PAGE_PIXELS / (w * h)).sqrt())
+            .min(pdf_core::max_render_scale(size));
+        self.page_scale().min(cap)
+    }
+
     /// Escala de renderização: zoom do usuário vezes pixels por ponto da tela.
     pub fn page_scale(&self) -> f32 {
         self.zoom * self.ppp
     }
 
-    /// `true` se `scale` é a escala das páginas do canvas (e não a de uma miniatura).
-    pub fn is_page_scale(&self, scale: f32) -> bool {
-        zoom::quantize(scale) == zoom::quantize(self.page_scale())
+    /// `true` se `scale` é a escala em que o canvas mostra a página `page` (e não a de uma miniatura).
+    pub fn is_page_scale(&self, page: usize, scale: f32) -> bool {
+        zoom::quantize(scale) == zoom::quantize(self.scale_for(page))
     }
 
     fn key(&self, page: i32, scale: f32) -> RenderKey {
@@ -201,14 +230,58 @@ mod tests {
     }
 
     #[test]
+    fn render_scale_never_exceeds_what_the_gpu_and_memory_allow() {
+        let sizes = vec![
+            PageSize {
+                width: 200.0,
+                height: 3000.0,
+            },
+            PageSize {
+                width: 612.0,
+                height: 792.0,
+            },
+        ];
+        let mut v = DocView::new(PathBuf::from("rolo.pdf"), sizes);
+        v.set_ppp(2.0); // tela HiDPI
+        v.set_zoom(8.0); // zoom máximo
+                         // página 0: o lado maior não pode passar do limite de textura (8192 por padrão)
+        assert!(
+            3000.0 * v.scale_for(0) <= 8192.0 + 0.5,
+            "{}",
+            v.scale_for(0)
+        );
+        // página 1: o orçamento de pixels da interface (16 Mpx) manda
+        let px = 612.0 * 792.0 * v.scale_for(1).powi(2);
+        assert!(px <= 16_000_000.0 * 1.001, "{px}");
+        // limite maior da GPU permite escala maior
+        v.set_max_side(16384.0);
+        assert!(v.scale_for(0) > 8192.0 / 3000.0);
+        // zoom normal não é afetado
+        v.set_zoom(1.0);
+        assert_eq!(v.scale_for(1), v.page_scale());
+    }
+
+    #[test]
     fn page_renders_are_told_apart_from_thumbnails_by_scale() {
         let mut v = view();
         v.set_zoom(1.5);
-        assert!(v.is_page_scale(v.page_scale()));
+        assert!(v.is_page_scale(0, v.scale_for(0)));
         assert!(
-            !v.is_page_scale(110.0 / 100.0),
+            !v.is_page_scale(0, 110.0 / 100.0),
             "miniatura tem outra escala"
         );
+    }
+
+    #[test]
+    fn a_capped_page_render_is_still_recognised_as_the_page_render() {
+        let sizes = vec![PageSize {
+            width: 200.0,
+            height: 3000.0,
+        }];
+        let mut v = DocView::new(PathBuf::from("rolo.pdf"), sizes);
+        v.set_zoom(8.0);
+        assert!(v.scale_for(0) < v.page_scale(), "a escala foi limitada");
+        assert!(v.is_page_scale(0, v.scale_for(0)));
     }
 
     #[test]

@@ -5,6 +5,8 @@ use pdf_core::Worker;
 pub struct CanvasFrame {
     pub scroll_y: f32,
     pub current_page: usize,
+    /// Altura visível da área de rolagem (para PageUp/PageDown).
+    pub viewport_h: f32,
 }
 
 /// Rola e desenha só as páginas visíveis (mais uma de cada lado, pré-carregadas).
@@ -17,6 +19,7 @@ pub fn show_pages(
     on_page: &mut dyn FnMut(&mut egui::Ui, usize, egui::Rect),
 ) -> CanvasFrame {
     view.set_ppp(ui.ctx().pixels_per_point());
+    view.set_max_side(ui.ctx().input(|i| i.max_texture_side) as f32);
     let mut area = egui::ScrollArea::both().auto_shrink(false);
     if let Some(y) = jump_to {
         area = area.vertical_scroll_offset(y.max(0.0));
@@ -27,8 +30,8 @@ pub fn show_pages(
         let origin = ui.max_rect().min;
         let content_w = ui.max_rect().width().max(total.x);
         let visible = view.layout.visible_range(viewport.min.y, viewport.height());
-        let scale = view.page_scale();
         for i in view.layout.expand(visible.clone(), 1) {
+            let scale = view.scale_for(i);
             view.request_at(worker, i as i32, scale);
         }
         for i in visible {
@@ -38,6 +41,7 @@ pub fn show_pages(
                 egui::pos2(x, origin.y + view.layout.page_top(i)),
                 egui::vec2(w, view.layout.page_height(i)),
             );
+            let scale = view.scale_for(i);
             paint_page(ui, view, i as i32, rect, scale);
             on_page(ui, i, rect);
         }
@@ -47,6 +51,7 @@ pub fn show_pages(
     CanvasFrame {
         scroll_y: out.state.offset.y,
         current_page: out.inner,
+        viewport_h: out.inner_rect.height(),
     }
 }
 

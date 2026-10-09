@@ -8,6 +8,19 @@ use std::path::{Path, PathBuf};
 
 /// Limite de pixels por imagem renderizada (evita estourar a memória).
 const MAX_PIXELS: f64 = 40_000_000.0;
+/// Limite do maior lado da imagem renderizada: texturas maiores que isso passam do máximo de
+/// qualquer GPU comum e derrubariam a interface.
+const MAX_SIDE_PX: f64 = 16_384.0;
+
+/// Maior escala em que `PdfDoc::render` aceita uma página desse tamanho (por lado e por total
+/// de pixels). Sempre positiva e finita, mesmo para tamanhos degenerados.
+pub fn max_render_scale(size: &PageSize) -> f32 {
+    let (w, h) = (
+        f64::from(size.width.max(1.0)),
+        f64::from(size.height.max(1.0)),
+    );
+    (MAX_SIDE_PX / w.max(h)).min((MAX_PIXELS / (w * h)).sqrt()) as f32
+}
 /// Agulhas maiores que isso (em bytes) não são buscadas.
 const MAX_NEEDLE_BYTES: usize = 4096;
 /// Teto de resultados por página (proteção contra páginas com milhares de ocorrências).
@@ -66,8 +79,7 @@ impl PdfDoc {
     pub fn render(&self, page: i32, scale: f32, invert: bool) -> Result<RenderedPage> {
         let page = self.load(page)?;
         let size = size_of(&page)?;
-        let pixels = f64::from(size.width) * f64::from(size.height) * f64::from(scale).powi(2);
-        if !scale.is_finite() || scale <= 0.0 || pixels > MAX_PIXELS {
+        if !scale.is_finite() || scale <= 0.0 || scale > max_render_scale(&size) {
             return Err(PdfError::InvalidScale(scale));
         }
         let ctm = Matrix::new_scale(scale, scale);
@@ -243,6 +255,13 @@ impl PdfDoc {
             .inner
             .save_with_options(tmp_str, opts)
             .map_err(PdfError::from)
+            // os dados precisam estar no disco antes do rename: numa queda de energia o original
+            // nunca pode ser trocado por um arquivo truncado
+            .and_then(|()| {
+                std::fs::File::open(&tmp)?
+                    .sync_all()
+                    .map_err(PdfError::from)
+            })
             .and_then(|()| std::fs::rename(&tmp, dest).map_err(PdfError::from));
         if written.is_err() {
             let _ = std::fs::remove_file(&tmp);

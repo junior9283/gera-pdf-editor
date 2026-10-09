@@ -151,3 +151,32 @@ fn outline_and_summary() {
     assert_eq!(s.outline.len(), 3);
     assert!(s.annots.is_empty());
 }
+
+/// O MuPDF substitui páginas defeituosas por valores padrão: o documento continua abrindo com
+/// todas as páginas (guarda de regressão: se isso mudar, `summary` precisará de um tamanho padrão).
+#[test]
+fn damaged_page_objects_still_open_with_every_page() {
+    let good = String::from_utf8(sample_pdf(2, 0)).unwrap();
+    let damaged = [
+        good.replacen("/Kids [4 0 R 6 0 R]", "/Kids [4 0 R 99 0 R 6 0 R]", 1)
+            .replacen("/Count 2", "/Count 3", 1),
+        good.replacen("/Kids [4 0 R 6 0 R]", "/Kids [4 0 R 3 0 R 6 0 R]", 1)
+            .replacen("/Count 2", "/Count 3", 1),
+        good.replacen("/MediaBox [0 0 612 792]", "/MediaBox [a b c d]", 1),
+        good.replacen("/Contents 5 0 R", "/Contents 77 0 R", 1),
+        good.replacen("/Resources << /Font << /F1 3 0 R >> >>", "/Resources 55", 1),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    for (n, bytes) in damaged.iter().enumerate() {
+        assert_ne!(*bytes, good, "a troca no fixture {n} precisa acontecer");
+        let path = write(&dir, &format!("danificado{n}.pdf"), bytes.as_bytes());
+        let doc =
+            PdfDoc::open(&path, None).unwrap_or_else(|e| panic!("fixture {n} não abriu: {e}"));
+        let count = doc.page_count().unwrap() as usize;
+        let summary = doc
+            .summary()
+            .unwrap_or_else(|e| panic!("fixture {n}: resumo falhou: {e}"));
+        assert_eq!(summary.sizes.len(), count, "fixture {n}");
+        assert!(count >= 2, "fixture {n}");
+    }
+}
