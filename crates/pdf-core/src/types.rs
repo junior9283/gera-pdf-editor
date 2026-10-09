@@ -167,3 +167,10 @@ impl Rotation {
         matches!(self, Rotation::R90 | Rotation::R270)
     }
 }
+
+/// Texto escolhido numa página: as áreas marcadas (em ordem de leitura) e o texto delas.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TextSelection {
+    pub quads: Vec<PdfRect>,
+    pub text: String,
+}

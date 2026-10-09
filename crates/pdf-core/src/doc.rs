@@ -1,10 +1,10 @@
 use crate::error::{PdfError, Result};
 use crate::types::{
     AnnotInfo, AnnotKind, DocSummary, NewAnnot, OutlineItem, PageSize, PdfRect, RenderedPage,
-    Rotation, Word,
+    Rotation, TextSelection, Word,
 };
 use mupdf::pdf::{Encryption, PdfAnnotationType, PdfDocument, PdfPage, PdfWriteOptions};
-use mupdf::{Colorspace, Matrix, Point, Quad, Rect, TextExtractOptions};
+use mupdf::{Colorspace, Matrix, Point, Quad, Rect, TextExtractOptions, TextPageFlags};
 use std::path::{Path, PathBuf};
 
 /// Limite de pixels por imagem renderizada (evita estourar a memória).
@@ -143,6 +143,62 @@ impl PdfDoc {
             })
             .filter(|w| w.rect.intersects(&area))
             .collect())
+    }
+}
+
+/// Máximo de áreas numa seleção (linhas longas com muitos pedaços).
+const MAX_SELECTION_QUADS: usize = 4096;
+
+impl PdfDoc {
+    /// Seleção pelo fluxo do texto entre os pontos `a` e `b` (coordenadas da página), como o
+    /// Acrobat: linhas inteiras entre a linha de `a` e a de `b`.
+    pub fn select_text(&self, page: i32, a: (f32, f32), b: (f32, f32)) -> Result<TextSelection> {
+        let page = self.load(page)?;
+        let mut tp = page.to_text_page(TextPageFlags::empty())?;
+        let buf = vec![Rect::new(0.0, 0.0, 0.0, 0.0).quad(); MAX_SELECTION_QUADS];
+        let n = tp.highlight_selection(Point::new(a.0, a.1), Point::new(b.0, b.1), &buf)?;
+        let quads: Vec<PdfRect> = buf[..usize::try_from(n).unwrap_or(0).min(buf.len())]
+            .iter()
+            .map(|q| Rect::from(q.clone()).into())
+            .collect();
+        let inside = |x: f32, y: f32| {
+            quads
+                .iter()
+                .any(|r| x >= r.x0 - 0.5 && x <= r.x1 + 0.5 && y >= r.y0 - 0.5 && y <= r.y1 + 0.5)
+        };
+        let mut text = String::new();
+        for block in tp.blocks() {
+            for line in block.lines() {
+                let before = text.len();
+                for ch in line.chars() {
+                    let r = Rect::from(ch.quad());
+                    if let (Some(c), true) =
+                        (ch.char(), inside((r.x0 + r.x1) / 2.0, (r.y0 + r.y1) / 2.0))
+                    {
+                        text.push(c);
+                    }
+                }
+                if text.len() > before {
+                    text.push('\n');
+                }
+            }
+        }
+        Ok(TextSelection { quads, text })
+    }
+
+    /// Texto do documento inteiro (Selecionar tudo), página após página.
+    pub fn document_text(&self) -> Result<String> {
+        let mut out = String::new();
+        for p in 0..self.page_count()? {
+            out.push_str(
+                &self
+                    .load(p)?
+                    .to_text_page(TextPageFlags::empty())?
+                    .to_text()?,
+            );
+            out.push('\n');
+        }
+        Ok(out)
     }
 }
 
