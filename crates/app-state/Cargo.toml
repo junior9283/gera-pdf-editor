@@ -1,0 +1,8 @@
+[package]
+name = "app-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pdf-core = { path = "../pdf-core" }

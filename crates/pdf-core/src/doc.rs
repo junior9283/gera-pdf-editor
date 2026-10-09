@@ -1,0 +1,304 @@
+use crate::error::{PdfError, Result};
+use crate::types::{
+    AnnotInfo, AnnotKind, DocSummary, NewAnnot, OutlineItem, PageSize, PdfRect, RenderedPage, Word,
+};
+use mupdf::pdf::{Encryption, PdfAnnotationType, PdfDocument, PdfPage, PdfWriteOptions};
+use mupdf::{Colorspace, Matrix, Point, Quad, Rect, TextExtractOptions};
+use std::path::{Path, PathBuf};
+
+/// Limite de pixels por imagem renderizada (evita estourar a memória).
+const MAX_PIXELS: f64 = 40_000_000.0;
+/// Limite do maior lado da imagem renderizada: texturas maiores que isso passam do máximo de
+/// qualquer GPU comum e derrubariam a interface.
+const MAX_SIDE_PX: f64 = 16_384.0;
+
+/// Maior escala em que `PdfDoc::render` aceita uma página desse tamanho (por lado e por total
+/// de pixels). Sempre positiva e finita, mesmo para tamanhos degenerados.
+pub fn max_render_scale(size: &PageSize) -> f32 {
+    let (w, h) = (
+        f64::from(size.width.max(1.0)),
+        f64::from(size.height.max(1.0)),
+    );
+    (MAX_SIDE_PX / w.max(h)).min((MAX_PIXELS / (w * h)).sqrt()) as f32
+}
+/// Agulhas maiores que isso (em bytes) não são buscadas.
+const MAX_NEEDLE_BYTES: usize = 4096;
+/// Teto de resultados por página (proteção contra páginas com milhares de ocorrências).
+const MAX_HITS_PER_PAGE: u32 = 512;
+
+pub struct PdfDoc {
+    pub(crate) inner: PdfDocument,
+    pub(crate) path: PathBuf,
+    /// Guardada só em memória, para reabrir o arquivo (ex.: descartar mudanças após falha ao salvar).
+    pub(crate) password: Option<String>,
+}
+
+/// Abre o arquivo e, se for protegido, autentica com `password`.
+pub(crate) fn open_authenticated(path: &Path, password: Option<&str>) -> Result<PdfDocument> {
+    let mut inner = PdfDocument::open(path).map_err(|e| PdfError::Open(e.to_string()))?;
+    if inner.needs_password()? {
+        match password {
+            None => return Err(PdfError::PasswordRequired),
+            Some(p) if !inner.authenticate(p)? => return Err(PdfError::WrongPassword),
+            Some(_) => {}
+        }
+    }
+    Ok(inner)
+}
+
+impl PdfDoc {
+    pub fn open(path: &Path, password: Option<&str>) -> Result<Self> {
+        let inner = open_authenticated(path, password)?;
+        Ok(Self {
+            inner,
+            path: path.to_path_buf(),
+            password: password.map(str::to_owned),
+        })
+    }
+
+    pub fn page_count(&self) -> Result<i32> {
+        Ok(self.inner.page_count()?)
+    }
+
+    pub(crate) fn check_page(&self, page: i32) -> Result<()> {
+        if page < 0 || page >= self.page_count()? {
+            return Err(PdfError::PageOutOfRange(page));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn load(&self, page: i32) -> Result<mupdf::Page> {
+        self.check_page(page)?;
+        Ok(self.inner.load_page(page)?)
+    }
+
+    pub fn page_size(&self, page: i32) -> Result<PageSize> {
+        size_of(&self.load(page)?)
+    }
+
+    pub fn render(&self, page: i32, scale: f32, invert: bool) -> Result<RenderedPage> {
+        let page = self.load(page)?;
+        let size = size_of(&page)?;
+        if !scale.is_finite() || scale <= 0.0 || scale > max_render_scale(&size) {
+            return Err(PdfError::InvalidScale(scale));
+        }
+        let ctm = Matrix::new_scale(scale, scale);
+        let pix = page.to_pixmap(&ctm, &Colorspace::device_rgb(), false, true)?;
+        let (w, h, stride) = (
+            pix.width() as usize,
+            pix.height() as usize,
+            pix.stride() as usize,
+        );
+        debug_assert_eq!(pix.n(), 3, "device_rgb sem alfa tem 3 canais");
+        let mut rgb = Vec::with_capacity(w * h * 3);
+        for row in pix.samples().chunks(stride).take(h) {
+            let row = &row[..w * 3];
+            if invert {
+                rgb.extend(row.iter().map(|b| !b));
+            } else {
+                rgb.extend_from_slice(row);
+            }
+        }
+        Ok(RenderedPage {
+            width: w as u32,
+            height: h as u32,
+            rgb,
+        })
+    }
+
+    pub fn search(&self, page: i32, needle: &str) -> Result<Vec<PdfRect>> {
+        let page = self.load(page)?;
+        if needle.is_empty() || needle.contains('\0') || needle.len() > MAX_NEEDLE_BYTES {
+            return Ok(Vec::new());
+        }
+        Ok(page
+            .search(needle, MAX_HITS_PER_PAGE)?
+            .into_iter()
+            .map(|q| mupdf::Rect::from(q).into())
+            .collect())
+    }
+
+    pub fn words_in_rect(&self, page: i32, area: PdfRect) -> Result<Vec<Word>> {
+        Ok(self
+            .load(page)?
+            .words(TextExtractOptions::default())?
+            .into_iter()
+            .map(|w| Word {
+                text: w.text,
+                rect: w.bounds.into(),
+            })
+            .filter(|w| w.rect.intersects(&area))
+            .collect())
+    }
+}
+
+fn size_of(page: &mupdf::Page) -> Result<PageSize> {
+    let b = page.bounds()?;
+    Ok(PageSize {
+        width: b.x1 - b.x0,
+        height: b.y1 - b.y0,
+    })
+}
+
+fn quads(rects: &[PdfRect]) -> Result<Vec<Quad>> {
+    if rects.is_empty() {
+        return Err(PdfError::InvalidAnnotation("sem área para marcar".into()));
+    }
+    Ok(rects.iter().map(|r| Rect::from(*r).quad()).collect())
+}
+
+fn add_one(page: &mut PdfPage, a: &NewAnnot) -> Result<()> {
+    match a {
+        NewAnnot::Highlight { rects, .. } => {
+            page.add_highlight_annotation(quads(rects)?)?;
+        }
+        NewAnnot::Underline { rects, .. } => {
+            page.add_underline_annotation(quads(rects)?)?;
+        }
+        NewAnnot::Note { at, text, .. } => {
+            page.add_text_annotation(Rect::new(at.0, at.1, at.0 + 24.0, at.1 + 24.0), text)?;
+        }
+        NewAnnot::Ink { strokes, .. } => {
+            page.add_ink_annotation(
+                strokes
+                    .iter()
+                    .map(|s| s.iter().map(|&(x, y)| Point::new(x, y))),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn kind_of(t: PdfAnnotationType) -> Option<AnnotKind> {
+    match t {
+        PdfAnnotationType::Highlight => Some(AnnotKind::Highlight),
+        PdfAnnotationType::Underline => Some(AnnotKind::Underline),
+        PdfAnnotationType::Text => Some(AnnotKind::Note),
+        PdfAnnotationType::Ink => Some(AnnotKind::Ink),
+        _ => None,
+    }
+}
+
+fn temp_path(dest: &Path) -> Result<PathBuf> {
+    let name = dest
+        .file_name()
+        .ok_or_else(|| PdfError::Engine("caminho de destino sem nome de arquivo".into()))?;
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(".gera-tmp");
+    Ok(dest.with_file_name(tmp_name))
+}
+
+impl PdfDoc {
+    pub fn annotations(&self, page: i32) -> Result<Vec<AnnotInfo>> {
+        self.check_page(page)?;
+        let page_ref = self.inner.load_pdf_page(page)?;
+        let mut out = Vec::new();
+        for annot in page_ref.annotations() {
+            if let Some(kind) = kind_of(annot.r#type()?) {
+                out.push(AnnotInfo {
+                    kind,
+                    page,
+                    rect: annot.bounds()?.into(),
+                    contents: annot.contents()?.unwrap_or_default().to_owned(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn all_annotations(&self) -> Result<Vec<AnnotInfo>> {
+        let mut all = Vec::new();
+        for p in 0..self.page_count()? {
+            all.extend(self.annotations(p)?);
+        }
+        Ok(all)
+    }
+
+    /// Aplica `pending`, grava em arquivo temporário ao lado de `dest` e renomeia.
+    /// Em qualquer erro descarta as mudanças em memória (recarrega do disco) e devolve o erro.
+    pub fn save_with(&mut self, pending: &[NewAnnot], dest: &Path) -> Result<()> {
+        let result = self.apply_and_write(pending, dest);
+        if result.is_err() {
+            // descarta as mudanças em memória reabrindo o arquivo (com a mesma senha, se houver)
+            self.inner = open_authenticated(&self.path, self.password.as_deref())?;
+        }
+        result
+    }
+
+    fn apply_and_write(&mut self, pending: &[NewAnnot], dest: &Path) -> Result<()> {
+        let count = self.page_count()?;
+        if let Some(bad) = pending
+            .iter()
+            .map(NewAnnot::page)
+            .find(|p| *p < 0 || *p >= count)
+        {
+            return Err(PdfError::PageOutOfRange(bad));
+        }
+        let mut pages: Vec<i32> = pending.iter().map(NewAnnot::page).collect();
+        pages.sort_unstable();
+        pages.dedup();
+        for p in pages {
+            let mut page = self.inner.load_pdf_page(p)?;
+            for a in pending.iter().filter(|a| a.page() == p) {
+                add_one(&mut page, a)?;
+            }
+            page.update()?;
+        }
+        let tmp = temp_path(dest)?;
+        let tmp_str = tmp
+            .to_str()
+            .ok_or_else(|| PdfError::Engine("caminho não é UTF-8 válido".into()))?;
+        let mut opts = PdfWriteOptions::default();
+        opts.set_encryption(Encryption::Keep);
+        let written = self
+            .inner
+            .save_with_options(tmp_str, opts)
+            .map_err(PdfError::from)
+            // os dados precisam estar no disco antes do rename: numa queda de energia o original
+            // nunca pode ser trocado por um arquivo truncado
+            .and_then(|()| {
+                std::fs::File::open(&tmp)?
+                    .sync_all()
+                    .map_err(PdfError::from)
+            })
+            .and_then(|()| std::fs::rename(&tmp, dest).map_err(PdfError::from));
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        written?;
+        self.path = dest.to_path_buf();
+        Ok(())
+    }
+
+    pub fn outline(&self) -> Result<Vec<OutlineItem>> {
+        let mut out = Vec::new();
+        flatten(&self.inner.outlines()?, 0, &mut out);
+        Ok(out)
+    }
+
+    /// Índice e anotações corrompidos não impedem abrir o documento; por isso `unwrap_or_default`.
+    pub fn summary(&self) -> Result<DocSummary> {
+        let sizes = (0..self.page_count()?)
+            .map(|p| self.page_size(p))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(DocSummary {
+            path: self.path.clone(),
+            sizes,
+            outline: self.outline().unwrap_or_default(),
+            annots: self.all_annotations().unwrap_or_default(),
+        })
+    }
+}
+
+/// Destinos externos (URI) viram `page: None`; `OutlineItem` não guarda o URI.
+fn flatten(items: &[mupdf::Outline], depth: usize, out: &mut Vec<OutlineItem>) {
+    for it in items {
+        out.push(OutlineItem {
+            title: it.title.clone(),
+            page: it.dest.as_ref().map(|d| d.loc.page_number as i32),
+            depth,
+        });
+        flatten(&it.down, depth + 1, out);
+    }
+}
