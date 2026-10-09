@@ -83,6 +83,11 @@ impl DocView {
         self.zoom * self.ppp
     }
 
+    /// `true` se `scale` é a escala das páginas do canvas (e não a de uma miniatura).
+    pub fn is_page_scale(&self, scale: f32) -> bool {
+        zoom::quantize(scale) == zoom::quantize(self.page_scale())
+    }
+
     fn key(&self, page: i32, scale: f32) -> RenderKey {
         (page, zoom::quantize(scale), self.dark)
     }
@@ -193,6 +198,17 @@ mod tests {
         // página 1 começa em 12 + 400 + 12 = 424; y = 50pt * 2 = 100 => 524 - 80 de folga
         assert_eq!(v.scroll_target(1, 50.0), Some(444.0));
         assert_eq!(v.scroll_target(0, 0.0), Some(0.0), "nunca negativo");
+    }
+
+    #[test]
+    fn page_renders_are_told_apart_from_thumbnails_by_scale() {
+        let mut v = view();
+        v.set_zoom(1.5);
+        assert!(v.is_page_scale(v.page_scale()));
+        assert!(
+            !v.is_page_scale(110.0 / 100.0),
+            "miniatura tem outra escala"
+        );
     }
 
     #[test]

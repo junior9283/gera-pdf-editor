@@ -1,4 +1,5 @@
 mod app;
+mod bench;
 mod canvas;
 mod edit;
 mod search;
@@ -11,12 +12,12 @@ use std::time::Instant;
 fn main() -> eframe::Result {
     let started = Instant::now();
     let mut path = None;
-    let mut bench = false;
+    let (mut bench, mut scroll) = (false, false);
     for arg in std::env::args().skip(1) {
-        if arg == "--bench-open" {
-            bench = true;
-        } else {
-            path = Some(PathBuf::from(arg));
+        match arg.as_str() {
+            "--bench-open" => bench = true,
+            "--bench-scroll" => (bench, scroll) = (true, true),
+            _ => path = Some(PathBuf::from(arg)),
         }
     }
     let options = eframe::NativeOptions {
@@ -34,7 +35,7 @@ fn main() -> eframe::Result {
             Ok(Box::new(app::GeraApp::new(
                 cc,
                 path,
-                bench.then_some(started),
+                bench.then(|| bench::Bench::new(started, scroll)),
             )))
         }),
     )

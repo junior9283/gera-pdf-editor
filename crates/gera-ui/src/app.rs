@@ -1,3 +1,4 @@
+use crate::bench::Bench;
 use crate::canvas::{self, CanvasFrame};
 use crate::edit::{screen_rect, EditState};
 use crate::search::SearchState;
@@ -7,7 +8,6 @@ use app_state::tools::Tool;
 use app_state::zoom;
 use pdf_core::{AnnotInfo, DocSummary, OutlineItem, PdfError, Request, Response, Worker};
 use std::path::PathBuf;
-use std::time::Instant;
 
 /// Texturas novas por quadro (cada uma custa conversão e envio à GPU na thread da UI).
 const MAX_RENDERS_PER_FRAME: usize = 2;
@@ -31,15 +31,15 @@ pub struct GeraApp {
     opening: Option<PathBuf>,
     /// Pedido de senha: (caminho, senha digitada).
     password_prompt: Option<(PathBuf, String)>,
-    /// Modo de medição (`--bench-open`): instante de início do processo.
-    bench: Option<Instant>,
+    /// Modo de medição (`--bench-open` / `--bench-scroll`).
+    bench: Option<Bench>,
 }
 
 impl GeraApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         path: Option<PathBuf>,
-        bench: Option<Instant>,
+        bench: Option<Bench>,
     ) -> Self {
         let ctx = cc.egui_ctx.clone();
         let worker = Worker::spawn(move || ctx.request_repaint());
@@ -113,10 +113,17 @@ impl GeraApp {
                     invert,
                     image,
                 } => {
+                    let mut is_page = false;
                     if let Some(view) = self.view.as_mut() {
                         view.on_rendered(ctx, page, scale, invert, image);
+                        is_page = view.is_page_scale(scale);
                     }
-                    self.finish_bench(ctx);
+                    if is_page {
+                        // só a página do canvas conta, não as miniaturas
+                        if let Some(bench) = self.bench.as_mut() {
+                            bench.on_first_page(ctx);
+                        }
+                    }
                     renders += 1;
                     if renders >= MAX_RENDERS_PER_FRAME {
                         ctx.request_repaint(); // o resto das respostas fica para o próximo quadro
@@ -153,26 +160,6 @@ impl GeraApp {
                 }
             }
         }
-    }
-
-    /// Modo de medição: imprime o tempo até a primeira página e a memória residente, e fecha.
-    fn finish_bench(&mut self, ctx: &egui::Context) {
-        let Some(started) = self.bench.take() else {
-            return;
-        };
-        let rss_kb = std::fs::read_to_string("/proc/self/status")
-            .ok()
-            .and_then(|s| {
-                s.lines()
-                    .find_map(|l| l.strip_prefix("VmRSS:"))
-                    .and_then(|v| v.split_whitespace().next().map(str::to_owned))
-            })
-            .unwrap_or_default();
-        println!(
-            "BENCH open_ms={} rss_kb={rss_kb}",
-            started.elapsed().as_millis()
-        );
-        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
     fn handle_drops(&mut self, ctx: &egui::Context) {
@@ -377,6 +364,11 @@ impl eframe::App for GeraApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
         self.handle_drops(ctx);
+        if let (Some(bench), Some(view)) = (self.bench.as_mut(), self.view.as_mut()) {
+            if let Some(y) = bench.scroll_step(ctx, view) {
+                self.jump_to = Some(y);
+            }
+        }
         // Fechar com anotações pendentes pede confirmação, em vez de perdê-las em silêncio.
         if ctx.input(|i| i.viewport().close_requested()) && self.edit.pending.is_dirty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);

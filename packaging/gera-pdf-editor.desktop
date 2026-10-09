@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Gera PDF Editor
+Comment=Visualizador leve de PDF com anotações
+Exec=gera-pdf-editor %f
+Icon=gera-pdf-editor
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/pdf;
+StartupWMClass=gera-pdf-editor
