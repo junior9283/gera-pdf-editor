@@ -1,8 +1,52 @@
 use app_state::transform::PageMap;
 use app_state::{annots::PendingAnnots, tools::Tool};
-use pdf_core::{NewAnnot, PdfRect, Request, Word, Worker};
-use std::collections::HashMap;
+use pdf_core::{NewAnnot, PdfRect, Request, TextSelection, Worker};
 use std::path::PathBuf;
+
+/// Texto selecionado: numa página (com as áreas marcadas) ou o documento inteiro (Ctrl+A).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Selection {
+    /// `None`: documento inteiro (sem áreas para pintar ou marcar).
+    pub page: Option<i32>,
+    pub quads: Vec<PdfRect>,
+    pub text: String,
+}
+
+/// Arrasto de seleção em andamento.
+#[derive(Debug, Clone, Copy)]
+struct SelectDrag {
+    page: i32,
+    from: (f32, f32),
+    /// Último ponto já pedido ao worker (só pede de novo se o mouse andou).
+    last: (f32, f32),
+}
+
+/// Marca de texto criada a partir de uma seleção.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Markup {
+    Highlight,
+    Underline,
+    StrikeOut,
+}
+
+impl Markup {
+    /// A marca que uma ferramenta de arrastar cria ao soltar (Selecionar não cria nenhuma).
+    fn for_tool(tool: Tool) -> Option<Self> {
+        match tool {
+            Tool::Highlight => Some(Self::Highlight),
+            Tool::Underline => Some(Self::Underline),
+            _ => None,
+        }
+    }
+
+    fn annot(self, page: i32, rects: Vec<PdfRect>) -> NewAnnot {
+        match self {
+            Self::Highlight => NewAnnot::Highlight { page, rects },
+            Self::Underline => NewAnnot::Underline { page, rects },
+            Self::StrikeOut => NewAnnot::StrikeOut { page, rects },
+        }
+    }
+}
 
 /// Ferramenta ativa, anotações pendentes e gestos em andamento.
 #[derive(Default)]
@@ -11,10 +55,12 @@ pub struct EditState {
     pub pending: PendingAnnots,
     pub saving: bool,
     stroke: Vec<(f32, f32)>,
-    drag_start: Option<(f32, f32)>,
-    /// Pedidos de palavras em andamento: qual ferramenta os pediu.
-    word_jobs: HashMap<u64, Tool>,
-    next_tag: u64,
+    pub selection: Option<Selection>,
+    select_drag: Option<SelectDrag>,
+    /// Último pedido de texto enviado ao worker; respostas mais antigas são descartadas.
+    pub(crate) latest_tag: u64,
+    /// Arrasto de Destacar/Sublinhar terminado: tag da resposta final e a marca a criar.
+    pub(crate) finish_tag: Option<(u64, Markup)>,
     /// Nota sendo digitada: (página, posição, texto).
     note_draft: Option<(i32, (f32, f32), String)>,
 }
@@ -23,24 +69,6 @@ pub struct EditState {
 pub(crate) fn screen_rect(r: &PdfRect, map: &PageMap) -> egui::Rect {
     let (min, max) = map.rect_to_screen(r);
     egui::Rect::from_min_max(min.into(), max.into())
-}
-
-/// Anotação de marcação que cobre `words`, se `tool` marca texto.
-fn annot_from_words(tool: Tool, page: i32, words: Vec<Word>) -> Option<NewAnnot> {
-    let rects: Vec<PdfRect> = words.into_iter().map(|w| w.rect).collect();
-    match tool {
-        Tool::Highlight if !rects.is_empty() => Some(NewAnnot::Highlight { page, rects }),
-        Tool::Underline if !rects.is_empty() => Some(NewAnnot::Underline { page, rects }),
-        _ => None,
-    }
-}
-
-fn selection_text(words: &[Word]) -> String {
-    words
-        .iter()
-        .map(|w| w.text.as_str())
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn paint_stroke(painter: &egui::Painter, points: &[(f32, f32)], map: &PageMap) {
@@ -68,8 +96,82 @@ impl EditState {
         self.pending.clear();
         self.saving = false;
         self.stroke.clear();
-        self.drag_start = None;
         self.note_draft = None;
+        self.selection = None;
+        self.select_drag = None;
+        self.finish_tag = None;
+    }
+
+    fn request_selection(&mut self, worker: &Worker, page: i32, a: (f32, f32), b: (f32, f32)) {
+        self.latest_tag += 1;
+        worker.send(Request::SelectText {
+            tag: self.latest_tag,
+            page,
+            a,
+            b,
+        });
+    }
+
+    /// Resposta de seleção do worker: atualiza a seleção ou, no fim de um arrasto de
+    /// Destacar/Sublinhar, cria a marca. Respostas atrasadas (tag antiga) são ignoradas.
+    pub fn on_selection(&mut self, tag: u64, page: i32, sel: TextSelection) {
+        if tag < self.latest_tag {
+            return;
+        }
+        if let Some((t, markup)) = self.finish_tag.filter(|&(t, _)| t == tag) {
+            let _ = t;
+            self.finish_tag = None;
+            self.selection = None;
+            if !sel.quads.is_empty() {
+                self.add(markup.annot(page, sel.quads));
+            }
+            return;
+        }
+        self.selection =
+            (!sel.quads.is_empty() && !sel.text.trim().is_empty()).then_some(Selection {
+                page: Some(page),
+                quads: sel.quads,
+                text: sel.text,
+            });
+    }
+
+    /// Selecionar tudo: pede o texto do documento inteiro.
+    pub fn select_all(&mut self, worker: &Worker) {
+        self.latest_tag += 1;
+        worker.send(Request::DocumentText {
+            tag: self.latest_tag,
+        });
+    }
+
+    pub fn on_document_text(&mut self, tag: u64, text: String) {
+        if tag == self.latest_tag && !text.trim().is_empty() {
+            self.selection = Some(Selection {
+                page: None,
+                quads: Vec::new(),
+                text,
+            });
+        }
+    }
+
+    /// Copia o texto selecionado (Ctrl+C); sem seleção, a área de transferência não muda.
+    pub fn copy(&self, ctx: &egui::Context) {
+        if let Some(s) = self.selection.as_ref().filter(|s| !s.text.is_empty()) {
+            ctx.copy_text(s.text.clone());
+        }
+    }
+
+    /// Transforma a seleção da página numa marca (menu de contexto).
+    pub fn mark_selection(&mut self, markup: Markup) {
+        if let Some(Selection {
+            page: Some(page),
+            quads,
+            ..
+        }) = self
+            .selection
+            .take_if(|s| s.page.is_some() && !s.quads.is_empty())
+        {
+            self.add(markup.annot(page, quads));
+        }
     }
 
     /// Trata o mouse sobre uma página visível e desenha as anotações pendentes dela.
@@ -96,7 +198,8 @@ impl EditState {
         }
         match self.tool {
             Tool::Select | Tool::Highlight | Tool::Underline => {
-                self.drag_select(ui, worker, &response, pointer, page, map)
+                self.drag_text(worker, &response, pointer, page);
+                self.selection_menu(&response, page);
             }
             Tool::Note => {
                 if let (true, Some(at)) = (response.clicked(), pointer) {
@@ -106,40 +209,78 @@ impl EditState {
             Tool::Ink => self.draw_ink(ui, &response, pointer, page, map),
         }
         self.paint_pending(ui.painter(), page, map);
+        self.paint_selection(ui.painter(), page, map);
     }
 
-    /// Arrastar um retângulo: ao soltar, pede ao worker as palavras dentro dele.
-    fn drag_select(
+    /// Arrastar seleciona o texto pelo fluxo (pedindo ao worker a cada movimento); ao soltar com
+    /// Destacar/Sublinhar, a última seleção vira a marca. Clique simples limpa a seleção.
+    fn drag_text(
         &mut self,
-        ui: &egui::Ui,
         worker: &Worker,
         response: &egui::Response,
         pointer: Option<(f32, f32)>,
         page: i32,
-        map: &PageMap,
     ) {
-        if response.drag_started() {
-            self.drag_start = pointer;
+        if response.clicked() {
+            self.selection = None;
         }
-        let (Some(start), Some(now)) = (self.drag_start, pointer) else {
+        if response.drag_started() {
+            if let Some(p) = pointer {
+                self.select_drag = Some(SelectDrag {
+                    page,
+                    from: p,
+                    last: p,
+                });
+                self.selection = None;
+            }
+        }
+        if let (Some(drag), Some(b)) = (self.select_drag, pointer) {
+            let moved = (b.0 - drag.last.0).abs() + (b.1 - drag.last.1).abs() >= 1.0;
+            if drag.page == page && (moved || response.drag_stopped()) {
+                self.request_selection(worker, page, drag.from, b);
+                self.select_drag = Some(SelectDrag { last: b, ..drag });
+            }
+        }
+        if response.drag_stopped() {
+            if let Some(markup) = Markup::for_tool(self.tool) {
+                self.finish_tag = Some((self.latest_tag, markup));
+            }
+            self.select_drag = None;
+        }
+    }
+
+    /// Botão direito sobre a seleção desta página: Copiar e marcar o texto.
+    fn selection_menu(&mut self, response: &egui::Response, page: i32) {
+        if self.selection.as_ref().and_then(|s| s.page) != Some(page) {
+            return;
+        }
+        response.context_menu(|ui| {
+            if ui.button("Copiar").clicked() {
+                self.copy(ui.ctx());
+            }
+            ui.separator();
+            for (label, markup) in [
+                ("Destacar texto", Markup::Highlight),
+                ("Sublinhar texto", Markup::Underline),
+                ("Riscar texto", Markup::StrikeOut),
+            ] {
+                if ui.button(label).clicked() {
+                    self.mark_selection(markup);
+                }
+            }
+        });
+    }
+
+    fn paint_selection(&self, painter: &egui::Painter, page: i32, map: &PageMap) {
+        let Some(sel) = self.selection.as_ref().filter(|s| s.page == Some(page)) else {
             return;
         };
-        let area = PdfRect::from_corners(start, now);
-        ui.painter().rect_stroke(
-            screen_rect(&area, map),
-            0.0,
-            egui::Stroke::new(1.0, egui::Color32::LIGHT_BLUE),
-            egui::StrokeKind::Inside,
-        );
-        if response.drag_stopped() {
-            self.drag_start = None;
-            self.next_tag += 1;
-            self.word_jobs.insert(self.next_tag, self.tool);
-            worker.send(Request::Words {
-                tag: self.next_tag,
-                page,
-                area,
-            });
+        for r in &sel.quads {
+            painter.rect_filled(
+                screen_rect(r, map),
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(60, 120, 255, 80),
+            );
         }
     }
 
@@ -217,20 +358,6 @@ impl EditState {
         }
     }
 
-    /// Resposta do worker com as palavras de uma seleção: copia o texto ou cria a marcação.
-    pub fn on_words(&mut self, ctx: &egui::Context, tag: u64, page: i32, words: Vec<Word>) {
-        let Some(tool) = self.word_jobs.remove(&tag) else {
-            return;
-        };
-        if tool == Tool::Select {
-            if !words.is_empty() {
-                ctx.copy_text(selection_text(&words));
-            }
-        } else if let Some(annot) = annot_from_words(tool, page, words) {
-            self.add(annot);
-        }
-    }
-
     /// Janelinha para digitar o texto de uma nota.
     pub fn note_window(&mut self, ui: &mut egui::Ui) {
         if self.saving {
@@ -285,13 +412,7 @@ impl EditState {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn word(text: &str, x: f32) -> Word {
-        Word {
-            text: text.into(),
-            rect: PdfRect::new(x, 10.0, x + 20.0, 22.0),
-        }
-    }
+    use pdf_core::TextSelection;
 
     #[test]
     fn screen_rect_scales_and_offsets_a_page_rect() {
@@ -319,42 +440,6 @@ mod tests {
         edit.saving = true;
         edit.reset();
         assert!(!edit.pending.is_dirty() && !edit.saving);
-    }
-
-    #[test]
-    fn highlight_and_underline_cover_every_selected_word() {
-        let words = vec![word("a", 0.0), word("b", 30.0)];
-        match annot_from_words(Tool::Highlight, 3, words.clone()) {
-            Some(NewAnnot::Highlight { page, rects }) => {
-                assert_eq!(page, 3);
-                assert_eq!(rects, [words[0].rect, words[1].rect]);
-            }
-            other => panic!("{other:?}"),
-        }
-        assert!(matches!(
-            annot_from_words(Tool::Underline, 0, words),
-            Some(NewAnnot::Underline { .. })
-        ));
-    }
-
-    #[test]
-    fn other_tools_or_no_words_create_nothing() {
-        assert!(annot_from_words(Tool::Highlight, 0, vec![]).is_none());
-        for tool in [Tool::Select, Tool::Note, Tool::Ink] {
-            assert!(
-                annot_from_words(tool, 0, vec![word("a", 0.0)]).is_none(),
-                "{tool:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn selection_text_joins_words_with_spaces() {
-        assert_eq!(
-            selection_text(&[word("Hello", 0.0), word("Gera", 30.0)]),
-            "Hello Gera"
-        );
-        assert_eq!(selection_text(&[]), "");
     }
 
     fn note(text: &str) -> NewAnnot {
@@ -401,5 +486,105 @@ mod tests {
         });
         edit.save(&worker, "x.pdf".into());
         assert!(edit.saving);
+    }
+
+    fn sel(text: &str) -> TextSelection {
+        TextSelection {
+            quads: vec![PdfRect::new(1.0, 1.0, 5.0, 5.0)],
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn stale_selection_responses_are_ignored() {
+        let mut e = EditState {
+            latest_tag: 5,
+            ..Default::default()
+        };
+        e.on_selection(4, 0, sel("velha"));
+        assert!(e.selection.is_none());
+        e.on_selection(5, 0, sel("nova"));
+        assert_eq!(e.selection.as_ref().map(|s| s.text.as_str()), Some("nova"));
+    }
+
+    #[test]
+    fn finishing_a_highlight_drag_turns_the_selection_into_an_annotation() {
+        let mut e = EditState {
+            tool: Tool::Highlight,
+            latest_tag: 3,
+            finish_tag: Some((3, Markup::Highlight)),
+            ..Default::default()
+        };
+        e.on_selection(3, 2, sel("x"));
+        assert!(matches!(
+            e.pending.items(),
+            [NewAnnot::Highlight { page: 2, .. }]
+        ));
+        assert!(e.selection.is_none());
+    }
+
+    #[test]
+    fn context_menu_marks_the_current_selection() {
+        let mut e = EditState {
+            selection: Some(Selection {
+                page: Some(1),
+                quads: vec![PdfRect::new(1.0, 1.0, 5.0, 5.0)],
+                text: "x".into(),
+            }),
+            ..Default::default()
+        };
+        e.mark_selection(Markup::StrikeOut);
+        assert!(matches!(
+            e.pending.items(),
+            [NewAnnot::StrikeOut { page: 1, .. }]
+        ));
+        assert!(e.selection.is_none());
+    }
+
+    #[test]
+    fn whole_document_selection_cannot_be_marked() {
+        let mut e = EditState {
+            selection: Some(Selection {
+                page: None,
+                quads: vec![],
+                text: "tudo".into(),
+            }),
+            ..Default::default()
+        };
+        e.mark_selection(Markup::Highlight);
+        assert!(e.pending.items().is_empty());
+    }
+
+    #[test]
+    fn select_all_keeps_only_the_latest_document_text() {
+        let worker = Worker::spawn(|| {});
+        let mut e = EditState::default();
+        e.select_all(&worker);
+        let tag = e.latest_tag;
+        e.on_document_text(tag - 1, "velho".into());
+        assert!(e.selection.is_none());
+        e.on_document_text(tag, "tudo".into());
+        assert_eq!(
+            e.selection,
+            Some(Selection {
+                page: None,
+                quads: vec![],
+                text: "tudo".into()
+            })
+        );
+    }
+
+    #[test]
+    fn empty_selections_are_dropped() {
+        let mut e = EditState::default();
+        e.on_selection(
+            0,
+            0,
+            TextSelection {
+                quads: vec![],
+                text: String::new(),
+            },
+        );
+        assert!(e.selection.is_none());
     }
 }

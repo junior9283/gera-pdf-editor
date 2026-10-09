@@ -95,8 +95,8 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
             item(ui, &mut out, doc(DocCommand::Undo), has_doc);
             item(ui, &mut out, doc(DocCommand::Redo), has_doc);
             ui.separator();
-            soon(ui, "Copiar", "v1.1-B");
-            soon(ui, "Selecionar tudo", "v1.1-B");
+            item(ui, &mut out, doc(DocCommand::Copy), has_doc);
+            item(ui, &mut out, doc(DocCommand::SelectAll), has_doc);
             ui.separator();
             item(ui, &mut out, doc(DocCommand::Find), has_doc);
             ui.separator();

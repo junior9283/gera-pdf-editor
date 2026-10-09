@@ -35,6 +35,10 @@ pub enum DocCommand {
     Mode(ViewMode),
     /// Duas páginas: liga/desliga a capa sozinha.
     ToggleCover,
+    /// Copia o texto selecionado.
+    Copy,
+    /// Seleciona o texto do documento inteiro.
+    SelectAll,
     Rotate {
         clockwise: bool,
     },
@@ -83,6 +87,8 @@ pub struct DocTab {
     pub(crate) comment_tools: bool,
     /// Pedido de foco no campo de busca (Ctrl+F ou menu).
     pub(crate) focus_search: bool,
+    /// Copiar pedido por atalho ou menu (feito no próximo quadro, que tem o `egui::Context`).
+    copy_requested: bool,
     /// Última virada de página pela roda (tempo do egui), para não virar várias de uma vez.
     turned_at: f64,
 }
@@ -110,6 +116,7 @@ impl DocTab {
             password_prompt: None,
             comment_tools: false,
             focus_search: false,
+            copy_requested: false,
             turned_at: f64::NEG_INFINITY,
         }
     }
@@ -138,6 +145,8 @@ impl DocTab {
                 self.edit.redo();
             }
             DocCommand::Find => self.focus_search = true,
+            DocCommand::Copy => self.copy_requested = true,
+            DocCommand::SelectAll => self.edit.select_all(&self.worker),
             DocCommand::ZoomIn | DocCommand::ZoomOut | DocCommand::ZoomReset => {
                 let z = match cmd {
                     DocCommand::ZoomIn => zoom::zoom_in(view.zoom),
@@ -320,7 +329,13 @@ impl DocTab {
                     }
                 }
                 Response::SearchDone { id } => self.search.on_done(id),
-                Response::Words { tag, page, words } => self.edit.on_words(ctx, tag, page, words),
+                Response::Words { .. } => {} // a interface não pede mais palavras soltas
+                Response::Selection {
+                    tag,
+                    page,
+                    selection,
+                } => self.edit.on_selection(tag, page, selection),
+                Response::DocumentText { tag, text } => self.edit.on_document_text(tag, text),
                 Response::Saved { annots } => {
                     self.edit.reset();
                     self.saved_annots = annots;
@@ -341,9 +356,7 @@ impl DocTab {
                     self.status = format!("Não foi possível salvar: {msg}");
                 }
                 // ligados à interface nas próximas tarefas (seleção, propriedades, impressão)
-                Response::Selection { .. }
-                | Response::DocumentText { .. }
-                | Response::Properties(_)
+                Response::Properties(_)
                 | Response::PropertiesFailed(_)
                 | Response::Exported { .. }
                 | Response::ExportFailed(_) => {}
@@ -427,6 +440,9 @@ impl DocTab {
 
     /// Páginas, janelas de nota e senha e fim do quadro (depois dos painéis laterais).
     pub fn show_canvas(&mut self, ui: &mut egui::Ui) {
+        if std::mem::take(&mut self.copy_requested) {
+            self.edit.copy(ui.ctx());
+        }
         egui::CentralPanel::default().show(ui, |ui| self.canvas(ui));
         self.edit.note_window(ui);
         self.password_window(ui);
