@@ -4,6 +4,7 @@ mod canvas;
 mod doc_tab;
 mod edit;
 mod open_dialog;
+mod print_job;
 mod search;
 mod shell;
 mod sidebar;

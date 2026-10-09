@@ -1,12 +1,15 @@
 use crate::bench::Bench;
 use crate::canvas::{self, CanvasFrame};
 use crate::edit::{screen_rect, EditState};
+use crate::print_job::{self, PrintJobs};
 use crate::search::SearchState;
+use crate::shell::print_dialog::{PrintChoice, PrintDialog};
 use crate::sidebar::{self, SidebarAction};
 use crate::view::DocView;
 use app_state::layout::ViewMode;
 use app_state::nav::{nav_target, NavKey};
 use app_state::prefs::LeftPanel;
+use app_state::print::{lp_args, PrintOptions};
 use app_state::transform::PageMap;
 use app_state::zoom::{self, Fit};
 use pdf_core::{
@@ -92,6 +95,11 @@ pub struct DocTab {
     /// Propriedades do documento e se a janela delas está aberta.
     properties: Option<DocProperties>,
     show_properties: bool,
+    /// Diálogo "Imprimir" aberto.
+    print_dialog: Option<PrintDialog>,
+    /// Opções de uma impressão esperando a cópia temporária ficar pronta.
+    print_pending: Option<PrintOptions>,
+    print_jobs: PrintJobs,
     /// Copiar pedido por atalho ou menu (feito no próximo quadro, que tem o `egui::Context`).
     copy_requested: bool,
     /// Última virada de página pela roda (tempo do egui), para não virar várias de uma vez.
@@ -124,6 +132,9 @@ impl DocTab {
             copy_requested: false,
             properties: None,
             show_properties: false,
+            print_dialog: None,
+            print_pending: None,
+            print_jobs: PrintJobs::default(),
             turned_at: f64::NEG_INFINITY,
         }
     }
@@ -266,6 +277,9 @@ impl DocTab {
     }
 
     pub fn poll(&mut self, ctx: &egui::Context, mut bench: Option<&mut Bench>) {
+        if let Some(msg) = self.print_jobs.poll().pop() {
+            self.status = msg;
+        }
         let mut renders = 0;
         loop {
             let response = match self.worker.rx.try_recv() {
@@ -370,7 +384,11 @@ impl DocTab {
                 Response::PropertiesFailed(msg) => {
                     self.status = format!("Não foi possível ler as propriedades: {msg}");
                 }
-                Response::Exported { .. } | Response::ExportFailed(_) => {}
+                Response::Exported { dest } => self.send_to_printer(ctx, dest),
+                Response::ExportFailed(msg) => {
+                    self.print_pending = None;
+                    self.status = format!("Não foi possível preparar a impressão: {msg}");
+                }
             }
         }
     }
@@ -450,6 +468,56 @@ impl DocTab {
     }
 
     /// Páginas, janelas de nota e senha e fim do quadro (depois dos painéis laterais).
+    /// Arquivo → Imprimir: abre o diálogo com as impressoras do CUPS.
+    pub fn open_print_dialog(&mut self) {
+        if self.view.is_some() && self.print_pending.is_none() {
+            let (printers, default) = print_job::printers();
+            self.print_dialog = Some(PrintDialog::new(printers, default, self.last.current_page));
+        }
+    }
+
+    /// Opções escolhidas: o worker grava a cópia temporária; o envio continua em `send_to_printer`.
+    fn start_print(&mut self, options: PrintOptions) {
+        match print_job::temp_file() {
+            Ok(dest) => {
+                self.worker.send(Request::ExportForPrint {
+                    pending: self.edit.pending.items().to_vec(),
+                    dest,
+                    with_annots: options.with_annots,
+                });
+                self.status = format!("Preparando a impressão para {}…", options.printer);
+                self.print_pending = Some(options);
+            }
+            Err(e) => self.status = format!("Não foi possível preparar a impressão: {e}"),
+        }
+    }
+
+    /// A cópia temporária ficou pronta: monta os argumentos e entrega ao CUPS.
+    fn send_to_printer(&mut self, ctx: &egui::Context, file: PathBuf) {
+        let (Some(options), Some(view)) = (self.print_pending.take(), self.view.as_ref()) else {
+            let _ = std::fs::remove_file(&file);
+            return;
+        };
+        let oversized = print_job::any_oversized(&view.sizes);
+        let total = view.sizes.len();
+        match lp_args(
+            &options,
+            self.last.current_page + 1,
+            total,
+            oversized,
+            &file,
+        ) {
+            Ok(args) => {
+                self.status = format!("Enviando para {}…", options.printer);
+                self.print_jobs.start(ctx, options.printer, args, file);
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&file);
+                self.status = format!("Não foi possível imprimir: {e}");
+            }
+        }
+    }
+
     /// Arquivo → Propriedades: pede ao worker; a janela abre quando a resposta chega.
     pub fn request_properties(&mut self) {
         if self.view.is_some() {
@@ -460,6 +528,18 @@ impl DocTab {
     pub fn show_canvas(&mut self, ui: &mut egui::Ui) {
         if let Some(p) = self.properties.as_ref().filter(|_| self.show_properties) {
             crate::shell::properties::window(ui, p, &mut self.show_properties);
+        }
+        let choice = match (self.print_dialog.as_mut(), self.view.as_mut()) {
+            (Some(dialog), Some(view)) => dialog.show(ui, view, &self.worker),
+            _ => None,
+        };
+        match choice {
+            Some(PrintChoice::Print(options)) => {
+                self.print_dialog = None;
+                self.start_print(options);
+            }
+            Some(PrintChoice::Cancel) => self.print_dialog = None,
+            None => {}
         }
         if std::mem::take(&mut self.copy_requested) {
             self.edit.copy(ui.ctx());

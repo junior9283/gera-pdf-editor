@@ -52,13 +52,6 @@ fn soon_tool(ui: &mut egui::Ui, id: &str) {
     }
 }
 
-fn soon(ui: &mut egui::Ui, label: &str, phase: &str) {
-    ui.add_enabled(
-        false,
-        egui::Button::new(format!("{label}  · em breve ({phase})")),
-    );
-}
-
 pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
     let mut out = None;
     let has_doc = s.doc_mode.is_some();
@@ -86,7 +79,7 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
             soon_tool(ui, "exportar");
             ui.separator();
             item(ui, &mut out, Command::Properties, has_doc);
-            soon(ui, "Imprimir", "v1.1-B");
+            item(ui, &mut out, Command::Print, has_doc);
             ui.separator();
             item(ui, &mut out, Command::CloseTab, has_doc);
             item(ui, &mut out, Command::Quit, true);
