@@ -183,3 +183,19 @@ fn strikeout_is_saved_and_read_back() {
     let again = PdfDoc::open(&path, None).unwrap();
     assert_eq!(again.annotations(0).unwrap()[0].kind, AnnotKind::StrikeOut);
 }
+
+#[test]
+fn annotations_have_stable_ids_and_style() {
+    let (_d, path, mut doc) = setup();
+    doc.save_with(&[highlight(PdfRect::new(70.0, 90.0, 200.0, 110.0))], &path)
+        .unwrap();
+    let a = doc.annotations(0).unwrap()[0].clone();
+    let again = PdfDoc::open(&path, None).unwrap().annotations(0).unwrap()[0].clone();
+    assert!(a.id > 0);
+    assert_eq!(a.id, again.id, "o número do objeto não muda ao reabrir");
+    assert!(a.color.is_some() && a.opacity > 0.0);
+    assert!(
+        !a.movable() && !a.resizable(),
+        "destaque fica preso ao texto"
+    );
+}

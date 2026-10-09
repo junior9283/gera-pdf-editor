@@ -75,6 +75,18 @@ impl<K: Hash + Eq + Clone, V: Weighed> LruCache<K, V> {
         }
     }
 
+    /// Mantém só as entradas cuja chave satisfaz `keep`.
+    pub fn retain(&mut self, mut keep: impl FnMut(&K) -> bool) {
+        let bytes = &mut self.bytes;
+        self.map.retain(|k, (v, _)| {
+            let ok = keep(k);
+            if !ok {
+                *bytes -= v.weight();
+            }
+            ok
+        });
+    }
+
     pub fn clear(&mut self) {
         self.map.clear();
         self.bytes = 0;
@@ -131,5 +143,15 @@ mod tests {
         assert_eq!(c.keys().count(), 2);
         c.clear();
         assert!(c.is_empty() && c.bytes() == 0);
+    }
+
+    #[test]
+    fn retain_drops_entries_and_their_bytes() {
+        let mut c = LruCache::new(100);
+        c.insert(1, Blob(30));
+        c.insert(2, Blob(20));
+        c.retain(|k| *k != 1);
+        assert!(!c.contains(&1) && c.contains(&2));
+        assert_eq!(c.bytes(), 20);
     }
 }

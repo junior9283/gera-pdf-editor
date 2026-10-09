@@ -1,6 +1,7 @@
 use crate::error::PdfError;
 use crate::types::{
-    AnnotInfo, DocProperties, DocSummary, NewAnnot, PdfRect, RenderedPage, Rotation, TextSelection,
+    AnnotInfo, AnnotOp, DocProperties, DocSummary, HistoryState, PdfRect, RenderedPage, Rotation,
+    TextSelection,
 };
 use crate::PdfDoc;
 use std::path::PathBuf;
@@ -41,10 +42,14 @@ pub enum Request {
         needle: String,
         cancel: CancelToken,
     },
+    /// Grava o documento em memória (com as edições) em `dest`.
     Save {
-        pending: Vec<NewAnnot>,
         dest: PathBuf,
     },
+    /// Edição de anotação, aplicada na hora no documento em memória.
+    Annot(AnnotOp),
+    Undo,
+    Redo,
     /// Seleção pelo fluxo do texto entre `a` e `b` (pontos da página).
     SelectText {
         tag: u64,
@@ -57,9 +62,8 @@ pub enum Request {
         tag: u64,
     },
     Properties,
-    /// Cópia para imprimir em `dest` (com as pendentes ou sem nenhuma anotação).
+    /// Cópia para imprimir em `dest` (o documento em memória, com ou sem as anotações).
     ExportForPrint {
-        pending: Vec<NewAnnot>,
         dest: PathBuf,
         with_annots: bool,
     },
@@ -90,8 +94,13 @@ pub enum Response {
     },
     Saved {
         annots: Vec<AnnotInfo>,
+        history: HistoryState,
     },
-    SaveFailed(String),
+    /// Gravação falhou: as edições continuam em memória, o histórico pode ter recomeçado.
+    SaveFailed {
+        error: String,
+        history: HistoryState,
+    },
     Selection {
         tag: u64,
         page: i32,
@@ -107,6 +116,14 @@ pub enum Response {
         dest: PathBuf,
     },
     ExportFailed(String),
+    /// As anotações mudaram (edição, desfazer ou refazer): páginas mudadas (a renderizar de
+    /// novo), as anotações visíveis delas e o estado do histórico.
+    AnnotsChanged {
+        pages: Vec<i32>,
+        annots: Vec<AnnotInfo>,
+        history: HistoryState,
+    },
+    AnnotFailed(String),
 }
 
 const NO_DOC: &str = "nenhum documento aberto";
@@ -204,18 +221,30 @@ impl State {
                     None => send(Response::SearchDone { id }),
                 }
             }
-            Request::Save { pending, dest } => {
+            Request::Save { dest } => {
                 let Some(d) = self.doc.as_mut() else {
-                    send(Response::SaveFailed(NO_DOC.into()));
+                    send(Response::SaveFailed {
+                        error: NO_DOC.into(),
+                        history: HistoryState::default(),
+                    });
                     return;
                 };
-                match d.save_with(&pending, &dest) {
-                    Ok(()) => send(Response::Saved {
+                let result = d.save(&dest);
+                let history = d.history_state();
+                send(match result {
+                    Ok(()) => Response::Saved {
                         annots: d.all_annotations().unwrap_or_default(),
-                    }),
-                    Err(e) => send(Response::SaveFailed(e.to_string())),
-                }
+                        history,
+                    },
+                    Err(e) => Response::SaveFailed {
+                        error: e.to_string(),
+                        history,
+                    },
+                });
             }
+            Request::Annot(op) => self.edit(send, |d| d.apply(op)),
+            Request::Undo => self.edit(send, PdfDoc::undo),
+            Request::Redo => self.edit(send, PdfDoc::redo),
             Request::SelectText { tag, page, a, b } => {
                 let selection = self
                     .doc
@@ -240,16 +269,35 @@ impl State {
                 self.with_doc(PdfDoc::properties)
                     .map_or_else(Response::PropertiesFailed, Response::Properties),
             ),
-            Request::ExportForPrint {
-                pending,
-                dest,
-                with_annots,
-            } => send(
-                match self.with_doc(|d| d.export_for_print(&pending, &dest, with_annots)) {
+            Request::ExportForPrint { dest, with_annots } => send(
+                match self.with_doc(|d| d.export_for_print(&dest, with_annots)) {
                     Ok(()) => Response::Exported { dest },
                     Err(e) => Response::ExportFailed(e),
                 },
             ),
+        }
+    }
+
+    /// Aplica uma edição de anotação e conta o resultado à interface.
+    fn edit(
+        &mut self,
+        send: &dyn Fn(Response),
+        f: impl FnOnce(&mut PdfDoc) -> crate::Result<Vec<i32>>,
+    ) {
+        let Some(d) = self.doc.as_mut() else {
+            send(Response::AnnotFailed(NO_DOC.into()));
+            return;
+        };
+        match f(d) {
+            Ok(pages) => send(Response::AnnotsChanged {
+                annots: pages
+                    .iter()
+                    .flat_map(|&p| d.annotations(p).unwrap_or_default())
+                    .collect(),
+                pages,
+                history: d.history_state(),
+            }),
+            Err(e) => send(Response::AnnotFailed(e.to_string())),
         }
     }
 

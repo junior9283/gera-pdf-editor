@@ -1,11 +1,17 @@
 use crate::view::DocView;
 use app_state::prefs::LeftPanel;
 use app_state::transform;
-use pdf_core::{AnnotInfo, AnnotKind, NewAnnot, OutlineItem, PageSize, Rotation, Worker};
+use pdf_core::{AnnotInfo, AnnotKind, OutlineItem, PageSize, Rotation, Worker};
 
 pub enum SidebarAction {
     None,
     JumpToPage(usize),
+    /// Seleciona a anotação e leva até ela.
+    SelectAnnot {
+        page: i32,
+        id: i32,
+        at: (f32, f32),
+    },
 }
 
 const THUMB_WIDTH: f32 = 110.0;
@@ -25,17 +31,6 @@ fn thumb_height(size: &PageSize, rotation: Rotation) -> f32 {
     THUMB_WIDTH * h / w
 }
 
-fn annot_label(kind: &str, page: i32, contents: &str, unsaved: bool) -> String {
-    let mut label = format!("{kind} — p. {}", page + 1);
-    if !contents.is_empty() {
-        label.push_str(&format!(": {contents}"));
-    }
-    if unsaved {
-        label.push_str(" (não salvo)");
-    }
-    label
-}
-
 fn kind_label(kind: AnnotKind) -> &'static str {
     match kind {
         AnnotKind::Highlight => "Destaque",
@@ -43,22 +38,16 @@ fn kind_label(kind: AnnotKind) -> &'static str {
         AnnotKind::Note => "Nota",
         AnnotKind::Ink => "Desenho",
         AnnotKind::StrikeOut => "Riscado",
+        AnnotKind::Other => "Anotação",
     }
 }
 
-fn saved_label(a: &AnnotInfo) -> String {
-    annot_label(kind_label(a.kind), a.page, &a.contents, false)
-}
-
-fn pending_label(a: &NewAnnot) -> String {
-    let kind = match a {
-        NewAnnot::Highlight { .. } => "Destaque",
-        NewAnnot::Underline { .. } => "Sublinhado",
-        NewAnnot::Note { .. } => "Nota",
-        NewAnnot::Ink { .. } => "Desenho",
-        NewAnnot::StrikeOut { .. } => "Riscado",
-    };
-    annot_label(kind, a.page(), "", true)
+fn annot_label(a: &AnnotInfo) -> String {
+    let mut label = format!("{} — p. {}", kind_label(a.kind), a.page + 1);
+    if !a.contents.is_empty() {
+        label.push_str(&format!(": {}", a.contents));
+    }
+    label
 }
 
 pub fn show(
@@ -67,15 +56,14 @@ pub fn show(
     view: &mut DocView,
     worker: &Worker,
     outline: &[OutlineItem],
-    saved: &[AnnotInfo],
-    pending: &[NewAnnot],
+    annots: &[AnnotInfo],
 ) -> SidebarAction {
     ui.strong(panel.label());
     ui.separator();
     match panel {
         LeftPanel::Thumbnails => thumbnails(ui, view, worker),
         LeftPanel::Outline => outline_list(ui, outline),
-        LeftPanel::Annotations => annotation_list(ui, saved, pending),
+        LeftPanel::Annotations => annotation_list(ui, annots),
     }
 }
 
@@ -155,21 +143,21 @@ fn outline_list(ui: &mut egui::Ui, outline: &[OutlineItem]) -> SidebarAction {
     action
 }
 
-fn annotation_list(ui: &mut egui::Ui, saved: &[AnnotInfo], pending: &[NewAnnot]) -> SidebarAction {
+fn annotation_list(ui: &mut egui::Ui, annots: &[AnnotInfo]) -> SidebarAction {
     let mut action = SidebarAction::None;
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
-            if saved.is_empty() && pending.is_empty() {
+            if annots.is_empty() {
                 ui.label("Nenhuma anotação.");
             }
-            let entries = saved
-                .iter()
-                .map(|a| (saved_label(a), a.page))
-                .chain(pending.iter().map(|a| (pending_label(a), a.page())));
-            for (label, page) in entries {
-                if ui.button(label).clicked() {
-                    action = SidebarAction::JumpToPage(page.max(0) as usize);
+            for a in annots {
+                if ui.button(annot_label(a)).clicked() {
+                    action = SidebarAction::SelectAnnot {
+                        page: a.page,
+                        id: a.id,
+                        at: (a.rect.x0, a.rect.y0),
+                    };
                 }
             }
         });
@@ -204,29 +192,21 @@ mod tests {
     }
 
     #[test]
-    fn labels_mention_page_text_and_unsaved_state() {
-        assert_eq!(annot_label("Destaque", 2, "", false), "Destaque — p. 3");
-        assert_eq!(annot_label("Nota", 0, "olá", false), "Nota — p. 1: olá");
-        assert_eq!(
-            annot_label("Desenho", 4, "", true),
-            "Desenho — p. 5 (não salvo)"
-        );
-    }
-
-    #[test]
-    fn saved_and_pending_annotations_get_the_same_kind_names() {
-        let info = AnnotInfo {
+    fn labels_mention_kind_page_and_text() {
+        let mut a = AnnotInfo {
+            id: 1,
+            color: None,
+            opacity: 1.0,
+            width: None,
             kind: AnnotKind::Underline,
             page: 1,
             rect: PdfRect::new(0.0, 0.0, 1.0, 1.0),
             contents: String::new(),
         };
-        let pending = NewAnnot::Underline {
-            page: 1,
-            rects: vec![info.rect],
-        };
-        assert_eq!(saved_label(&info), "Sublinhado — p. 2");
-        assert_eq!(pending_label(&pending), "Sublinhado — p. 2 (não salvo)");
+        assert_eq!(annot_label(&a), "Sublinhado — p. 2");
+        a.kind = AnnotKind::Note;
+        a.contents = "olá".into();
+        assert_eq!(annot_label(&a), "Nota — p. 2: olá");
     }
 
     #[test]

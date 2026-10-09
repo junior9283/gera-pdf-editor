@@ -303,6 +303,17 @@ impl DocView {
         self.cache.insert(key, CachedTexture { handle, bytes });
     }
 
+    /// Descarta as texturas e os pedidos da página (o conteúdo dela mudou).
+    pub fn invalidate_page(&mut self, page: i32) {
+        self.requested.retain(|k, token| {
+            if k.0 == page {
+                token.cancel();
+            }
+            k.0 != page
+        });
+        self.cache.retain(|k| k.0 != page);
+    }
+
     pub fn clear_cache(&mut self) {
         for token in self.requested.values() {
             token.cancel();
@@ -470,5 +481,24 @@ mod tests {
         assert!(v.texture_at(0, 1.0).is_none());
         v.on_rendered(&ctx, 0, 1.0, false, Rotation::R0, img);
         assert!(v.texture_at(0, 1.0).is_some());
+    }
+
+    #[test]
+    fn invalidate_page_drops_only_that_page() {
+        let ctx = egui::Context::default();
+        let worker = Worker::spawn(|| {});
+        let mut v = view();
+        let img = RenderedPage {
+            width: 1,
+            height: 1,
+            rgb: vec![255, 255, 255],
+        };
+        for p in [0, 1] {
+            v.request_at(&worker, p, 1.0);
+            v.on_rendered(&ctx, p, 1.0, false, Rotation::R0, img.clone());
+        }
+        v.invalidate_page(0);
+        assert!(v.texture_at(0, 1.0).is_none());
+        assert!(v.texture_at(1, 1.0).is_some(), "as outras páginas ficam");
     }
 }

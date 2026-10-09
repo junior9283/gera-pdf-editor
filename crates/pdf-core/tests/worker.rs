@@ -1,6 +1,8 @@
 mod common;
 use common::write_sample;
-use pdf_core::{CancelToken, NewAnnot, PdfError, PdfRect, Request, Response, Rotation, Worker};
+use pdf_core::{
+    AnnotOp, CancelToken, NewAnnot, PdfError, PdfRect, Request, Response, Rotation, Worker,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -87,31 +89,59 @@ fn search_streams_hits_then_done() {
 fn save_and_failed_open() {
     let (dir, w, _) = opened(1);
     let path = dir.path().join("a.pdf");
-    w.send(Request::Save {
-        pending: vec![NewAnnot::Highlight {
-            page: 0,
-            rects: vec![PdfRect::new(70.0, 90.0, 200.0, 110.0)],
-        }],
-        dest: path,
-    });
+    w.send(Request::Annot(AnnotOp::Create(NewAnnot::Highlight {
+        page: 0,
+        rects: vec![PdfRect::new(70.0, 90.0, 200.0, 110.0)],
+    })));
+    assert!(matches!(recv(&w), Response::AnnotsChanged { .. }));
+    w.send(Request::Save { dest: path });
     match recv(&w) {
-        Response::Saved { annots } => assert_eq!(annots.len(), 1),
+        Response::Saved { annots, history } => {
+            assert_eq!(annots.len(), 1);
+            assert!(!history.dirty && !history.can_undo);
+        }
         other => panic!("{other:?}"),
     }
     w.send(Request::Save {
-        pending: vec![NewAnnot::Note {
-            page: 0,
-            at: (1.0, 1.0),
-            text: "x".into(),
-        }],
         dest: dir.path().join("nada").join("x.pdf"),
     });
-    assert!(matches!(recv(&w), Response::SaveFailed(_)));
+    assert!(matches!(recv(&w), Response::SaveFailed { .. }));
     w.send(Request::Open {
         path: dir.path().join("nao_existe.pdf"),
         password: None,
     });
     assert!(matches!(recv(&w), Response::OpenFailed(PdfError::Open(_))));
+}
+
+#[test]
+fn annotation_edits_through_the_worker() {
+    let (_d, w, _) = opened(1);
+    w.send(Request::Annot(AnnotOp::Create(NewAnnot::Note {
+        page: 0,
+        at: (50.0, 50.0),
+        text: "x".into(),
+    })));
+    let id = match recv(&w) {
+        Response::AnnotsChanged {
+            annots,
+            pages,
+            history,
+        } => {
+            assert_eq!(pages, vec![0]);
+            assert!(history.can_undo && history.dirty);
+            annots[0].id
+        }
+        other => panic!("{other:?}"),
+    };
+    w.send(Request::Undo);
+    assert!(
+        matches!(recv(&w), Response::AnnotsChanged { ref annots, history, .. } if annots.is_empty() && history.can_redo)
+    );
+    w.send(Request::Annot(AnnotOp::Delete {
+        page: 0,
+        id: id + 1000,
+    }));
+    assert!(matches!(recv(&w), Response::AnnotFailed(_)));
 }
 
 #[test]
@@ -184,7 +214,6 @@ fn export_for_print_through_the_worker() {
     let (dir, w, _) = opened(1);
     let dest = dir.path().join("imprimir.pdf");
     w.send(Request::ExportForPrint {
-        pending: vec![],
         dest: dest.clone(),
         with_annots: true,
     });

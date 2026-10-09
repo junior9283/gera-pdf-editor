@@ -18,6 +18,19 @@ impl PdfRect {
         Self::new(a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1))
     }
 
+    pub fn width(&self) -> f32 {
+        self.x1 - self.x0
+    }
+
+    pub fn height(&self) -> f32 {
+        self.y1 - self.y0
+    }
+
+    /// O mesmo retângulo deslocado de (`dx`, `dy`).
+    pub fn translated(&self, dx: f32, dy: f32) -> PdfRect {
+        PdfRect::new(self.x0 + dx, self.y0 + dy, self.x1 + dx, self.y1 + dy)
+    }
+
     pub fn intersects(&self, o: &PdfRect) -> bool {
         self.x0 < o.x1 && o.x0 < self.x1 && self.y0 < o.y1 && o.y0 < self.y1
     }
@@ -62,14 +75,34 @@ pub enum AnnotKind {
     Note,
     Ink,
     StrikeOut,
+    /// Tipo que não criamos (de outro programa): selecionável e apagável.
+    Other,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnnotInfo {
+    /// Número do objeto no PDF: identidade estável da anotação.
+    pub id: i32,
     pub kind: AnnotKind,
     pub page: i32,
     pub rect: PdfRect,
     pub contents: String,
+    pub color: Option<[f32; 3]>,
+    pub opacity: f32,
+    /// Espessura do traço (desenho).
+    pub width: Option<f32>,
+}
+
+impl AnnotInfo {
+    /// Pode ser arrastada (marcações de texto ficam presas às palavras, como no Acrobat).
+    pub fn movable(&self) -> bool {
+        matches!(self.kind, AnnotKind::Note | AnnotKind::Ink)
+    }
+
+    /// Tem alças para mudar de tamanho.
+    pub fn resizable(&self) -> bool {
+        self.kind == AnnotKind::Ink
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -183,6 +216,39 @@ pub struct TextSelection {
     pub text: String,
 }
 
+/// Operação do usuário sobre as anotações (aplicada na hora, com desfazer).
+#[derive(Debug, Clone, PartialEq)]
+pub enum AnnotOp {
+    Create(NewAnnot),
+    Move {
+        page: i32,
+        id: i32,
+        dx: f32,
+        dy: f32,
+    },
+    Resize {
+        page: i32,
+        id: i32,
+        rect: PdfRect,
+    },
+    Style {
+        page: i32,
+        id: i32,
+        color: Option<[f32; 3]>,
+        opacity: f32,
+        width: Option<f32>,
+    },
+    SetContents {
+        page: i32,
+        id: i32,
+        text: String,
+    },
+    Delete {
+        page: i32,
+        id: i32,
+    },
+}
+
 /// Propriedades do documento (Arquivo → Propriedades). As datas vêm cruas (`D:AAAAMMDD…`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DocProperties {
@@ -203,4 +269,45 @@ pub struct DocProperties {
     pub pages: i32,
     pub first_page: PageSize,
     pub file_size: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(kind: AnnotKind) -> AnnotInfo {
+        AnnotInfo {
+            id: 1,
+            kind,
+            page: 0,
+            rect: PdfRect::new(0.0, 0.0, 1.0, 1.0),
+            contents: String::new(),
+            color: None,
+            opacity: 1.0,
+            width: None,
+        }
+    }
+
+    #[test]
+    fn only_notes_and_drawings_move_and_only_drawings_resize() {
+        assert!(info(AnnotKind::Note).movable() && !info(AnnotKind::Note).resizable());
+        assert!(info(AnnotKind::Ink).movable() && info(AnnotKind::Ink).resizable());
+        for k in [
+            AnnotKind::Highlight,
+            AnnotKind::Underline,
+            AnnotKind::StrikeOut,
+            AnnotKind::Other,
+        ] {
+            assert!(!info(k).movable() && !info(k).resizable(), "{k:?}");
+        }
+    }
+}
+
+/// Estado do desfazer/refazer das edições de anotação.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HistoryState {
+    pub can_undo: bool,
+    pub can_redo: bool,
+    /// Há edições ainda não gravadas no arquivo.
+    pub dirty: bool,
 }

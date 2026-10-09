@@ -90,6 +90,7 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
             ui.separator();
             item(ui, &mut out, doc(DocCommand::Copy), has_doc);
             item(ui, &mut out, doc(DocCommand::SelectAll), has_doc);
+            item(ui, &mut out, doc(DocCommand::Delete), has_doc);
             ui.separator();
             item(ui, &mut out, doc(DocCommand::Find), has_doc);
             ui.separator();

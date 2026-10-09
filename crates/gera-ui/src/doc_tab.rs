@@ -13,7 +13,8 @@ use app_state::print::{any_oversized, lp_args, PrintOptions};
 use app_state::transform::PageMap;
 use app_state::zoom::{self, Fit};
 use pdf_core::{
-    AnnotInfo, DocProperties, DocSummary, OutlineItem, PdfError, Request, Response, Worker,
+    AnnotInfo, DocProperties, DocSummary, HistoryState, OutlineItem, PdfError, Request, Response,
+    Worker,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,6 +45,8 @@ pub enum DocCommand {
     Copy,
     /// Seleciona o texto do documento inteiro.
     SelectAll,
+    /// Apaga a anotação selecionada.
+    Delete,
     Rotate {
         clockwise: bool,
     },
@@ -86,8 +89,10 @@ pub struct DocTab {
     pub(crate) jump_to: Option<f32>,
     pub(crate) search: SearchState,
     pub(crate) edit: EditState,
-    /// Anotações já gravadas no PDF aberto.
-    pub(crate) saved_annots: Vec<AnnotInfo>,
+    /// Anotações visíveis do documento em memória (o worker manda a lista a cada mudança).
+    pub(crate) annots: Vec<AnnotInfo>,
+    /// Estado do histórico de edições no worker.
+    history: HistoryState,
     /// O motor de PDF (thread do worker) parou; já avisado.
     engine_stopped: bool,
     outline: Vec<OutlineItem>,
@@ -128,7 +133,8 @@ impl DocTab {
             jump_to: None,
             search: SearchState::default(),
             edit: EditState::default(),
-            saved_annots: Vec::new(),
+            annots: Vec::new(),
+            history: HistoryState::default(),
             engine_stopped: false,
             outline: Vec::new(),
             opening: None,
@@ -144,9 +150,9 @@ impl DocTab {
         }
     }
 
-    /// Há anotações ainda não gravadas no PDF?
+    /// Há edições ainda não gravadas no arquivo?
     pub fn is_dirty(&self) -> bool {
-        self.edit.pending.is_dirty()
+        self.history.dirty
     }
 
     /// Fechar esta aba precisa de confirmação (pendências ou salvamento em andamento)?
@@ -161,15 +167,13 @@ impl DocTab {
         };
         match cmd {
             DocCommand::Save => self.save(),
-            DocCommand::Undo => {
-                self.edit.undo();
-            }
-            DocCommand::Redo => {
-                self.edit.redo();
-            }
+            DocCommand::Undo if self.history.can_undo => self.worker.send(Request::Undo),
+            DocCommand::Redo if self.history.can_redo => self.worker.send(Request::Redo),
+            DocCommand::Undo | DocCommand::Redo => {}
             DocCommand::Find => self.focus_search = true,
             DocCommand::Copy => self.edit.copy(ctx),
             DocCommand::SelectAll => self.edit.select_all(&self.worker),
+            DocCommand::Delete => self.edit.delete_selected(),
             DocCommand::ZoomIn | DocCommand::ZoomOut | DocCommand::ZoomReset => {
                 let z = match cmd {
                     DocCommand::ZoomIn => zoom::zoom_in(view.zoom),
@@ -208,9 +212,17 @@ impl DocTab {
         }
     }
 
+    /// Salvar: só quando há o que gravar.
     pub fn save(&mut self) {
-        if let Some(view) = self.view.as_ref() {
+        if let Some(view) = self.view.as_ref().filter(|_| self.history.dirty) {
             self.edit.save(&self.worker, view.path.clone());
+        }
+    }
+
+    /// Manda ao worker as edições geradas neste quadro.
+    fn send_edits(&mut self) {
+        for op in self.edit.take_ops() {
+            self.worker.send(Request::Annot(op));
         }
     }
 
@@ -231,9 +243,8 @@ impl DocTab {
     }
 
     pub fn save_as(&mut self, dest: PathBuf) {
-        if self.view.is_some() && !self.edit.saving {
-            self.save_dest = Some(dest.clone());
-            self.edit.save_as(&self.worker, dest);
+        if self.view.is_some() && self.edit.save(&self.worker, dest.clone()) {
+            self.save_dest = Some(dest);
         }
     }
 
@@ -261,7 +272,8 @@ impl DocTab {
     }
 
     fn on_opened(&mut self, summary: DocSummary) {
-        self.saved_annots = summary.annots;
+        self.annots = summary.annots;
+        self.history = HistoryState::default();
         self.outline = summary.outline;
         self.password_prompt = None;
         self.edit.reset();
@@ -361,12 +373,10 @@ impl DocTab {
                     selection,
                 } => self.edit.on_selection(tag, page, selection),
                 Response::DocumentText { tag, text } => self.edit.on_document_text(tag, text),
-                Response::Saved { annots } => {
-                    self.edit.reset();
-                    self.saved_annots = annots;
-                    if let Some(view) = self.view.as_mut() {
-                        view.clear_cache(); // as páginas precisam ser renderizadas de novo, agora com as anotações
-                    }
+                Response::Saved { annots, history } => {
+                    self.edit.saving = false;
+                    self.annots = annots;
+                    self.history = history;
                     self.status = "Salvo.".into();
                     if let Some(dest) = self.save_dest.take() {
                         if let Some(view) = self.view.as_mut() {
@@ -375,10 +385,11 @@ impl DocTab {
                         self.events.push(DocEvent::Renamed(dest));
                     }
                 }
-                Response::SaveFailed(msg) => {
+                Response::SaveFailed { error, history } => {
                     self.edit.saving = false;
+                    self.history = history;
                     self.save_dest = None;
-                    self.status = format!("Não foi possível salvar: {msg}");
+                    self.status = format!("Não foi possível salvar: {error}");
                 }
                 Response::Properties(p) => {
                     self.properties = Some(p);
@@ -390,6 +401,23 @@ impl DocTab {
                 Response::ExportFailed(msg) => {
                     self.print_pending = None;
                     self.status = format!("Não foi possível preparar a impressão: {msg}");
+                }
+                Response::AnnotsChanged {
+                    pages,
+                    annots,
+                    history,
+                } => {
+                    replace_pages(&mut self.annots, &pages, annots);
+                    self.edit.keep_valid_selection(&self.annots);
+                    self.history = history;
+                    if let Some(view) = self.view.as_mut() {
+                        for page in pages {
+                            view.invalidate_page(page);
+                        }
+                    }
+                }
+                Response::AnnotFailed(msg) => {
+                    self.status = format!("Não foi possível alterar a anotação: {msg}");
                 }
             }
         }
@@ -464,8 +492,7 @@ impl DocTab {
     /// Barra de status (some na tela cheia).
     /// Barra de status; `shell` é a mensagem da casca (erros do seletor, de abertura...).
     pub fn show_status(&mut self, ui: &mut egui::Ui, shell: &str) {
-        let unsaved = self.edit.pending.items().len();
-        let text = status_line(shell, &self.status, unsaved);
+        let text = status_line(shell, &self.status, self.history.dirty);
         egui::Panel::bottom("status").show(ui, |ui| ui.label(text));
     }
 
@@ -482,7 +509,6 @@ impl DocTab {
         match print_job::temp_file() {
             Ok(dest) => {
                 self.worker.send(Request::ExportForPrint {
-                    pending: self.edit.pending.items().to_vec(),
                     dest: dest.clone(),
                     with_annots: options.with_annots,
                 });
@@ -553,7 +579,11 @@ impl DocTab {
             None => {}
         }
         egui::CentralPanel::default().show(ui, |ui| self.canvas(ui));
+        let down = ui.input(|i| i.pointer.any_down());
+        self.edit.drop_stale_drag(down);
         self.edit.note_window(ui);
+        self.edit.props_window(ui, &self.annots);
+        self.send_edits();
         self.password_window(ui);
         if let Some(view) = self.view.as_mut() {
             view.end_frame();
@@ -568,21 +598,19 @@ impl DocTab {
         // cada aba com seu id: as listas guardam a própria rolagem
         let action = ui
             .push_id(self.id, |ui| {
-                sidebar::show(
-                    ui,
-                    panel,
-                    view,
-                    &self.worker,
-                    &self.outline,
-                    &self.saved_annots,
-                    self.edit.pending.items(),
-                )
+                sidebar::show(ui, panel, view, &self.worker, &self.outline, &self.annots)
             })
             .inner;
-        if let SidebarAction::JumpToPage(page) = action {
-            if let Some(y) = view.go_to(page as i32, None) {
-                self.jump_to = Some(y);
+        let target = match action {
+            SidebarAction::None => return,
+            SidebarAction::JumpToPage(page) => (page as i32, None),
+            SidebarAction::SelectAnnot { page, id, at } => {
+                self.edit.selected = Some((page, id));
+                (page, Some(at))
             }
+        };
+        if let Some(y) = view.go_to(target.0, target.1) {
+            self.jump_to = Some(y);
         }
     }
 
@@ -672,7 +700,8 @@ impl DocTab {
         {
             self.jump_to = Some(self.last.scroll_y * ratio);
         }
-        let (worker, edit, search) = (&self.worker, &mut self.edit, &self.search);
+        let (worker, edit, search, annots) =
+            (&self.worker, &mut self.edit, &self.search, &self.annots);
         let jump_to = self.jump_to.take();
         // cada aba com seu id: a área de rolagem guarda a posição de cada documento
         self.last = ui
@@ -684,7 +713,7 @@ impl DocTab {
                     jump_to,
                     &mut |ui, page, rect, map: &PageMap| {
                         paint_search_hits(ui, search, page as i32, map);
-                        edit.on_page(ui, worker, page as i32, rect, map);
+                        edit.on_page(ui, worker, annots, page as i32, rect, map);
                     },
                 )
             })
@@ -697,15 +726,22 @@ impl DocTab {
     }
 }
 
+/// Troca na lista as anotações das `pages` pelas novas, mantendo a ordem por página.
+fn replace_pages(all: &mut Vec<AnnotInfo>, pages: &[i32], new: Vec<AnnotInfo>) {
+    all.retain(|a| !pages.contains(&a.page));
+    all.extend(new);
+    all.sort_by_key(|a| a.page); // estável: a ordem dentro da página é a de desenho
+}
+
 /// Texto da barra de status: a mensagem da casca (se houver) vem antes da do documento.
-fn status_line(shell: &str, doc: &str, unsaved: usize) -> String {
+fn status_line(shell: &str, doc: &str, unsaved: bool) -> String {
     let mut line = match (shell.is_empty(), doc.is_empty()) {
         (true, _) => doc.to_string(),
         (false, true) => shell.to_string(),
         (false, false) => format!("{shell} · {doc}"),
     };
-    if unsaved > 0 {
-        line.push_str(&format!(" — {unsaved} alterações não salvas"));
+    if unsaved {
+        line.push_str(" — alterações não salvas");
     }
     line
 }
@@ -751,14 +787,36 @@ mod tests {
     #[test]
     fn shell_messages_show_in_the_document_status_bar() {
         assert_eq!(
-            status_line("", "doc.pdf — 3 páginas", 0),
+            status_line("", "doc.pdf — 3 páginas", false),
             "doc.pdf — 3 páginas"
         );
         assert_eq!(
-            status_line("", "doc.pdf", 2),
-            "doc.pdf — 2 alterações não salvas"
+            status_line("", "doc.pdf", true),
+            "doc.pdf — alterações não salvas"
         );
-        let line = status_line("Esse arquivo já está aberto em outra aba.", "doc.pdf", 0);
+        let line = status_line(
+            "Esse arquivo já está aberto em outra aba.",
+            "doc.pdf",
+            false,
+        );
         assert!(line.starts_with("Esse arquivo já está aberto"), "{line}");
+    }
+
+    #[test]
+    fn changed_pages_replace_only_their_annotations() {
+        let a = |page, id| AnnotInfo {
+            id,
+            kind: pdf_core::AnnotKind::Note,
+            page,
+            rect: pdf_core::PdfRect::new(0.0, 0.0, 1.0, 1.0),
+            contents: String::new(),
+            color: None,
+            opacity: 1.0,
+            width: None,
+        };
+        let mut all = vec![a(0, 1), a(1, 2), a(1, 3), a(2, 4)];
+        replace_pages(&mut all, &[1], vec![a(1, 3), a(1, 5)]);
+        let ids: Vec<_> = all.iter().map(|x| x.id).collect();
+        assert_eq!(ids, [1, 3, 5, 4]);
     }
 }
