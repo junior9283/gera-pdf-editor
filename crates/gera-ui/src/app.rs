@@ -91,6 +91,7 @@ impl GeraApp {
         self.switch_tab(|tabs| created = tabs.open(path.clone()).1);
         if created {
             let mut doc = DocTab::new(ctx, path.clone(), self.prefs.dark);
+            doc.set_author(self.prefs.author.clone());
             doc.open(path);
             self.docs.push(doc);
         }
@@ -212,6 +213,13 @@ impl GeraApp {
                         self.tabs.rename(tab, dest.clone());
                         self.docs[i].path = dest.clone();
                         self.remember(dest);
+                    }
+                    DocEvent::Author(name) => {
+                        self.prefs.author = Some(name.clone());
+                        self.prefs_dirty = true;
+                        for doc in &mut self.docs {
+                            doc.set_author(Some(name.clone()));
+                        }
                     }
                     DocEvent::Failed(msg) => {
                         self.status = msg;

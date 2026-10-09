@@ -1,6 +1,7 @@
 //! Barra de ferramentas do documento e a linha de ferramentas de comentário.
 use crate::doc_tab::{DocCommand, DocTab};
 use crate::shell::commands::{hover, Command};
+use app_state::stamps::StampKind;
 use app_state::tools::Tool;
 use app_state::tools_catalog;
 use app_state::zoom::Fit;
@@ -59,9 +60,10 @@ pub fn show(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
 pub fn comment_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     let mut out = None;
     ui.horizontal(|ui| {
-        for tool in Tool::ALL {
+        for tool in Tool::ALL.into_iter().filter(|t| *t != Tool::Stamp) {
             ui.selectable_value(&mut doc.edit.tool, tool, tool.label());
         }
+        stamp_menu(ui, doc);
         ui.separator();
         let can_edit = !doc.edit.saving;
         let can_undo = can_edit && doc.is_dirty();
@@ -69,6 +71,40 @@ pub fn comment_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
         button(ui, &mut out, "⮫", Command::Doc(DocCommand::Redo), can_edit);
     });
     out
+}
+
+/// Ferramenta Carimbo com o menu dos carimbos, nos dois grupos do Acrobat.
+fn stamp_menu(ui: &mut egui::Ui, doc: &mut DocTab) {
+    let active = doc.edit.tool == Tool::Stamp;
+    let label = if active {
+        format!("Carimbo: {}", doc.edit.stamp.title())
+    } else {
+        "Carimbo".to_owned()
+    };
+    let button = egui::Button::selectable(active, label);
+    egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
+        for (n, (group, kinds)) in [
+            ("Dinâmicos", &StampKind::DYNAMIC[..]),
+            ("Padrão comercial", &StampKind::STANDARD[..]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if n > 0 {
+                ui.separator();
+            }
+            ui.label(egui::RichText::new(group).small().strong());
+            for &kind in kinds {
+                let [r, g, b] = kind.color().map(|c| (c * 255.0) as u8);
+                let text =
+                    egui::RichText::new(kind.title()).color(egui::Color32::from_rgb(r, g, b));
+                if ui.button(text).clicked() {
+                    doc.edit.stamp = kind;
+                    doc.edit.tool = Tool::Stamp;
+                }
+            }
+        }
+    });
 }
 
 /// Botão de ícone que dispara `cmd`, com a dica (nome e atalho) tirada da tabela de comandos.

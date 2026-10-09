@@ -1,5 +1,7 @@
+use crate::create::ShapeDrag;
 use crate::shell::annot_props::{self, PropsDraft};
-use app_state::annot_geom::{annot_hit, handle_at, resized, Handle};
+use app_state::annot_geom::{annot_hit, dist_to_segment, handle_at, resized, Handle};
+use app_state::stamps::StampKind;
 use app_state::tools::Tool;
 use app_state::transform::PageMap;
 use pdf_core::{AnnotInfo, AnnotKind, AnnotOp, NewAnnot, PdfRect, Request, TextSelection, Worker};
@@ -142,19 +144,53 @@ pub struct EditState {
     menu_on_annot: bool,
     /// Janela de propriedades aberta.
     props: Option<PropsDraft>,
+    /// Carimbo escolhido no menu da ferramenta Carimbo.
+    pub stamp: StampKind,
+    pub(crate) shape_drag: Option<ShapeDrag>,
+    /// Caixa de texto sendo digitada sobre a página.
+    pub(crate) text_draft: Option<TextDraft>,
+    /// Nome do usuário (Identidade), para os carimbos dinâmicos.
+    pub author: Option<String>,
+    /// Carimbo dinâmico esperando a Identidade: (página, ponto).
+    pub identity_for: Option<(i32, (f32, f32))>,
+}
+
+/// O que a caixa de texto em digitação vai virar.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum TextTarget {
+    New,
+    Existing { id: i32, original: String },
+}
+
+/// Caixa de texto em digitação sobre a página.
+#[derive(Debug, Clone)]
+pub(crate) struct TextDraft {
+    pub(crate) page: i32,
+    pub(crate) rect: PdfRect,
+    pub(crate) target: TextTarget,
+    pub(crate) text: String,
+    pub(crate) size: f32,
+    pub(crate) color: [f32; 3],
+    /// O campo já teve o foco (perdê-lo depois termina a digitação).
+    pub(crate) focused: bool,
 }
 
 /// Folga do clique sobre uma anotação, em pixels da tela.
 const HIT_TOL: f32 = 3.0;
 
 /// A anotação da página sob `p` (a de cima), como (página, id). Só roda quando há clique.
+/// Linhas contam pela distância ao segmento (o retângulo de uma diagonal é quase todo vazio).
 fn hit_at(annots: &[AnnotInfo], page: i32, p: (f32, f32), map: &PageMap) -> Option<(i32, i32)> {
-    let rects: Vec<_> = annots
+    let tol = HIT_TOL / map.zoom;
+    annots
         .iter()
+        .rev()
         .filter(|a| a.page == page)
-        .map(|a| (a.id, a.rect))
-        .collect();
-    annot_hit(&rects, p, HIT_TOL / map.zoom).map(|id| (page, id))
+        .find(|a| match a.line {
+            Some((s, e)) => dist_to_segment(p, s, e) <= tol + a.width.unwrap_or(1.0) / 2.0,
+            None => annot_hit(&[(a.id, a.rect)], p, tol).is_some(),
+        })
+        .map(|a| (page, a.id))
 }
 
 fn find(annots: &[AnnotInfo], (page, id): (i32, i32)) -> Option<&AnnotInfo> {
@@ -208,6 +244,10 @@ impl EditState {
         if !any_button_down {
             self.annot_drag = None;
         }
+    }
+
+    pub(crate) fn push_op(&mut self, op: AnnotOp) {
+        self.ops.push(op);
     }
 
     /// Apaga a anotação selecionada (tecla Delete ou menu).
@@ -337,10 +377,17 @@ impl EditState {
                 }
             }
             Tool::Ink => self.draw_ink(ui, &response, pointer, page, map),
-            // gestos de criação chegam na tarefa 5 do plano da v1.1-B2b
             Tool::TextBox | Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Arrow | Tool::Stamp => {
+                if let Some(at) = self.create_gestures(ui, &response, pointer, page, map) {
+                    let author = self.author.clone();
+                    if !self.place_stamp(page, at, author.as_deref(), crate::create::local_now()) {
+                        self.identity_for = Some((page, at));
+                    }
+                }
+                self.paint_creation(ui.painter(), page, map);
             }
         }
+        self.text_overlay(ui, page, map);
         self.paint_selection(ui.painter(), page, map);
         self.paint_selected(ui.painter(), annots, page, map);
     }
@@ -358,17 +405,32 @@ impl EditState {
     ) -> bool {
         let hit = |p| hit_at(annots, page, p, map);
         if response.double_clicked() {
-            if let Some(note) = pointer
-                .and_then(hit)
-                .and_then(|s| find(annots, s))
-                .filter(|a| a.kind == AnnotKind::Note)
-            {
-                self.note_draft = Some(NoteDraft {
-                    page,
-                    target: NoteTarget::Existing(note.id),
-                    text: note.contents.clone(),
-                });
-                return true;
+            match pointer.and_then(hit).and_then(|s| find(annots, s)) {
+                Some(note) if note.kind == AnnotKind::Note => {
+                    self.note_draft = Some(NoteDraft {
+                        page,
+                        target: NoteTarget::Existing(note.id),
+                        text: note.contents.clone(),
+                    });
+                    return true;
+                }
+                Some(b) if b.kind == AnnotKind::TextBox => {
+                    let (size, color) = b.font.unwrap_or((crate::create::TEXT_SIZE, [0.0; 3]));
+                    self.text_draft = Some(TextDraft {
+                        page,
+                        rect: b.rect,
+                        target: TextTarget::Existing {
+                            id: b.id,
+                            original: b.contents.clone(),
+                        },
+                        text: b.contents.clone(),
+                        size,
+                        color,
+                        focused: false,
+                    });
+                    return true;
+                }
+                _ => {}
             }
         }
         if response.drag_started_by(egui::PointerButton::Primary) {
@@ -926,5 +988,25 @@ mod tests {
         );
         e.drop_stale_drag(false);
         assert!(e.annot_drag.is_none() && e.take_ops().is_empty());
+    }
+
+    #[test]
+    fn hit_on_a_diagonal_line_uses_the_distance_to_the_segment() {
+        let map = PageMap {
+            origin: (0.0, 0.0),
+            zoom: 1.0,
+            size: (612.0, 792.0),
+            rotation: pdf_core::Rotation::R0,
+        };
+        let mut l = info(0, 7);
+        l.kind = AnnotKind::Line;
+        l.rect = PdfRect::new(0.0, 0.0, 200.0, 200.0);
+        l.line = Some(((0.0, 0.0), (200.0, 200.0)));
+        assert_eq!(hit_at(&[l.clone()], 0, (100.0, 101.0), &map), Some((0, 7)));
+        assert_eq!(
+            hit_at(&[l], 0, (180.0, 20.0), &map),
+            None,
+            "dentro do retângulo, longe da linha"
+        );
     }
 }
