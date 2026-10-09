@@ -12,7 +12,7 @@ pub fn show(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
         let save = if doc.is_dirty() { "💾•" } else { "💾" };
         let can_save = !doc.edit.saving;
         button(ui, &mut out, save, Command::Doc(DocCommand::Save), can_save);
-        ui.add_enabled(false, egui::Button::new("🖨"))
+        ui.add_enabled(false, egui::Button::new("⎙"))
             .on_disabled_hover_text("Imprimir: em breve (v1.1-B)");
         button(ui, &mut out, "🔍", Command::Doc(DocCommand::Find), true);
         ui.separator();
@@ -22,8 +22,8 @@ pub fn show(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
         if let Some(pct) = doc.zoom_percent() {
             ui.label(format!("{pct:.0}%"));
         }
-        button(ui, &mut out, "＋", Command::Doc(DocCommand::ZoomIn), true);
-        ui.menu_button("▾", |ui| {
+        button(ui, &mut out, "+", Command::Doc(DocCommand::ZoomIn), true);
+        ui.menu_button("⏷", |ui| {
             for cmd in [
                 DocCommand::Fit(Fit::Width),
                 DocCommand::Fit(Fit::Page),
@@ -39,7 +39,7 @@ pub fn show(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
         doc.search_box(ui);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if let Some(t) = tools_catalog::find("assinar") {
-                ui.add_enabled(false, egui::Button::new("✍ Assinar"))
+                ui.add_enabled(false, egui::Button::new("🖊 Assinar"))
                     .on_disabled_hover_text(tools_catalog::badge(t));
             }
             if ui
@@ -66,15 +66,15 @@ pub fn comment_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
         ui.separator();
         let can_edit = !doc.edit.saving;
         let can_undo = can_edit && doc.is_dirty();
-        button(ui, &mut out, "↶", Command::Doc(DocCommand::Undo), can_undo);
-        button(ui, &mut out, "↷", Command::Doc(DocCommand::Redo), can_edit);
+        button(ui, &mut out, "⮪", Command::Doc(DocCommand::Undo), can_undo);
+        button(ui, &mut out, "⮫", Command::Doc(DocCommand::Redo), can_edit);
     });
     out
 }
 
 /// Botão de ícone que dispara `cmd`, com a dica (nome e atalho) tirada da tabela de comandos.
 fn button(ui: &mut egui::Ui, out: &mut Option<Command>, icon: &str, cmd: Command, enabled: bool) {
-    let tip = hover(ui.ctx(), &cmd);
+    let tip = hover(&cmd);
     if ui
         .add_enabled(enabled, egui::Button::new(icon))
         .on_hover_text(tip)

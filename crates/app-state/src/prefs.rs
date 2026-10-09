@@ -32,7 +32,7 @@ impl LeftPanel {
 
     pub fn icon(self) -> &'static str {
         match self {
-            LeftPanel::Thumbnails => "▤",
+            LeftPanel::Thumbnails => "🖹",
             LeftPanel::Outline => "☰",
             LeftPanel::Annotations => "💬",
         }

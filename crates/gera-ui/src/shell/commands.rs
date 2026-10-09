@@ -110,10 +110,30 @@ pub fn shortcut_of(cmd: &Command) -> Option<KeyboardShortcut> {
         .map(|(s, _)| s)
 }
 
+/// Atalho escrito como no Acrobat, com símbolos ("Ctrl+Shift++", "Ctrl+="), não nomes de tecla.
+pub fn shortcut_text(sc: &KeyboardShortcut) -> String {
+    let m = sc.modifiers;
+    let mut text = String::new();
+    for (on, name) in [
+        (m.command || m.ctrl, "Ctrl+"),
+        (m.shift, "Shift+"),
+        (m.alt, "Alt+"),
+    ] {
+        if on {
+            text.push_str(name);
+        }
+    }
+    text.push_str(match sc.logical_key {
+        Key::Minus => "-", // o egui usa o sinal tipográfico "−"
+        key => key.symbol_or_name(),
+    });
+    text
+}
+
 /// Dica de botão: rótulo do comando e, se houver, o atalho ("Salvar (Ctrl+S)").
-pub fn hover(ctx: &egui::Context, cmd: &Command) -> String {
+pub fn hover(cmd: &Command) -> String {
     match shortcut_of(cmd) {
-        Some(sc) => format!("{} ({})", cmd.label(), ctx.format_shortcut(&sc)),
+        Some(sc) => format!("{} ({})", cmd.label(), shortcut_text(&sc)),
         None => cmd.label(),
     }
 }
@@ -208,5 +228,22 @@ mod tests {
             assert!(!Command::TogglePanel(p).label().is_empty());
         }
         assert!(!Command::ToggleTools.label().is_empty());
+    }
+
+    #[test]
+    fn shortcuts_are_written_with_symbols_like_acrobat() {
+        let text = |cmd| shortcut_text(&shortcut_of(&cmd).unwrap());
+        assert_eq!(
+            text(Command::Doc(DocCommand::Rotate { clockwise: true })),
+            "Ctrl+Shift++"
+        );
+        assert_eq!(
+            text(Command::Doc(DocCommand::Rotate { clockwise: false })),
+            "Ctrl+Shift+-"
+        );
+        assert_eq!(text(Command::Doc(DocCommand::ZoomIn)), "Ctrl+=");
+        assert_eq!(text(Command::Doc(DocCommand::ZoomOut)), "Ctrl+-");
+        assert_eq!(text(Command::SaveAs), "Ctrl+Shift+S");
+        assert_eq!(text(Command::FullScreen), "F11");
     }
 }

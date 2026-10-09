@@ -1,6 +1,6 @@
 //! Barra de menus no arranjo do Acrobat. Itens futuros aparecem desativados com a fase.
 use crate::doc_tab::DocCommand;
-use crate::shell::commands::{shortcut_of, Command};
+use crate::shell::commands::{shortcut_of, shortcut_text, Command};
 use app_state::layout::ViewMode;
 use app_state::prefs::LeftPanel;
 use app_state::recents::RecentFiles;
@@ -26,7 +26,7 @@ pub struct MenuState<'a> {
 fn item(ui: &mut egui::Ui, out: &mut Option<Command>, cmd: Command, enabled: bool) {
     let mut button = egui::Button::new(cmd.label());
     if let Some(sc) = shortcut_of(&cmd) {
-        button = button.shortcut_text(ui.ctx().format_shortcut(&sc));
+        button = button.shortcut_text(shortcut_text(&sc));
     }
     if ui.add_enabled(enabled, button).clicked() {
         *out = Some(cmd);

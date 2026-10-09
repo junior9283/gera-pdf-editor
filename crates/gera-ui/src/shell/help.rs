@@ -1,8 +1,7 @@
 //! Janelas "Atalhos de teclado" e "Sobre".
-use crate::shell::commands::shortcuts;
+use crate::shell::commands::{shortcut_text, shortcuts};
 
 pub fn shortcuts_window(ui: &mut egui::Ui, open: &mut bool) {
-    let ctx = ui.ctx().clone();
     egui::Window::new("Atalhos de teclado")
         .open(open)
         .collapsible(false)
@@ -10,7 +9,7 @@ pub fn shortcuts_window(ui: &mut egui::Ui, open: &mut bool) {
             egui::Grid::new("atalhos").striped(true).show(ui, |ui| {
                 for (sc, cmd) in shortcuts() {
                     ui.label(cmd.label());
-                    ui.monospace(ctx.format_shortcut(&sc));
+                    ui.monospace(shortcut_text(&sc));
                     ui.end_row();
                 }
                 ui.label("Página anterior / próxima");

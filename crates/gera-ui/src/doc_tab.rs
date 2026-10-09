@@ -490,8 +490,8 @@ impl DocTab {
             edit.request_focus();
         }
         ui.label(self.search.summary());
-        let prev = ui.button("▲").clicked();
-        let next = ui.button("▼").clicked();
+        let prev = ui.button("⏶").clicked();
+        let next = ui.button("⏷").clicked();
         if prev || next {
             let target = self.search.step(next);
             if let Some(y) = target

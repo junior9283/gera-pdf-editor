@@ -17,7 +17,7 @@ pub enum TabAction {
 pub fn show(ui: &mut egui::Ui, active: usize, docs: &[TabLabel]) -> Option<TabAction> {
     let mut action = None;
     ui.horizontal(|ui| {
-        for (tab, name) in [(HOME, "🏠 Início"), (TOOLS, "🧰 Ferramentas")] {
+        for (tab, name) in [(HOME, "🏠 Início"), (TOOLS, "🛠 Ferramentas")] {
             if ui.selectable_label(active == tab, name).clicked() {
                 action = Some(TabAction::Activate(tab));
             }
@@ -38,16 +38,16 @@ pub fn show(ui: &mut egui::Ui, active: usize, docs: &[TabLabel]) -> Option<TabAc
                 action = Some(TabAction::Activate(tab));
             }
             if ui
-                .small_button("✕")
-                .on_hover_text(hover(ui.ctx(), &Command::CloseTab))
+                .small_button("×")
+                .on_hover_text(hover(&Command::CloseTab))
                 .clicked()
             {
                 action = Some(TabAction::Close(tab));
             }
         }
         if ui
-            .button("＋")
-            .on_hover_text(hover(ui.ctx(), &Command::Open))
+            .button("+")
+            .on_hover_text(hover(&Command::Open))
             .clicked()
         {
             action = Some(TabAction::New);
