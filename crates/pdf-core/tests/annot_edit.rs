@@ -291,3 +291,28 @@ fn empty_annotations_are_refused() {
     }
     assert!(d.annotations(0).unwrap().is_empty() && !d.is_dirty());
 }
+
+#[test]
+fn deleted_annotations_leave_no_trace_in_the_saved_file() {
+    let (_d, path, mut d) = doc();
+    d.apply(AnnotOp::Create(NewAnnot::Note {
+        page: 0,
+        at: (50.0, 50.0),
+        text: "segredo-apagado".into(),
+    }))
+    .unwrap();
+    let id = only(&d).id;
+    d.save(&path).unwrap();
+    assert_eq!(
+        only(&d).id,
+        id,
+        "salvar não renumera (a seleção da tela continua valendo)"
+    );
+    d.apply(AnnotOp::Delete { page: 0, id }).unwrap();
+    d.save(&path).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(
+        !bytes.windows(15).any(|w| w == b"segredo-apagado"),
+        "o texto da nota apagada não pode ficar no arquivo"
+    );
+}

@@ -430,6 +430,8 @@ impl PdfDoc {
         let tmp_str = utf8_path(&tmp)?;
         let mut opts = PdfWriteOptions::default();
         opts.set_encryption(Encryption::Keep);
+        // tira do arquivo os objetos sem uso (o conteúdo das anotações apagadas), sem renumerar
+        opts.set_garbage_level(1);
         let written = self
             .inner
             .save_with_options(tmp_str, opts)
