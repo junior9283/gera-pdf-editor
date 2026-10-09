@@ -85,7 +85,7 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
             item(ui, &mut out, Command::SaveAs, has_doc);
             soon_tool(ui, "exportar");
             ui.separator();
-            soon(ui, "Propriedades", "v1.1-B");
+            item(ui, &mut out, Command::Properties, has_doc);
             soon(ui, "Imprimir", "v1.1-B");
             ui.separator();
             item(ui, &mut out, Command::CloseTab, has_doc);

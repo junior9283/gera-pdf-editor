@@ -22,6 +22,7 @@ pub enum Command {
     ActivateTab(usize),
     Shortcuts,
     About,
+    Properties,
 }
 
 impl Command {
@@ -42,6 +43,7 @@ impl Command {
             Command::ActivateTab(_) => "Ir para a aba",
             Command::Shortcuts => "Atalhos de teclado",
             Command::About => "Sobre o Gera PDF Editor",
+            Command::Properties => "Propriedades…",
             Command::Doc(d) => match d {
                 DocCommand::Save => "Salvar",
                 DocCommand::Undo => "Desfazer",
@@ -93,6 +95,7 @@ pub fn shortcuts() -> Vec<(KeyboardShortcut, Command)> {
         (cmd(Key::C), doc(DocCommand::Copy)),
         (cmd(Key::A), doc(DocCommand::SelectAll)),
         (cmd(Key::Tab), Command::NextTab),
+        (cmd(Key::D), Command::Properties),
         (cmd(Key::Equals), doc(DocCommand::ZoomIn)),
         (cmd(Key::Plus), doc(DocCommand::ZoomIn)),
         (cmd(Key::Minus), doc(DocCommand::ZoomOut)),

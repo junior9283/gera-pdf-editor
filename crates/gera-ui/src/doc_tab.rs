@@ -9,7 +9,9 @@ use app_state::nav::{nav_target, NavKey};
 use app_state::prefs::LeftPanel;
 use app_state::transform::PageMap;
 use app_state::zoom::{self, Fit};
-use pdf_core::{AnnotInfo, DocSummary, OutlineItem, PdfError, Request, Response, Worker};
+use pdf_core::{
+    AnnotInfo, DocProperties, DocSummary, OutlineItem, PdfError, Request, Response, Worker,
+};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::TryRecvError;
@@ -87,6 +89,9 @@ pub struct DocTab {
     pub(crate) comment_tools: bool,
     /// Pedido de foco no campo de busca (Ctrl+F ou menu).
     pub(crate) focus_search: bool,
+    /// Propriedades do documento e se a janela delas está aberta.
+    properties: Option<DocProperties>,
+    show_properties: bool,
     /// Copiar pedido por atalho ou menu (feito no próximo quadro, que tem o `egui::Context`).
     copy_requested: bool,
     /// Última virada de página pela roda (tempo do egui), para não virar várias de uma vez.
@@ -117,6 +122,8 @@ impl DocTab {
             comment_tools: false,
             focus_search: false,
             copy_requested: false,
+            properties: None,
+            show_properties: false,
             turned_at: f64::NEG_INFINITY,
         }
     }
@@ -356,10 +363,14 @@ impl DocTab {
                     self.status = format!("Não foi possível salvar: {msg}");
                 }
                 // ligados à interface nas próximas tarefas (seleção, propriedades, impressão)
-                Response::Properties(_)
-                | Response::PropertiesFailed(_)
-                | Response::Exported { .. }
-                | Response::ExportFailed(_) => {}
+                Response::Properties(p) => {
+                    self.properties = Some(p);
+                    self.show_properties = true;
+                }
+                Response::PropertiesFailed(msg) => {
+                    self.status = format!("Não foi possível ler as propriedades: {msg}");
+                }
+                Response::Exported { .. } | Response::ExportFailed(_) => {}
             }
         }
     }
@@ -439,7 +450,17 @@ impl DocTab {
     }
 
     /// Páginas, janelas de nota e senha e fim do quadro (depois dos painéis laterais).
+    /// Arquivo → Propriedades: pede ao worker; a janela abre quando a resposta chega.
+    pub fn request_properties(&mut self) {
+        if self.view.is_some() {
+            self.worker.send(Request::Properties);
+        }
+    }
+
     pub fn show_canvas(&mut self, ui: &mut egui::Ui) {
+        if let Some(p) = self.properties.as_ref().filter(|_| self.show_properties) {
+            crate::shell::properties::window(ui, p, &mut self.show_properties);
+        }
         if std::mem::take(&mut self.copy_requested) {
             self.edit.copy(ui.ctx());
         }

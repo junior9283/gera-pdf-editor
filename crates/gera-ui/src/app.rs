@@ -309,6 +309,11 @@ impl GeraApp {
             Command::ActivateTab(t) => self.activate(t),
             Command::Shortcuts => self.show_shortcuts = true,
             Command::About => self.show_about = true,
+            Command::Properties => {
+                if let Some(doc) = self.active_doc() {
+                    doc.request_properties();
+                }
+            }
         }
     }
 
