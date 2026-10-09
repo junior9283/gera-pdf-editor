@@ -2,7 +2,6 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
-#[allow(dead_code)] // SaveAs chega com o menu Arquivo (tarefa 9)
 #[derive(Debug)]
 pub enum Picked {
     Open(Vec<PathBuf>),
@@ -39,7 +38,6 @@ impl FileDialogs {
         });
     }
 
-    #[allow(dead_code)] // usado por Arquivo → Salvar como (tarefa 9)
     pub fn save_as(&mut self, ctx: &egui::Context, doc: PathBuf) {
         self.spawn(ctx, move || {
             let mut dialog = rfd::FileDialog::new()

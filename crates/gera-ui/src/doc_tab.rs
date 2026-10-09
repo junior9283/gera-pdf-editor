@@ -6,7 +6,6 @@ use crate::sidebar::{self, SidebarAction, SidebarTab};
 use crate::view::DocView;
 use app_state::layout::ViewMode;
 use app_state::nav::{nav_target, NavKey};
-use app_state::tools::Tool;
 use app_state::transform::PageMap;
 use app_state::zoom::{self, Fit};
 use pdf_core::{AnnotInfo, DocSummary, OutlineItem, PdfError, Request, Response, Worker};
@@ -17,7 +16,6 @@ use std::sync::mpsc::TryRecvError;
 const MAX_RENDERS_PER_FRAME: usize = 2;
 
 /// Ações sobre o documento, vindas de botões, menus ou atalhos.
-#[allow(dead_code)] // Find, ZoomReset e ToggleCover chegam com os menus (tarefa 9)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DocCommand {
     Save,
@@ -69,6 +67,8 @@ pub struct DocTab {
     opening: Option<PathBuf>,
     /// Pedido de senha: (caminho, senha digitada).
     password_prompt: Option<(PathBuf, String)>,
+    /// Linha de ferramentas de comentário visível ("✏ Comentar").
+    pub(crate) comment_tools: bool,
     /// Pedido de foco no campo de busca (Ctrl+F ou menu).
     pub(crate) focus_search: bool,
     /// Última virada de página pela roda (tempo do egui), para não virar várias de uma vez.
@@ -98,6 +98,7 @@ impl DocTab {
             outline: Vec::new(),
             opening: None,
             password_prompt: None,
+            comment_tools: false,
             focus_search: false,
             turned_at: f64::NEG_INFINITY,
         }
@@ -176,7 +177,6 @@ impl DocTab {
         }
     }
 
-    #[allow(dead_code)] // usado pelo menu Preferências (tarefa 9)
     pub fn set_dark(&mut self, dark: bool) {
         self.dark = dark;
         if let Some(view) = self.view.as_mut() {
@@ -336,11 +336,9 @@ impl DocTab {
         }
     }
 
-    /// Teclado e zoom do documento: navegação, Ctrl+roda, desfazer/refazer e salvar.
+    /// Teclado e zoom do documento: navegação (fora de campos de texto) e Ctrl+roda. Os demais
+    /// atalhos vêm da tabela de comandos da casca.
     pub fn handle_input(&mut self, ctx: &egui::Context) {
-        // Ctrl+Z/Ctrl+Shift+Z desfazem/refazem anotações, a menos que o usuário esteja digitando
-        // (campo de busca, nota, senha): nesse caso o atalho é do campo de texto.
-        // Refazer vem antes de desfazer, para um atalho não consumir o outro.
         let typing = ctx.egui_wants_keyboard_input();
         if !typing {
             let nav = [
@@ -394,42 +392,25 @@ impl DocTab {
             let ratio = view.set_manual_zoom(view.zoom * zoom_delta);
             self.jump_to = Some(self.last.scroll_y * ratio);
         }
-        let (redo, undo, save) = ctx.input_mut(|i| {
-            (
-                !typing
-                    && i.consume_key(
-                        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                        egui::Key::Z,
-                    ),
-                !typing && i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z),
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::S),
-            )
-        });
-        if redo {
-            self.run(DocCommand::Redo);
-        } else if undo {
-            self.run(DocCommand::Undo);
-        }
-        if save {
-            self.run(DocCommand::Save);
-        }
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui) {
+    /// `chrome`: mostra barra de status e painel lateral (desligado na tela cheia).
+    pub fn show(&mut self, ui: &mut egui::Ui, chrome: bool) {
         if let Some(view) = self.view.as_mut() {
             view.begin_frame();
         }
-        egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
-        egui::Panel::bottom("status").show(ui, |ui| {
-            let unsaved = self.edit.pending.items().len();
-            let text = match unsaved {
-                0 => self.status.clone(),
-                n => format!("{} — {n} alterações não salvas", self.status),
-            };
-            ui.label(text);
-        });
-        if self.view.is_some() {
-            self.sidebar(ui);
+        if chrome {
+            egui::Panel::bottom("status").show(ui, |ui| {
+                let unsaved = self.edit.pending.items().len();
+                let text = match unsaved {
+                    0 => self.status.clone(),
+                    n => format!("{} — {n} alterações não salvas", self.status),
+                };
+                ui.label(text);
+            });
+            if self.view.is_some() {
+                self.sidebar(ui);
+            }
         }
         egui::CentralPanel::default().show(ui, |ui| self.canvas(ui));
         self.edit.note_window(ui);
@@ -439,111 +420,56 @@ impl DocTab {
         }
     }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui) {
-        let mut commands = Vec::new();
-        ui.horizontal(|ui| {
-            let Some(view) = self.view.as_mut() else {
-                return;
-            };
-            for tool in Tool::ALL {
-                ui.selectable_value(&mut self.edit.tool, tool, tool.label());
-            }
-            ui.separator();
-            let can_edit = !self.edit.saving;
-            if ui
-                .add_enabled(
-                    can_edit && self.edit.pending.is_dirty(),
-                    egui::Button::new("↶"),
-                )
-                .clicked()
-            {
-                commands.push(DocCommand::Undo);
-            }
-            if ui.add_enabled(can_edit, egui::Button::new("↷")).clicked() {
-                commands.push(DocCommand::Redo);
-            }
-            let save_label = if self.edit.pending.is_dirty() {
-                "Salvar •"
-            } else {
-                "Salvar"
-            };
-            if ui
-                .add_enabled(!self.edit.saving, egui::Button::new(save_label))
-                .clicked()
-            {
-                commands.push(DocCommand::Save);
-            }
-            ui.separator();
-            if ui.button("−").clicked() {
-                commands.push(DocCommand::ZoomOut);
-            }
-            ui.label(format!("{:.0}%", view.zoom * 100.0));
-            if ui.button("+").clicked() {
-                commands.push(DocCommand::ZoomIn);
-            }
-            if ui.button("Largura").clicked() {
-                commands.push(DocCommand::Fit(Fit::Width));
-            }
-            if ui.button("Página").clicked() {
-                commands.push(DocCommand::Fit(Fit::Page));
-            }
-            let mut mode = view.mode;
-            egui::ComboBox::from_id_salt("modo")
-                .selected_text(mode.label())
-                .show_ui(ui, |ui| {
-                    for m in ViewMode::ALL {
-                        ui.selectable_value(&mut mode, m, m.label());
-                    }
-                });
-            if mode != view.mode {
-                commands.push(DocCommand::Mode(mode));
-            }
-            if ui.button("⟲").on_hover_text("Girar anti-horário").clicked() {
-                commands.push(DocCommand::Rotate { clockwise: false });
-            }
-            if ui.button("⟳").on_hover_text("Girar horário").clicked() {
-                commands.push(DocCommand::Rotate { clockwise: true });
-            }
-            ui.separator();
-            let count = view.layout.page_count().max(1);
-            let mut page = self.last.current_page + 1;
-            let go = ui.add(egui::DragValue::new(&mut page).range(1..=count).speed(0.2));
-            ui.label(format!("/ {count}"));
-            if go.changed() {
-                if let Some(y) = view.go_to(page as i32 - 1, None) {
-                    self.jump_to = Some(y);
-                }
-            }
-            ui.separator();
-            let edit = ui.add(
-                egui::TextEdit::singleline(&mut self.search.text)
-                    .hint_text("Buscar…")
-                    .desired_width(160.0),
-            );
-            if std::mem::take(&mut self.focus_search)
-                || ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F))
-            {
-                edit.request_focus();
-            }
-            if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                self.search.start(&self.worker);
-                edit.request_focus();
-            }
-            ui.label(self.search.summary());
-            let prev = ui.button("▲").clicked();
-            let next = ui.button("▼").clicked();
-            if prev || next {
-                let target = self.search.step(next);
-                if let Some(y) =
-                    target.and_then(|(page, rect)| view.go_to(page, Some((rect.x0, rect.y0))))
-                {
-                    self.jump_to = Some(y);
-                }
-            }
-        });
-        for cmd in commands {
-            self.run(cmd);
+    /// ◀ campo da página / total ▶
+    pub fn page_controls(&mut self, ui: &mut egui::Ui) {
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        let count = view.layout.page_count().max(1);
+        let mut page = self.last.current_page + 1;
+        let prev = ui.button("◀").on_hover_text("Página anterior").clicked();
+        let go = ui.add(egui::DragValue::new(&mut page).range(1..=count).speed(0.2));
+        ui.label(format!("/ {count}"));
+        let next = ui.button("▶").on_hover_text("Próxima página").clicked();
+        let target = match (prev, next) {
+            (true, _) => Some(page.saturating_sub(1).max(1)),
+            (_, true) => Some((page + 1).min(count)),
+            _ => go.changed().then_some(page),
+        };
+        if let Some(y) = target.and_then(|p| view.go_to(p as i32 - 1, None)) {
+            self.jump_to = Some(y);
         }
+    }
+
+    /// Campo de busca, resumo e ▲▼ (o foco vem de `DocCommand::Find`).
+    pub fn search_box(&mut self, ui: &mut egui::Ui) {
+        let edit = ui.add(
+            egui::TextEdit::singleline(&mut self.search.text)
+                .hint_text("Buscar…")
+                .desired_width(160.0),
+        );
+        if std::mem::take(&mut self.focus_search) {
+            edit.request_focus();
+        }
+        if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            self.search.start(&self.worker);
+            edit.request_focus();
+        }
+        ui.label(self.search.summary());
+        let prev = ui.button("▲").clicked();
+        let next = ui.button("▼").clicked();
+        if prev || next {
+            let target = self.search.step(next);
+            if let Some(y) = target
+                .and_then(|(page, rect)| self.view.as_mut()?.go_to(page, Some((rect.x0, rect.y0))))
+            {
+                self.jump_to = Some(y);
+            }
+        }
+    }
+
+    pub fn zoom_percent(&self) -> Option<f32> {
+        self.view.as_ref().map(|v| v.zoom * 100.0)
     }
 
     /// Painel lateral (miniaturas, índice, anotações); clicar leva à página.

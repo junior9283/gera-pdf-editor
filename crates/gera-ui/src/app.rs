@@ -2,7 +2,10 @@ use crate::bench::Bench;
 use crate::doc_tab::DocTab;
 use crate::open_dialog::{FileDialogs, Picked};
 use crate::shell::close::{self, CloseFlow, Step};
+use crate::shell::commands::{self, Command};
+use crate::shell::menus::{self, MenuState};
 use crate::shell::tabs::{self as tab_bar, TabAction, TabLabel};
+use crate::shell::{help, toolbar};
 use app_state::prefs::Prefs;
 use app_state::recents::{now_secs, RecentFiles};
 use app_state::store;
@@ -24,6 +27,9 @@ pub struct GeraApp {
     closing: Option<CloseFlow>,
     /// Saída já confirmada: não interceptar o fechamento da janela de novo.
     allow_close: bool,
+    fullscreen: bool,
+    show_shortcuts: bool,
+    show_about: bool,
     bench: Option<Bench>,
 }
 
@@ -50,6 +56,9 @@ impl GeraApp {
             status: String::new(),
             closing: None,
             allow_close: false,
+            fullscreen: false,
+            show_shortcuts: false,
+            show_about: false,
             bench,
         };
         for path in paths {
@@ -195,37 +204,100 @@ impl GeraApp {
         }
     }
 
-    fn shell_keys(&mut self, ctx: &egui::Context) {
-        let (open, close_tab, prev, next) = ctx.input_mut(|i| {
-            (
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::O),
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::W),
-                i.consume_key(
-                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                    egui::Key::Tab,
-                ),
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Tab),
-            )
+    fn run(&mut self, ctx: &egui::Context, cmd: Command) {
+        match cmd {
+            Command::Open => self.dialogs.open(ctx),
+            Command::OpenRecent(path) => {
+                if path.exists() {
+                    self.open_path(ctx, path);
+                } else {
+                    self.status = format!("{} não existe mais.", path.display());
+                }
+            }
+            Command::SaveAs => {
+                if let Some(i) = self.tabs.doc_index(self.tabs.active()) {
+                    let path = self.tabs.docs()[i].clone();
+                    self.dialogs.save_as(ctx, path);
+                }
+            }
+            Command::CloseTab => {
+                if let Some(i) = self.tabs.doc_index(self.tabs.active()) {
+                    let path = self.tabs.docs()[i].clone();
+                    self.request_close(ctx, vec![path], false);
+                }
+            }
+            Command::CloseAll => {
+                let all = self.tabs.docs().to_vec();
+                self.request_close(ctx, all, false);
+            }
+            Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Command::Doc(c) => {
+                if let Some(doc) = self.active_doc() {
+                    doc.run(c);
+                }
+            }
+            Command::ToggleDark => self.set_dark(ctx, !self.prefs.dark),
+            Command::FullScreen => {
+                self.fullscreen = !self.fullscreen;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+            }
+            Command::NextTab | Command::PrevTab => {
+                let old = self.tabs.active();
+                if cmd == Command::NextTab {
+                    self.tabs.next();
+                } else {
+                    self.tabs.prev();
+                }
+                let new = self.tabs.active();
+                self.tabs.activate(old);
+                self.activate(new);
+            }
+            Command::ActivateTab(t) => self.activate(t),
+            Command::Shortcuts => self.show_shortcuts = true,
+            Command::About => self.show_about = true,
+        }
+    }
+
+    fn set_dark(&mut self, ctx: &egui::Context, dark: bool) {
+        self.prefs.dark = dark;
+        ctx.set_visuals(if dark {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
         });
-        if open {
-            self.dialogs.open(ctx);
+        for doc in &mut self.docs {
+            doc.set_dark(dark);
         }
-        if close_tab {
-            if let Some(i) = self.tabs.doc_index(self.tabs.active()) {
-                let path = self.tabs.docs()[i].clone();
-                self.request_close(ctx, vec![path], false);
+        if let Some(file) = store::config_file(PREFS_FILE) {
+            if let Err(e) = store::save_json(&file, &self.prefs) {
+                self.status = format!("Não foi possível gravar as preferências: {e}");
             }
         }
-        if prev || next {
-            let old = self.tabs.active();
-            if prev {
-                self.tabs.prev();
-            } else {
-                self.tabs.next();
-            }
-            let new = self.tabs.active();
-            self.tabs.activate(old);
-            self.activate(new);
+    }
+
+    fn menu_state(&self) -> MenuState<'_> {
+        let view = self
+            .tabs
+            .doc_index(self.tabs.active())
+            .and_then(|i| self.docs[i].view.as_ref());
+        MenuState {
+            doc_mode: view.map(|v| v.mode),
+            doc_cover: view.is_some_and(|v| v.cover),
+            dark: self.prefs.dark,
+            recents: &self.recents,
+            tabs: [
+                (HOME, "Início".to_string()),
+                (TOOLS, "Ferramentas".to_string()),
+            ]
+            .into_iter()
+            .chain(
+                self.docs
+                    .iter()
+                    .enumerate()
+                    .map(|(n, d)| (FIXED + n, d.title())),
+            )
+            .collect(),
+            active: self.tabs.active(),
         }
     }
 
@@ -331,7 +403,15 @@ impl eframe::App for GeraApp {
             }
         }
         if self.closing.is_none() {
-            self.shell_keys(ctx);
+            for cmd in commands::from_keyboard(ctx) {
+                self.run(ctx, cmd);
+            }
+            if self.fullscreen
+                && !ctx.egui_wants_keyboard_input()
+                && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+            {
+                self.run(ctx, Command::FullScreen);
+            }
             if let Some(doc) = self.active_doc() {
                 doc.handle_input(ctx);
             }
@@ -339,20 +419,29 @@ impl eframe::App for GeraApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let labels = self.tab_labels();
-        let action = egui::Panel::top("abas")
-            .show(ui, |ui| tab_bar::show(ui, self.tabs.active(), &labels))
-            .inner;
-        match action {
-            Some(TabAction::Activate(t)) => self.activate(t),
-            Some(TabAction::Close(t)) => {
-                if let Some(i) = self.tabs.doc_index(t) {
-                    let path = self.tabs.docs()[i].clone();
-                    self.request_close(ui.ctx(), vec![path], false);
-                }
+        if !self.fullscreen {
+            let state = self.menu_state();
+            let picked = egui::Panel::top("menus")
+                .show(ui, |ui| menus::menu_bar(ui, &state))
+                .inner;
+            if let Some(cmd) = picked {
+                self.run(ui.ctx(), cmd);
             }
-            Some(TabAction::New) => self.dialogs.open(ui.ctx()),
-            None => {}
+            let labels = self.tab_labels();
+            let action = egui::Panel::top("abas")
+                .show(ui, |ui| tab_bar::show(ui, self.tabs.active(), &labels))
+                .inner;
+            match action {
+                Some(TabAction::Activate(t)) => self.activate(t),
+                Some(TabAction::Close(t)) => {
+                    if let Some(i) = self.tabs.doc_index(t) {
+                        let path = self.tabs.docs()[i].clone();
+                        self.request_close(ui.ctx(), vec![path], false);
+                    }
+                }
+                Some(TabAction::New) => self.dialogs.open(ui.ctx()),
+                None => {}
+            }
         }
         match self.tabs.active() {
             HOME => {
@@ -363,12 +452,32 @@ impl eframe::App for GeraApp {
                     ui.heading("Ferramentas");
                 });
             }
+            _ if !self.fullscreen => {
+                let mut cmd = None;
+                if let Some(doc) = self.active_doc() {
+                    cmd = egui::Panel::top("ferramentas-doc")
+                        .show(ui, |ui| toolbar::show(ui, doc))
+                        .inner;
+                    if doc.comment_tools {
+                        cmd = egui::Panel::top("comentar")
+                            .show(ui, |ui| toolbar::comment_row(ui, doc))
+                            .inner
+                            .or(cmd);
+                    }
+                    doc.show(ui, true);
+                }
+                if let Some(cmd) = cmd {
+                    self.run(ui.ctx(), cmd);
+                }
+            }
             _ => {
                 if let Some(doc) = self.active_doc() {
-                    doc.show(ui);
+                    doc.show(ui, false); // tela cheia: só as páginas
                 }
             }
         }
         self.drive_close(ui);
+        help::shortcuts_window(ui, &mut self.show_shortcuts);
+        help::about_window(ui, &mut self.show_about);
     }
 }
