@@ -1,5 +1,6 @@
 mod app;
 mod canvas;
+mod search;
 mod view;
 
 use std::path::PathBuf;

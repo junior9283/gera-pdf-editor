@@ -87,6 +87,14 @@ impl DocView {
         (page, zoom::quantize(scale), self.dark)
     }
 
+    /// Posição de rolagem (em pontos da tela) que mostra `y_pts` da página `page`, com folga acima.
+    pub fn scroll_target(&self, page: i32, y_pts: f32) -> Option<f32> {
+        let i = usize::try_from(page)
+            .ok()
+            .filter(|&i| i < self.layout.page_count())?;
+        Some((self.layout.page_top(i) + y_pts * self.zoom - 80.0).max(0.0))
+    }
+
     pub fn begin_frame(&mut self) {
         self.wanted.clear();
     }
@@ -160,5 +168,37 @@ impl DocView {
         }
         self.requested.clear();
         self.cache.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn view() -> DocView {
+        let sizes = vec![
+            PageSize {
+                width: 100.0,
+                height: 200.0
+            };
+            3
+        ];
+        DocView::new(PathBuf::from("x.pdf"), sizes)
+    }
+
+    #[test]
+    fn scroll_target_points_slightly_above_the_position_in_the_page() {
+        let mut v = view();
+        v.set_zoom(2.0);
+        // página 1 começa em 12 + 400 + 12 = 424; y = 50pt * 2 = 100 => 524 - 80 de folga
+        assert_eq!(v.scroll_target(1, 50.0), Some(444.0));
+        assert_eq!(v.scroll_target(0, 0.0), Some(0.0), "nunca negativo");
+    }
+
+    #[test]
+    fn scroll_target_rejects_pages_outside_the_document() {
+        let v = view();
+        assert_eq!(v.scroll_target(-1, 0.0), None);
+        assert_eq!(v.scroll_target(3, 0.0), None);
     }
 }

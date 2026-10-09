@@ -1,4 +1,5 @@
 use crate::canvas::{self, CanvasFrame};
+use crate::search::SearchState;
 use crate::view::DocView;
 use app_state::zoom;
 use pdf_core::{DocSummary, Request, Response, Worker};
@@ -15,6 +16,7 @@ pub struct GeraApp {
     /// Último quadro do canvas (rolagem e página atual).
     pub(crate) last: CanvasFrame,
     pub(crate) jump_to: Option<f32>,
+    pub(crate) search: SearchState,
     /// Modo de medição (`--bench-open`): instante de início do processo.
     bench: Option<Instant>,
 }
@@ -33,6 +35,7 @@ impl GeraApp {
             status: "Arraste um PDF para cá ou execute: gera-pdf-editor arquivo.pdf".into(),
             last: CanvasFrame::default(),
             jump_to: None,
+            search: SearchState::default(),
             bench,
         };
         if let Some(path) = path {
@@ -56,6 +59,8 @@ impl GeraApp {
             summary.sizes.len()
         );
         self.view = Some(DocView::new(summary.path, summary.sizes));
+        self.search.text.clear(); // descarta a busca (e os destaques) do documento anterior
+        self.search.start(&self.worker);
         self.last = CanvasFrame::default();
         self.jump_to = Some(0.0);
     }
@@ -85,6 +90,18 @@ impl GeraApp {
                 Response::RenderFailed { page, error } => {
                     self.status = format!("Página {}: {error}", page + 1)
                 }
+                Response::SearchHits { id, page, rects } => {
+                    let had_hits = self.search.current().is_some();
+                    self.search.on_hits(id, page, rects);
+                    // rola até o primeiro resultado (resultados de busca antiga não mudam `current`)
+                    let first = self.search.current().filter(|_| !had_hits);
+                    if let Some(y) =
+                        first.and_then(|(p, r)| self.view.as_ref()?.scroll_target(p, r.y0))
+                    {
+                        self.jump_to = Some(y);
+                    }
+                }
+                Response::SearchDone { id } => self.search.on_done(id),
                 _ => {}
             }
         }
@@ -147,6 +164,28 @@ impl GeraApp {
                 self.last.current_page + 1,
                 view.layout.page_count()
             ));
+            ui.separator();
+            let edit = ui.add(
+                egui::TextEdit::singleline(&mut self.search.text)
+                    .hint_text("Buscar…")
+                    .desired_width(160.0),
+            );
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
+                edit.request_focus();
+            }
+            if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                self.search.start(&self.worker);
+                edit.request_focus();
+            }
+            ui.label(self.search.summary());
+            let prev = ui.button("▲").clicked();
+            let next = ui.button("▼").clicked();
+            if prev || next {
+                let target = self.search.step(next);
+                if let Some(y) = target.and_then(|(page, rect)| view.scroll_target(page, rect.y0)) {
+                    self.jump_to = Some(y);
+                }
+            }
         });
     }
 
@@ -162,12 +201,14 @@ impl GeraApp {
             view.fit_pending = false;
             self.jump_to = Some(self.last.scroll_y * ratio);
         }
+        let zoom = view.zoom;
+        let search = &self.search;
         self.last = canvas::show_pages(
             ui,
             view,
             &self.worker,
             self.jump_to.take(),
-            &mut |_, _, _| {},
+            &mut |ui, page, page_rect| paint_search_hits(ui, search, page as i32, page_rect, zoom),
         );
     }
 }
@@ -190,5 +231,26 @@ impl eframe::App for GeraApp {
         if let Some(view) = self.view.as_mut() {
             view.end_frame();
         }
+    }
+}
+
+/// Realça os resultados da busca na página (o atual em laranja).
+fn paint_search_hits(
+    ui: &egui::Ui,
+    search: &SearchState,
+    page: i32,
+    page_rect: egui::Rect,
+    zoom: f32,
+) {
+    for (n, r) in search.hits_on(page) {
+        let a = egui::pos2(page_rect.min.x + r.x0 * zoom, page_rect.min.y + r.y0 * zoom);
+        let b = egui::pos2(page_rect.min.x + r.x1 * zoom, page_rect.min.y + r.y1 * zoom);
+        let color = if n == search.current_index() {
+            egui::Color32::from_rgba_unmultiplied(255, 140, 0, 110)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(255, 230, 0, 90)
+        };
+        ui.painter()
+            .rect_filled(egui::Rect::from_two_pos(a, b), 2.0, color);
     }
 }
