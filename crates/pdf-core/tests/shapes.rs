@@ -236,3 +236,69 @@ fn undoing_a_width_change_on_a_shape_restores_it() {
     d.undo().unwrap();
     assert_eq!(d.annotations(0).unwrap()[0], s);
 }
+
+fn stamp(sub: Option<&str>) -> NewAnnot {
+    NewAnnot::Stamp {
+        page: 0,
+        rect: PdfRect::new(100.0, 100.0, 290.0, 160.0),
+        title: "NÃO APROVADO".into(),
+        subtitle: sub.map(str::to_owned),
+        color: [0.8, 0.1, 0.1],
+    }
+}
+
+/// Há pixels avermelhados dentro do retângulo (em pontos) da página renderizada a 1:1?
+fn has_red_inside(d: &PdfDoc, r: PdfRect) -> bool {
+    let img = d.render(0, 1.0, false).unwrap();
+    let w = img.width as usize;
+    (r.y0.max(0.0) as usize..r.y1 as usize).any(|y| {
+        (r.x0.max(0.0) as usize..r.x1 as usize).any(|x| {
+            let p = &img.rgb[(y * w + x) * 3..][..3];
+            p[0] > 150 && p[1] < 90 && p[2] < 90
+        })
+    })
+}
+
+#[test]
+fn stamps_are_drawn_and_survive_move_and_save() {
+    let (_d, path, mut d) = doc();
+    let s = created(&mut d, stamp(Some("Maria Silva, 09/10/2026 14:30")));
+    assert_eq!(s.kind, AnnotKind::Stamp);
+    assert!(has_red_inside(&d, s.rect));
+    d.apply(AnnotOp::Move {
+        page: 0,
+        id: s.id,
+        dx: 100.0,
+        dy: 200.0,
+    })
+    .unwrap();
+    d.save(&path).unwrap();
+    let again = PdfDoc::open(&path, None).unwrap();
+    let a = again.annotations(0).unwrap().pop().unwrap();
+    assert!(a.rect.y0 > 250.0, "{:?}", a.rect);
+    assert!(has_red_inside(&again, a.rect));
+}
+
+#[test]
+fn stamp_survives_move_and_save_on_a_rotated_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_sample(&dir, "g.pdf", 1, 90);
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let s = created(&mut d, stamp(None));
+    d.apply(AnnotOp::Move {
+        page: 0,
+        id: s.id,
+        dx: 20.0,
+        dy: 20.0,
+    })
+    .unwrap();
+    d.save(&path).unwrap();
+    assert_eq!(
+        PdfDoc::open(&path, None)
+            .unwrap()
+            .annotations(0)
+            .unwrap()
+            .len(),
+        1
+    );
+}

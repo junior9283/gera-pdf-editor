@@ -4,6 +4,7 @@ pub mod sample;
 mod annot_edit;
 mod doc;
 mod error;
+mod stamp;
 mod types;
 mod worker;
 

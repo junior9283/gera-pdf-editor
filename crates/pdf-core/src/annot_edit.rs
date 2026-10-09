@@ -186,11 +186,7 @@ fn geometry(a: &PdfAnnotation) -> Result<(PdfRect, Option<Strokes>)> {
 }
 
 /// Pontos atuais da linha `id`, ou `None` se a anotação não é linha.
-pub(crate) fn line_of(
-    doc: &PdfDocument,
-    page: i32,
-    id: i32,
-) -> Result<Option<Segment>> {
+pub(crate) fn line_of(doc: &PdfDocument, page: i32, id: i32) -> Result<Option<Segment>> {
     let (_, a) = find(doc, page, id)?;
     if a.r#type()? != PdfAnnotationType::Line {
         return Ok(None);

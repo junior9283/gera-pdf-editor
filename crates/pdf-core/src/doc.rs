@@ -1,5 +1,6 @@
 use crate::annot_edit::{self, ColorEdit, Edit, History};
 use crate::error::{PdfError, Result};
+use crate::stamp;
 use crate::types::{
     AnnotInfo, AnnotKind, AnnotOp, DocProperties, DocSummary, HistoryState, LineEnd, NewAnnot,
     OutlineItem, PageSize, PdfRect, RenderedPage, Rotation, TextSelection, Word,
@@ -345,7 +346,7 @@ fn add_one(page: &mut PdfPage, a: &NewAnnot) -> Result<PdfAnnotation> {
         }
         NewAnnot::Stamp { .. } => {
             return Err(PdfError::InvalidAnnotation(
-                "carimbo ainda não suportado".into(),
+                "carimbo é criado por add_stamp".into(),
             ))
         }
     })
@@ -354,6 +355,28 @@ fn add_one(page: &mut PdfPage, a: &NewAnnot) -> Result<PdfAnnotation> {
 fn utf8_path(path: &Path) -> Result<&str> {
     path.to_str()
         .ok_or_else(|| PdfError::Engine("caminho não é UTF-8 válido".into()))
+}
+
+/// Carimbo cuja aparência é a imagem `img` (o MuPDF a ajusta ao retângulo ao mover/redimensionar).
+fn add_stamp(
+    doc: &mut PdfDocument,
+    page: &mut PdfPage,
+    rect: PdfRect,
+    title: &str,
+    img: &mupdf::Image,
+) -> Result<PdfAnnotation> {
+    let image_ref = doc.add_image(img)?;
+    let annot = page.add_stamp_annotation(Rect::from(rect), title)?;
+    let mut xobjects = doc.new_dict()?;
+    xobjects.dict_put("I", image_ref)?;
+    let mut resources = doc.new_dict()?;
+    resources.dict_put("XObject", xobjects)?;
+    let mut normal = doc.new_dict()?;
+    normal.dict_put("Resources", resources)?;
+    let mut ap = doc.new_dict()?;
+    ap.dict_put("N", normal)?;
+    annot.object().dict_put("AP", ap)?;
+    Ok(annot)
 }
 
 /// Cor RGB pedida pela interface como edição; `None` vira `absent`.
@@ -565,7 +588,19 @@ impl PdfDoc {
                     return Err(PdfError::InvalidAnnotation("anotação vazia".into()));
                 }
                 let mut page_ref = self.inner.load_pdf_page(page)?;
-                let mut annot = add_one(&mut page_ref, &a)?;
+                let mut annot = match &a {
+                    NewAnnot::Stamp {
+                        rect,
+                        title,
+                        subtitle,
+                        color,
+                        ..
+                    } => {
+                        let img = stamp::image(title, subtitle.as_deref(), *color)?;
+                        add_stamp(&mut self.inner, &mut page_ref, *rect, title, &img)?
+                    }
+                    _ => add_one(&mut page_ref, &a)?,
+                };
                 if let Some(name) = &self.author {
                     annot.set_author(name)?;
                 }
