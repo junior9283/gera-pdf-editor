@@ -53,6 +53,7 @@ impl GeraApp {
         paths: Vec<PathBuf>,
         bench: Option<Bench>,
     ) -> Self {
+        crate::print_job::sweep();
         let prefs = store::config_file(PREFS_FILE).map_or_else(Prefs::default, |p| Prefs::load(&p));
         cc.egui_ctx.set_visuals(visuals(prefs.dark));
         let mut app = Self {
@@ -288,7 +289,7 @@ impl GeraApp {
             Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Command::Doc(c) => {
                 if let Some(doc) = self.active_doc() {
-                    doc.run(c);
+                    doc.run(ctx, c);
                 }
             }
             Command::ToggleDark => self.set_dark(ctx, !self.prefs.dark),
@@ -309,6 +310,16 @@ impl GeraApp {
             Command::ActivateTab(t) => self.activate(t),
             Command::Shortcuts => self.show_shortcuts = true,
             Command::About => self.show_about = true,
+            Command::Print => {
+                if let Some(doc) = self.active_doc() {
+                    doc.open_print_dialog(ctx);
+                }
+            }
+            Command::Properties => {
+                if let Some(doc) = self.active_doc() {
+                    doc.request_properties();
+                }
+            }
         }
     }
 

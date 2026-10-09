@@ -1,10 +1,12 @@
 use crate::error::{PdfError, Result};
 use crate::types::{
-    AnnotInfo, AnnotKind, DocSummary, NewAnnot, OutlineItem, PageSize, PdfRect, RenderedPage,
-    Rotation, Word,
+    AnnotInfo, AnnotKind, DocProperties, DocSummary, NewAnnot, OutlineItem, PageSize, PdfRect,
+    RenderedPage, Rotation, TextSelection, Word,
 };
 use mupdf::pdf::{Encryption, PdfAnnotationType, PdfDocument, PdfPage, PdfWriteOptions};
-use mupdf::{Colorspace, Matrix, Point, Quad, Rect, TextExtractOptions};
+use mupdf::{
+    Colorspace, Matrix, MetadataName, Point, Quad, Rect, TextExtractOptions, TextPageFlags,
+};
 use std::path::{Path, PathBuf};
 
 /// Limite de pixels por imagem renderizada (evita estourar a memória).
@@ -146,6 +148,121 @@ impl PdfDoc {
     }
 }
 
+/// Máximo de áreas numa seleção (linhas longas com muitos pedaços).
+const MAX_SELECTION_QUADS: usize = 1024;
+
+impl PdfDoc {
+    /// Seleção pelo fluxo do texto entre os pontos `a` e `b` (coordenadas da página), como o
+    /// Acrobat: linhas inteiras entre a linha de `a` e a de `b`.
+    pub fn select_text(&self, page: i32, a: (f32, f32), b: (f32, f32)) -> Result<TextSelection> {
+        let page = self.load(page)?;
+        let mut tp = page.to_text_page(TextPageFlags::empty())?;
+        let buf = vec![Rect::new(0.0, 0.0, 0.0, 0.0).quad(); MAX_SELECTION_QUADS];
+        let n = tp.highlight_selection(Point::new(a.0, a.1), Point::new(b.0, b.1), &buf)?;
+        let quads: Vec<PdfRect> = buf[..usize::try_from(n).unwrap_or(0).min(buf.len())]
+            .iter()
+            .map(|q| Rect::from(q.clone()).into())
+            .collect();
+        let inside = |x: f32, y: f32| {
+            quads
+                .iter()
+                .any(|r| x >= r.x0 - 0.5 && x <= r.x1 + 0.5 && y >= r.y0 - 0.5 && y <= r.y1 + 0.5)
+        };
+        let mut text = String::new();
+        for block in tp.blocks() {
+            for line in block.lines() {
+                let before = text.len();
+                for ch in line.chars() {
+                    let r = Rect::from(ch.quad());
+                    if let (Some(c), true) =
+                        (ch.char(), inside((r.x0 + r.x1) / 2.0, (r.y0 + r.y1) / 2.0))
+                    {
+                        text.push(c);
+                    }
+                }
+                if text.len() > before {
+                    text.push('\n');
+                }
+            }
+        }
+        Ok(TextSelection { quads, text })
+    }
+
+    pub fn properties(&self) -> Result<DocProperties> {
+        let meta = |name| self.inner.metadata(name).unwrap_or_default();
+        Ok(DocProperties {
+            path: self.path.clone(),
+            title: meta(MetadataName::Title),
+            author: meta(MetadataName::Author),
+            subject: meta(MetadataName::Subject),
+            keywords: meta(MetadataName::Keywords),
+            creator: meta(MetadataName::Creator),
+            producer: meta(MetadataName::Producer),
+            created: meta(MetadataName::CreationDate),
+            modified: meta(MetadataName::ModDate),
+            format: meta(MetadataName::Format),
+            encrypted: self.password.is_some()
+                || !matches!(meta(MetadataName::Encryption).as_str(), "" | "None"),
+            pages: self.page_count()?,
+            first_page: self.page_size(0)?,
+            file_size: std::fs::metadata(&self.path).map_or(0, |m| m.len()),
+        })
+    }
+
+    /// Cópia para imprimir: o arquivo do disco mais as pendentes (ou sem nenhuma anotação),
+    /// gravada sem criptografia, porque o CUPS precisa ler. O documento aberto não muda.
+    pub fn export_for_print(
+        &self,
+        pending: &[NewAnnot],
+        dest: &Path,
+        with_annots: bool,
+    ) -> Result<()> {
+        let written = self.write_print_copy(pending, dest, with_annots);
+        if written.is_err() {
+            // nada de cópia sem senha esquecida no disco (nem pela metade, nem de tentativa antiga)
+            let _ = std::fs::remove_file(dest);
+        }
+        written
+    }
+
+    fn write_print_copy(&self, pending: &[NewAnnot], dest: &Path, with_annots: bool) -> Result<()> {
+        let copy = open_authenticated(&self.path, self.password.as_deref())?;
+        if with_annots {
+            apply_pending(&copy, pending)?;
+        } else {
+            for p in 0..copy.page_count()? {
+                let mut page = copy.load_pdf_page(p)?;
+                let all: Vec<_> = page.annotations().collect();
+                for a in all {
+                    page.delete_annotation(a)?;
+                }
+                page.update()?;
+            }
+        }
+        let dest = utf8_path(dest)?;
+        // o padrão do MuPDF é manter a criptografia; o CUPS precisa de uma cópia legível
+        let mut opts = PdfWriteOptions::default();
+        opts.set_encryption(Encryption::None);
+        copy.save_with_options(dest, opts)?;
+        Ok(())
+    }
+
+    /// Texto do documento inteiro (Selecionar tudo), página após página.
+    pub fn document_text(&self) -> Result<String> {
+        let mut out = String::new();
+        for p in 0..self.page_count()? {
+            out.push_str(
+                &self
+                    .load(p)?
+                    .to_text_page(TextPageFlags::empty())?
+                    .to_text()?,
+            );
+            out.push('\n');
+        }
+        Ok(out)
+    }
+}
+
 fn size_of(page: &mupdf::Page) -> Result<PageSize> {
     let b = page.bounds()?;
     Ok(PageSize {
@@ -169,6 +286,9 @@ fn add_one(page: &mut PdfPage, a: &NewAnnot) -> Result<()> {
         NewAnnot::Underline { rects, .. } => {
             page.add_underline_annotation(quads(rects)?)?;
         }
+        NewAnnot::StrikeOut { rects, .. } => {
+            page.add_strikeout_annotation(quads(rects)?)?;
+        }
         NewAnnot::Note { at, text, .. } => {
             page.add_text_annotation(Rect::new(at.0, at.1, at.0 + 24.0, at.1 + 24.0), text)?;
         }
@@ -183,12 +303,41 @@ fn add_one(page: &mut PdfPage, a: &NewAnnot) -> Result<()> {
     Ok(())
 }
 
+/// Aplica as anotações pendentes às páginas de `doc` (recusa páginas fora do documento).
+fn apply_pending(doc: &PdfDocument, pending: &[NewAnnot]) -> Result<()> {
+    let count = doc.page_count()?;
+    if let Some(bad) = pending
+        .iter()
+        .map(NewAnnot::page)
+        .find(|p| *p < 0 || *p >= count)
+    {
+        return Err(PdfError::PageOutOfRange(bad));
+    }
+    let mut pages: Vec<i32> = pending.iter().map(NewAnnot::page).collect();
+    pages.sort_unstable();
+    pages.dedup();
+    for p in pages {
+        let mut page = doc.load_pdf_page(p)?;
+        for a in pending.iter().filter(|a| a.page() == p) {
+            add_one(&mut page, a)?;
+        }
+        page.update()?;
+    }
+    Ok(())
+}
+
+fn utf8_path(path: &Path) -> Result<&str> {
+    path.to_str()
+        .ok_or_else(|| PdfError::Engine("caminho não é UTF-8 válido".into()))
+}
+
 fn kind_of(t: PdfAnnotationType) -> Option<AnnotKind> {
     match t {
         PdfAnnotationType::Highlight => Some(AnnotKind::Highlight),
         PdfAnnotationType::Underline => Some(AnnotKind::Underline),
         PdfAnnotationType::Text => Some(AnnotKind::Note),
         PdfAnnotationType::Ink => Some(AnnotKind::Ink),
+        PdfAnnotationType::StrikeOut => Some(AnnotKind::StrikeOut),
         _ => None,
     }
 }
@@ -241,28 +390,9 @@ impl PdfDoc {
     }
 
     fn apply_and_write(&mut self, pending: &[NewAnnot], dest: &Path) -> Result<()> {
-        let count = self.page_count()?;
-        if let Some(bad) = pending
-            .iter()
-            .map(NewAnnot::page)
-            .find(|p| *p < 0 || *p >= count)
-        {
-            return Err(PdfError::PageOutOfRange(bad));
-        }
-        let mut pages: Vec<i32> = pending.iter().map(NewAnnot::page).collect();
-        pages.sort_unstable();
-        pages.dedup();
-        for p in pages {
-            let mut page = self.inner.load_pdf_page(p)?;
-            for a in pending.iter().filter(|a| a.page() == p) {
-                add_one(&mut page, a)?;
-            }
-            page.update()?;
-        }
+        apply_pending(&self.inner, pending)?;
         let tmp = temp_path(dest)?;
-        let tmp_str = tmp
-            .to_str()
-            .ok_or_else(|| PdfError::Engine("caminho não é UTF-8 válido".into()))?;
+        let tmp_str = utf8_path(&tmp)?;
         let mut opts = PdfWriteOptions::default();
         opts.set_encryption(Encryption::Keep);
         let written = self

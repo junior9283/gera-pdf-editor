@@ -84,28 +84,14 @@ fn search_streams_hits_then_done() {
 }
 
 #[test]
-fn words_save_and_failed_open() {
+fn save_and_failed_open() {
     let (dir, w, _) = opened(1);
     let path = dir.path().join("a.pdf");
-    w.send(Request::Words {
-        tag: 3,
-        page: 0,
-        area: PdfRect::new(0.0, 0.0, 612.0, 792.0),
-    });
-    let rects = match recv(&w) {
-        Response::Words { tag, words, .. } => {
-            assert_eq!(tag, 3);
-            assert_eq!(words.len(), 4);
-            words
-                .iter()
-                .filter(|x| x.text == "Hello")
-                .map(|x| x.rect)
-                .collect::<Vec<_>>()
-        }
-        other => panic!("{other:?}"),
-    };
     w.send(Request::Save {
-        pending: vec![NewAnnot::Highlight { page: 0, rects }],
+        pending: vec![NewAnnot::Highlight {
+            page: 0,
+            rects: vec![PdfRect::new(70.0, 90.0, 200.0, 110.0)],
+        }],
         dest: path,
     });
     match recv(&w) {
@@ -155,5 +141,94 @@ fn render_is_served_while_a_long_search_is_running() {
     assert!(
         rendered_before_done,
         "o render ficou preso atrás da busca inteira"
+    );
+}
+
+#[test]
+fn selection_text_and_properties_through_the_worker() {
+    let (_d, w, _) = opened(2);
+    w.send(Request::SelectText {
+        tag: 7,
+        page: 0,
+        a: (0.0, 0.0),
+        b: (10_000.0, 10_000.0),
+    });
+    match recv(&w) {
+        Response::Selection {
+            tag,
+            page,
+            selection,
+        } => {
+            assert_eq!((tag, page), (7, 0));
+            assert!(selection.text.contains("Hello"), "{:?}", selection.text);
+        }
+        other => panic!("{other:?}"),
+    }
+    w.send(Request::DocumentText { tag: 8 });
+    match recv(&w) {
+        Response::DocumentText { tag, text } => {
+            assert_eq!(tag, 8);
+            assert!(text.contains("Page 2"));
+        }
+        other => panic!("{other:?}"),
+    }
+    w.send(Request::Properties);
+    match recv(&w) {
+        Response::Properties(p) => assert_eq!(p.pages, 2),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn export_for_print_through_the_worker() {
+    let (dir, w, _) = opened(1);
+    let dest = dir.path().join("imprimir.pdf");
+    w.send(Request::ExportForPrint {
+        pending: vec![],
+        dest: dest.clone(),
+        with_annots: true,
+    });
+    match recv(&w) {
+        Response::Exported { dest: d } => assert_eq!(d, dest),
+        other => panic!("{other:?}"),
+    }
+    assert!(dest.exists());
+}
+
+#[test]
+fn a_burst_of_selection_requests_is_answered_by_the_latest() {
+    // 50 pedidos chegam enquanto o worker ainda abre o documento: só os últimos importam
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_sample(&dir, "a.pdf", 3, 0);
+    let w = Worker::spawn(|| {});
+    w.send(Request::Open {
+        path,
+        password: None,
+    });
+    for tag in 1..=50 {
+        w.send(Request::SelectText {
+            tag,
+            page: 0,
+            a: (0.0, 0.0),
+            b: (10_000.0, 10_000.0),
+        });
+    }
+    let mut tags = Vec::new();
+    loop {
+        match recv(&w) {
+            Response::Selection { tag, .. } => {
+                tags.push(tag);
+                if tag == 50 {
+                    break;
+                }
+            }
+            Response::Opened(_) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(
+        tags.len() < 50,
+        "pedidos antigos foram juntados: {}",
+        tags.len()
     );
 }

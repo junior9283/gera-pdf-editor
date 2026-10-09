@@ -12,8 +12,7 @@ pub fn show(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
         let save = if doc.is_dirty() { "💾•" } else { "💾" };
         let can_save = !doc.edit.saving;
         button(ui, &mut out, save, Command::Doc(DocCommand::Save), can_save);
-        ui.add_enabled(false, egui::Button::new("⎙"))
-            .on_disabled_hover_text("Imprimir: em breve (v1.1-B)");
+        button(ui, &mut out, "⎙", Command::Print, true);
         button(ui, &mut out, "🔍", Command::Doc(DocCommand::Find), true);
         ui.separator();
         doc.page_controls(ui);

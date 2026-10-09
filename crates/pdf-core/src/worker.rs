@@ -1,5 +1,7 @@
 use crate::error::PdfError;
-use crate::types::{AnnotInfo, DocSummary, NewAnnot, PdfRect, RenderedPage, Rotation, Word};
+use crate::types::{
+    AnnotInfo, DocProperties, DocSummary, NewAnnot, PdfRect, RenderedPage, Rotation, TextSelection,
+};
 use crate::PdfDoc;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,14 +41,27 @@ pub enum Request {
         needle: String,
         cancel: CancelToken,
     },
-    Words {
-        tag: u64,
-        page: i32,
-        area: PdfRect,
-    },
     Save {
         pending: Vec<NewAnnot>,
         dest: PathBuf,
+    },
+    /// Seleção pelo fluxo do texto entre `a` e `b` (pontos da página).
+    SelectText {
+        tag: u64,
+        page: i32,
+        a: (f32, f32),
+        b: (f32, f32),
+    },
+    /// Texto do documento inteiro (Selecionar tudo).
+    DocumentText {
+        tag: u64,
+    },
+    Properties,
+    /// Cópia para imprimir em `dest` (com as pendentes ou sem nenhuma anotação).
+    ExportForPrint {
+        pending: Vec<NewAnnot>,
+        dest: PathBuf,
+        with_annots: bool,
     },
 }
 
@@ -73,16 +88,28 @@ pub enum Response {
     SearchDone {
         id: u64,
     },
-    Words {
-        tag: u64,
-        page: i32,
-        words: Vec<Word>,
-    },
     Saved {
         annots: Vec<AnnotInfo>,
     },
     SaveFailed(String),
+    Selection {
+        tag: u64,
+        page: i32,
+        selection: TextSelection,
+    },
+    DocumentText {
+        tag: u64,
+        text: String,
+    },
+    Properties(DocProperties),
+    PropertiesFailed(String),
+    Exported {
+        dest: PathBuf,
+    },
+    ExportFailed(String),
 }
+
+const NO_DOC: &str = "nenhum documento aberto";
 
 /// Thread dedicada ao documento: o `Document` do MuPDF não é `Send`, então só ela o toca.
 pub struct Worker {
@@ -177,17 +204,9 @@ impl State {
                     None => send(Response::SearchDone { id }),
                 }
             }
-            Request::Words { tag, page, area } => {
-                let words = self
-                    .doc
-                    .as_ref()
-                    .and_then(|d| d.words_in_rect(page, area).ok())
-                    .unwrap_or_default();
-                send(Response::Words { tag, page, words });
-            }
             Request::Save { pending, dest } => {
                 let Some(d) = self.doc.as_mut() else {
-                    send(Response::SaveFailed("nenhum documento aberto".into()));
+                    send(Response::SaveFailed(NO_DOC.into()));
                     return;
                 };
                 match d.save_with(&pending, &dest) {
@@ -197,7 +216,47 @@ impl State {
                     Err(e) => send(Response::SaveFailed(e.to_string())),
                 }
             }
+            Request::SelectText { tag, page, a, b } => {
+                let selection = self
+                    .doc
+                    .as_ref()
+                    .and_then(|d| d.select_text(page, a, b).ok())
+                    .unwrap_or_default();
+                send(Response::Selection {
+                    tag,
+                    page,
+                    selection,
+                });
+            }
+            Request::DocumentText { tag } => {
+                let text = self
+                    .doc
+                    .as_ref()
+                    .and_then(|d| d.document_text().ok())
+                    .unwrap_or_default();
+                send(Response::DocumentText { tag, text });
+            }
+            Request::Properties => send(
+                self.with_doc(PdfDoc::properties)
+                    .map_or_else(Response::PropertiesFailed, Response::Properties),
+            ),
+            Request::ExportForPrint {
+                pending,
+                dest,
+                with_annots,
+            } => send(
+                match self.with_doc(|d| d.export_for_print(&pending, &dest, with_annots)) {
+                    Ok(()) => Response::Exported { dest },
+                    Err(e) => Response::ExportFailed(e),
+                },
+            ),
         }
+    }
+
+    /// Roda `f` no documento aberto; erros (e a falta de documento) viram texto para a UI.
+    fn with_doc<T>(&self, f: impl FnOnce(&PdfDoc) -> crate::Result<T>) -> Result<T, String> {
+        let doc = self.doc.as_ref().ok_or_else(|| NO_DOC.to_string())?;
+        f(doc).map_err(|e| e.to_string())
     }
 
     /// Busca a próxima página do `search` ativo; encerra a busca ao terminar ou cancelar.
@@ -233,9 +292,13 @@ fn run(requests: Receiver<Request>, out: Sender<Response>, wake: impl Fn()) {
         wake();
     };
     let mut state = State::default();
+    // Pedido já tirado da fila ao juntar seleções, ainda por atender.
+    let mut held: Option<Request> = None;
     loop {
         // Pedidos pendentes têm prioridade sobre a busca; sem busca ativa, espera bloqueando.
-        let next = if state.search.is_some() {
+        let next = if held.is_some() {
+            held.take()
+        } else if state.search.is_some() {
             match requests.try_recv() {
                 Ok(r) => Some(r),
                 Err(TryRecvError::Empty) => None,
@@ -248,6 +311,19 @@ fn run(requests: Receiver<Request>, out: Sender<Response>, wake: impl Fn()) {
             }
         };
         match next {
+            Some(request @ Request::SelectText { .. }) => {
+                // Arrastar o mouse gera um pedido por quadro: só o mais novo da fila importa.
+                let mut latest = request;
+                while let Ok(r) = requests.try_recv() {
+                    if matches!(r, Request::SelectText { .. }) {
+                        latest = r;
+                    } else {
+                        held = Some(r);
+                        break;
+                    }
+                }
+                state.handle(latest, &send);
+            }
             Some(request) => state.handle(request, &send),
             None => state.search_step(&send),
         }

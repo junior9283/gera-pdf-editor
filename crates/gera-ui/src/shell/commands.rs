@@ -22,6 +22,8 @@ pub enum Command {
     ActivateTab(usize),
     Shortcuts,
     About,
+    Properties,
+    Print,
 }
 
 impl Command {
@@ -42,6 +44,8 @@ impl Command {
             Command::ActivateTab(_) => "Ir para a aba",
             Command::Shortcuts => "Atalhos de teclado",
             Command::About => "Sobre o Gera PDF Editor",
+            Command::Properties => "Propriedades…",
+            Command::Print => "Imprimir…",
             Command::Doc(d) => match d {
                 DocCommand::Save => "Salvar",
                 DocCommand::Undo => "Desfazer",
@@ -55,6 +59,8 @@ impl Command {
                 DocCommand::Fit(Fit::None) => "Zoom livre",
                 DocCommand::Mode(m) => return m.label().into(),
                 DocCommand::ToggleCover => "Mostrar capa sozinha",
+                DocCommand::Copy => "Copiar",
+                DocCommand::SelectAll => "Selecionar tudo",
                 DocCommand::Rotate { clockwise: true } => "Girar no sentido horário",
                 DocCommand::Rotate { clockwise: false } => "Girar no sentido anti-horário",
             },
@@ -88,7 +94,11 @@ pub fn shortcuts() -> Vec<(KeyboardShortcut, Command)> {
         (cmd(Key::Q), Command::Quit),
         (cmd(Key::Z), doc(DocCommand::Undo)),
         (cmd(Key::F), doc(DocCommand::Find)),
+        (cmd(Key::C), doc(DocCommand::Copy)),
+        (cmd(Key::A), doc(DocCommand::SelectAll)),
         (cmd(Key::Tab), Command::NextTab),
+        (cmd(Key::D), Command::Properties),
+        (cmd(Key::P), Command::Print),
         (cmd(Key::Equals), doc(DocCommand::ZoomIn)),
         (cmd(Key::Plus), doc(DocCommand::ZoomIn)),
         (cmd(Key::Minus), doc(DocCommand::ZoomOut)),
@@ -143,7 +153,12 @@ fn belongs_to_text_fields(cmd: &Command) -> bool {
     matches!(
         cmd,
         Command::Doc(
-            DocCommand::Undo | DocCommand::Redo | DocCommand::ZoomIn | DocCommand::ZoomOut
+            DocCommand::Undo
+                | DocCommand::Redo
+                | DocCommand::ZoomIn
+                | DocCommand::ZoomOut
+                | DocCommand::Copy
+                | DocCommand::SelectAll
         )
     )
 }
@@ -152,12 +167,20 @@ fn belongs_to_text_fields(cmd: &Command) -> bool {
 pub fn from_keyboard(ctx: &egui::Context) -> Vec<Command> {
     let typing = ctx.egui_wants_keyboard_input();
     ctx.input_mut(|i| {
-        shortcuts()
+        let mut out: Vec<Command> = shortcuts()
             .into_iter()
             .filter(|(_, c)| !(typing && belongs_to_text_fields(c)))
             .filter(|(s, _)| i.consume_shortcut(s))
             .map(|(_, c)| c)
-            .collect()
+            .collect();
+        // o egui entrega Ctrl+C como evento "copiar", não como tecla: passa pelo mesmo filtro
+        let copy = Command::Doc(DocCommand::Copy);
+        if i.events.iter().any(|e| matches!(e, egui::Event::Copy))
+            && !(typing && belongs_to_text_fields(&copy))
+        {
+            out.push(copy);
+        }
+        out
     })
 }
 

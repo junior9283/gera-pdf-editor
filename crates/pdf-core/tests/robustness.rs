@@ -1,6 +1,5 @@
 mod common;
 use common::write_sample;
-use mupdf::pdf::{Encryption, PdfDocument, PdfWriteOptions};
 use pdf_core::sample::sample_pdf;
 use pdf_core::{NewAnnot, PdfDoc, PdfError};
 
@@ -50,21 +49,10 @@ fn zero_page_document_does_not_panic() {
     }
 }
 
-fn encrypted(dir: &tempfile::TempDir) -> std::path::PathBuf {
-    let path = dir.path().join("senha.pdf");
-    let doc = PdfDocument::from_bytes(&sample_pdf(1, 0)).unwrap();
-    let mut opts = PdfWriteOptions::default();
-    opts.set_encryption(Encryption::Aes256)
-        .set_owner_password("dono")
-        .set_user_password("segredo");
-    doc.save_with_options(path.to_str().unwrap(), opts).unwrap();
-    path
-}
-
 #[test]
 fn password_flow() {
     let dir = tempfile::tempdir().unwrap();
-    let path = encrypted(&dir);
+    let path = common::encrypted_sample(&dir);
     assert!(matches!(
         PdfDoc::open(&path, None),
         Err(PdfError::PasswordRequired)
@@ -85,7 +73,7 @@ fn password_flow() {
 #[test]
 fn saving_keeps_the_file_encrypted() {
     let dir = tempfile::tempdir().unwrap();
-    let path = encrypted(&dir);
+    let path = common::encrypted_sample(&dir);
     let mut doc = PdfDoc::open(&path, Some("segredo")).unwrap();
     let hit = doc.search(0, "Hello").unwrap()[0];
     doc.save_with(

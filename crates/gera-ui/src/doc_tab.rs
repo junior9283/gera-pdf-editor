@@ -1,18 +1,23 @@
 use crate::bench::Bench;
 use crate::canvas::{self, CanvasFrame};
 use crate::edit::{screen_rect, EditState};
+use crate::print_job::{self, PrintJobs};
 use crate::search::SearchState;
+use crate::shell::print_dialog::{PrintChoice, PrintDialog};
 use crate::sidebar::{self, SidebarAction};
 use crate::view::DocView;
 use app_state::layout::ViewMode;
 use app_state::nav::{nav_target, NavKey};
 use app_state::prefs::LeftPanel;
+use app_state::print::{any_oversized, lp_args, PrintOptions};
 use app_state::transform::PageMap;
 use app_state::zoom::{self, Fit};
-use pdf_core::{AnnotInfo, DocSummary, OutlineItem, PdfError, Request, Response, Worker};
+use pdf_core::{
+    AnnotInfo, DocProperties, DocSummary, OutlineItem, PdfError, Request, Response, Worker,
+};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::TryRecvError;
+use std::sync::mpsc::{Receiver, TryRecvError};
 
 /// Numeração das abas (identidade na interface), única durante a sessão.
 static NEXT_TAB: AtomicU64 = AtomicU64::new(0);
@@ -35,6 +40,10 @@ pub enum DocCommand {
     Mode(ViewMode),
     /// Duas páginas: liga/desliga a capa sozinha.
     ToggleCover,
+    /// Copia o texto selecionado.
+    Copy,
+    /// Seleciona o texto do documento inteiro.
+    SelectAll,
     Rotate {
         clockwise: bool,
     },
@@ -48,6 +57,13 @@ pub enum DocEvent {
     Failed(String),
     /// "Salvar como" concluído no novo caminho.
     Renamed(PathBuf),
+}
+
+/// Impressão esperando a cópia temporária: opções, página atual no clique e o arquivo pedido.
+struct PendingPrint {
+    options: PrintOptions,
+    page: usize,
+    file: PathBuf,
 }
 
 /// Um documento aberto: worker próprio, vista, busca, edição e painel lateral.
@@ -83,6 +99,15 @@ pub struct DocTab {
     pub(crate) comment_tools: bool,
     /// Pedido de foco no campo de busca (Ctrl+F ou menu).
     pub(crate) focus_search: bool,
+    /// Propriedades mostradas na janela (aberta enquanto houver).
+    properties: Option<DocProperties>,
+    /// Diálogo "Imprimir" aberto.
+    print_dialog: Option<PrintDialog>,
+    /// Impressão esperando a cópia temporária ficar pronta: opções e a página atual no clique.
+    print_pending: Option<PendingPrint>,
+    /// Lista de impressoras sendo lida do CUPS em segundo plano.
+    printers_rx: Option<Receiver<(Vec<String>, Option<String>)>>,
+    print_jobs: PrintJobs,
     /// Última virada de página pela roda (tempo do egui), para não virar várias de uma vez.
     turned_at: f64,
 }
@@ -110,6 +135,11 @@ impl DocTab {
             password_prompt: None,
             comment_tools: false,
             focus_search: false,
+            properties: None,
+            print_dialog: None,
+            print_pending: None,
+            printers_rx: None,
+            print_jobs: PrintJobs::default(),
             turned_at: f64::NEG_INFINITY,
         }
     }
@@ -124,7 +154,7 @@ impl DocTab {
         self.is_dirty() || self.edit.saving
     }
 
-    pub fn run(&mut self, cmd: DocCommand) {
+    pub fn run(&mut self, ctx: &egui::Context, cmd: DocCommand) {
         let page = self.last.current_page;
         let Some(view) = self.view.as_mut() else {
             return;
@@ -138,6 +168,8 @@ impl DocTab {
                 self.edit.redo();
             }
             DocCommand::Find => self.focus_search = true,
+            DocCommand::Copy => self.edit.copy(ctx),
+            DocCommand::SelectAll => self.edit.select_all(&self.worker),
             DocCommand::ZoomIn | DocCommand::ZoomOut | DocCommand::ZoomReset => {
                 let z = match cmd {
                     DocCommand::ZoomIn => zoom::zoom_in(view.zoom),
@@ -154,7 +186,7 @@ impl DocTab {
             DocCommand::ToggleCover => {
                 view.cover = !view.cover;
                 let mode = view.mode;
-                self.run(DocCommand::Mode(mode));
+                self.run(ctx, DocCommand::Mode(mode));
             }
             DocCommand::Rotate { clockwise } => {
                 let r = if clockwise {
@@ -250,6 +282,9 @@ impl DocTab {
     }
 
     pub fn poll(&mut self, ctx: &egui::Context, mut bench: Option<&mut Bench>) {
+        if let Some(msg) = self.print_jobs.poll().pop() {
+            self.status = msg;
+        }
         let mut renders = 0;
         loop {
             let response = match self.worker.rx.try_recv() {
@@ -320,7 +355,12 @@ impl DocTab {
                     }
                 }
                 Response::SearchDone { id } => self.search.on_done(id),
-                Response::Words { tag, page, words } => self.edit.on_words(ctx, tag, page, words),
+                Response::Selection {
+                    tag,
+                    page,
+                    selection,
+                } => self.edit.on_selection(tag, page, selection),
+                Response::DocumentText { tag, text } => self.edit.on_document_text(tag, text),
                 Response::Saved { annots } => {
                     self.edit.reset();
                     self.saved_annots = annots;
@@ -339,6 +379,17 @@ impl DocTab {
                     self.edit.saving = false;
                     self.save_dest = None;
                     self.status = format!("Não foi possível salvar: {msg}");
+                }
+                Response::Properties(p) => {
+                    self.properties = Some(p);
+                }
+                Response::PropertiesFailed(msg) => {
+                    self.status = format!("Não foi possível ler as propriedades: {msg}");
+                }
+                Response::Exported { dest } => self.send_to_printer(ctx, dest),
+                Response::ExportFailed(msg) => {
+                    self.print_pending = None;
+                    self.status = format!("Não foi possível preparar a impressão: {msg}");
                 }
             }
         }
@@ -418,8 +469,89 @@ impl DocTab {
         egui::Panel::bottom("status").show(ui, |ui| ui.label(text));
     }
 
-    /// Páginas, janelas de nota e senha e fim do quadro (depois dos painéis laterais).
+    /// Arquivo → Imprimir: abre o diálogo na hora; as impressoras chegam do CUPS em segundo plano.
+    pub fn open_print_dialog(&mut self, ctx: &egui::Context) {
+        if self.view.is_some() && self.print_pending.is_none() {
+            self.print_dialog = Some(PrintDialog::new(self.last.current_page));
+            self.printers_rx = Some(print_job::printers_in_background(ctx));
+        }
+    }
+
+    /// Opções escolhidas: o worker grava a cópia temporária; o envio continua em `send_to_printer`.
+    fn start_print(&mut self, options: PrintOptions) {
+        match print_job::temp_file() {
+            Ok(dest) => {
+                self.worker.send(Request::ExportForPrint {
+                    pending: self.edit.pending.items().to_vec(),
+                    dest: dest.clone(),
+                    with_annots: options.with_annots,
+                });
+                self.status = format!("Preparando a impressão para {}…", options.printer);
+                self.print_pending = Some(PendingPrint {
+                    options,
+                    page: self.last.current_page,
+                    file: dest,
+                });
+            }
+            Err(e) => self.status = format!("Não foi possível preparar a impressão: {e}"),
+        }
+    }
+
+    /// A cópia temporária ficou pronta: monta os argumentos e entrega ao CUPS.
+    fn send_to_printer(&mut self, ctx: &egui::Context, file: PathBuf) {
+        let (Some(PendingPrint { options, page, .. }), Some(view)) =
+            (self.print_pending.take(), self.view.as_ref())
+        else {
+            let _ = std::fs::remove_file(&file);
+            return;
+        };
+        let oversized = any_oversized(view.sizes.iter().map(|s| (s.width, s.height)));
+        match lp_args(&options, page + 1, view.sizes.len(), oversized, &file) {
+            Ok(args) => {
+                self.status = format!("Enviando para {}…", options.printer);
+                self.print_jobs.start(ctx, options.printer, args, file);
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&file);
+                self.status = format!("Não foi possível imprimir: {e}");
+            }
+        }
+    }
+
+    /// Arquivo → Propriedades: pede ao worker; a janela abre quando a resposta chega.
+    pub fn request_properties(&mut self) {
+        if self.view.is_some() {
+            self.worker.send(Request::Properties);
+        }
+    }
+
+    /// Páginas, janelas (propriedades, imprimir, nota, senha) e fim do quadro, depois dos painéis.
     pub fn show_canvas(&mut self, ui: &mut egui::Ui) {
+        if let Some(p) = &self.properties {
+            let mut open = true;
+            crate::shell::properties::window(ui, p, &mut open);
+            if !open {
+                self.properties = None;
+            }
+        }
+        if let (Some(rx), Some(dialog)) = (&self.printers_rx, self.print_dialog.as_mut()) {
+            if let Ok((list, default)) = rx.try_recv() {
+                dialog.set_printers(list, default);
+                self.printers_rx = None;
+            }
+        }
+        let choice = match (self.print_dialog.as_mut(), self.view.as_mut()) {
+            (Some(dialog), Some(view)) => dialog.show(ui, view, &self.worker),
+            _ => None,
+        };
+        match choice {
+            Some(PrintChoice::Print(options)) => {
+                self.print_dialog = None;
+                self.start_print(options);
+            }
+            Some(PrintChoice::Cancel) => self.print_dialog = None,
+            None => {}
+        }
         egui::CentralPanel::default().show(ui, |ui| self.canvas(ui));
         self.edit.note_window(ui);
         self.password_window(ui);
@@ -587,6 +719,16 @@ fn paint_search_hits(ui: &egui::Ui, search: &SearchState, page: i32, map: &PageM
             egui::Color32::from_rgba_unmultiplied(255, 230, 0, 90)
         };
         ui.painter().rect_filled(screen_rect(r, map), 2.0, color);
+    }
+}
+
+impl Drop for DocTab {
+    /// Aba fechada com a impressão em preparo: a cópia sem senha não pode ficar para trás
+    /// (se o worker ainda a gravar depois disto, a faxina da próxima abertura a remove).
+    fn drop(&mut self) {
+        if let Some(p) = self.print_pending.take() {
+            let _ = std::fs::remove_file(p.file);
+        }
     }
 }
 
