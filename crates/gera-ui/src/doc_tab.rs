@@ -2,10 +2,11 @@ use crate::bench::Bench;
 use crate::canvas::{self, CanvasFrame};
 use crate::edit::{screen_rect, EditState};
 use crate::search::SearchState;
-use crate::sidebar::{self, SidebarAction, SidebarTab};
+use crate::sidebar::{self, SidebarAction};
 use crate::view::DocView;
 use app_state::layout::ViewMode;
 use app_state::nav::{nav_target, NavKey};
+use app_state::prefs::LeftPanel;
 use app_state::transform::PageMap;
 use app_state::zoom::{self, Fit};
 use pdf_core::{AnnotInfo, DocSummary, OutlineItem, PdfError, Request, Response, Worker};
@@ -61,7 +62,6 @@ pub struct DocTab {
     pub(crate) saved_annots: Vec<AnnotInfo>,
     /// O motor de PDF (thread do worker) parou; já avisado.
     engine_stopped: bool,
-    tab: SidebarTab,
     outline: Vec<OutlineItem>,
     /// Caminho que está sendo aberto (para pedir a senha de um PDF protegido).
     opening: Option<PathBuf>,
@@ -94,7 +94,6 @@ impl DocTab {
             edit: EditState::default(),
             saved_annots: Vec::new(),
             engine_stopped: false,
-            tab: SidebarTab::default(),
             outline: Vec::new(),
             opening: None,
             password_prompt: None,
@@ -394,29 +393,53 @@ impl DocTab {
         }
     }
 
-    /// `chrome`: mostra barra de status e painel lateral (desligado na tela cheia).
-    pub fn show(&mut self, ui: &mut egui::Ui, chrome: bool) {
+    /// Início do quadro: tem que vir antes de qualquer pedido de render (painel ou canvas).
+    pub fn begin(&mut self) {
         if let Some(view) = self.view.as_mut() {
             view.begin_frame();
         }
-        if chrome {
-            egui::Panel::bottom("status").show(ui, |ui| {
-                let unsaved = self.edit.pending.items().len();
-                let text = match unsaved {
-                    0 => self.status.clone(),
-                    n => format!("{} — {n} alterações não salvas", self.status),
-                };
-                ui.label(text);
-            });
-            if self.view.is_some() {
-                self.sidebar(ui);
-            }
-        }
+    }
+
+    /// Barra de status (some na tela cheia).
+    pub fn show_status(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::bottom("status").show(ui, |ui| {
+            let unsaved = self.edit.pending.items().len();
+            let text = match unsaved {
+                0 => self.status.clone(),
+                n => format!("{} — {n} alterações não salvas", self.status),
+            };
+            ui.label(text);
+        });
+    }
+
+    /// Páginas, janelas de nota e senha e fim do quadro (depois dos painéis laterais).
+    pub fn show_canvas(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show(ui, |ui| self.canvas(ui));
         self.edit.note_window(ui);
         self.password_window(ui);
         if let Some(view) = self.view.as_mut() {
             view.end_frame();
+        }
+    }
+
+    /// Conteúdo do painel esquerdo; clicar leva à página.
+    pub fn side_panel(&mut self, ui: &mut egui::Ui, panel: LeftPanel) {
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        let action = sidebar::show(
+            ui,
+            panel,
+            view,
+            &self.worker,
+            &self.outline,
+            &self.saved_annots,
+            self.edit.pending.items(),
+        );
+        if let SidebarAction::JumpToPage(page) = action {
+            if let Some(y) = view.go_to(page as i32, None) {
+                self.jump_to = Some(y);
+            }
         }
     }
 
@@ -470,31 +493,6 @@ impl DocTab {
 
     pub fn zoom_percent(&self) -> Option<f32> {
         self.view.as_ref().map(|v| v.zoom * 100.0)
-    }
-
-    /// Painel lateral (miniaturas, índice, anotações); clicar leva à página.
-    fn sidebar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::left("sidebar")
-            .default_size(150.0)
-            .show(ui, |ui| {
-                let Some(view) = self.view.as_mut() else {
-                    return;
-                };
-                let action = sidebar::show(
-                    ui,
-                    &mut self.tab,
-                    view,
-                    &self.worker,
-                    &self.outline,
-                    &self.saved_annots,
-                    self.edit.pending.items(),
-                );
-                if let SidebarAction::JumpToPage(page) = action {
-                    if let Some(y) = view.go_to(page as i32, None) {
-                        self.jump_to = Some(y);
-                    }
-                }
-            });
     }
 
     /// Pedido de senha para abrir um PDF protegido (a senha não é registrada em lugar nenhum).

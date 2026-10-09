@@ -14,6 +14,8 @@ pub enum Command {
     Quit,
     Doc(DocCommand),
     ToggleDark,
+    TogglePanel(app_state::prefs::LeftPanel),
+    ToggleTools,
     FullScreen,
     NextTab,
     PrevTab,
@@ -32,6 +34,8 @@ impl Command {
             Command::CloseAll => "Fechar todas",
             Command::Quit => "Sair",
             Command::ToggleDark => "Modo escuro",
+            Command::TogglePanel(p) => return p.label().into(),
+            Command::ToggleTools => "Ferramentas",
             Command::FullScreen => "Tela cheia",
             Command::NextTab => "Próxima aba",
             Command::PrevTab => "Aba anterior",
@@ -188,5 +192,13 @@ mod tests {
             assert!(shortcut_of(&cmd).is_some(), "{cmd:?}");
             assert!(!cmd.label().is_empty());
         }
+    }
+
+    #[test]
+    fn panel_commands_have_labels() {
+        for p in app_state::prefs::LeftPanel::ALL {
+            assert!(!Command::TogglePanel(p).label().is_empty());
+        }
+        assert!(!Command::ToggleTools.label().is_empty());
     }
 }

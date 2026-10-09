@@ -2,6 +2,7 @@
 use crate::doc_tab::DocCommand;
 use crate::shell::commands::{shortcut_of, Command};
 use app_state::layout::ViewMode;
+use app_state::prefs::LeftPanel;
 use app_state::recents::RecentFiles;
 use app_state::tabs::tab_title;
 use app_state::zoom::Fit;
@@ -12,6 +13,9 @@ pub struct MenuState<'a> {
     /// "Mostrar capa sozinha" ligado no documento ativo.
     pub doc_cover: bool,
     pub dark: bool,
+    /// Painel esquerdo aberto e painel de ferramentas visível.
+    pub left: Option<LeftPanel>,
+    pub tools_panel: bool,
     pub recents: &'a RecentFiles,
     /// (aba, título) de todas as abas, na ordem da barra.
     pub tabs: Vec<(usize, String)>,
@@ -131,6 +135,18 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
                 );
             });
             item(ui, &mut out, Command::FullScreen, true);
+            ui.menu_button("Painéis", |ui| {
+                for p in LeftPanel::ALL {
+                    check(
+                        ui,
+                        &mut out,
+                        Command::TogglePanel(p),
+                        s.left == Some(p),
+                        true,
+                    );
+                }
+                check(ui, &mut out, Command::ToggleTools, s.tools_panel, true);
+            });
             ui.separator();
             check(ui, &mut out, Command::ToggleDark, s.dark, true);
         });

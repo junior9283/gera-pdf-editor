@@ -6,8 +6,8 @@ use crate::shell::commands::{self, Command};
 use crate::shell::home::{self, HomeAction};
 use crate::shell::menus::{self, MenuState};
 use crate::shell::tabs::{self as tab_bar, TabAction, TabLabel};
-use crate::shell::{help, toolbar, tools_hub};
-use app_state::prefs::Prefs;
+use crate::shell::{help, panels, toolbar, tools_hub};
+use app_state::prefs::{Prefs, MAX_PANEL, MIN_PANEL};
 use app_state::recents::{now_secs, RecentFiles};
 use app_state::store;
 use app_state::tabs::{canonical, tab_title, TabList, FIXED, HOME, TOOLS};
@@ -29,6 +29,8 @@ pub struct GeraApp {
     closing: Option<CloseFlow>,
     /// Saída já confirmada: não interceptar o fechamento da janela de novo.
     allow_close: bool,
+    /// Preferências mudaram e ainda não foram gravadas.
+    prefs_dirty: bool,
     fullscreen: bool,
     /// Ligar a linha Comentar no próximo documento aberto pelo seletor.
     comment_after_open: bool,
@@ -62,6 +64,7 @@ impl GeraApp {
             status: String::new(),
             closing: None,
             allow_close: false,
+            prefs_dirty: false,
             fullscreen: false,
             comment_after_open: false,
             last_doc: None,
@@ -251,6 +254,14 @@ impl GeraApp {
                 }
             }
             Command::ToggleDark => self.set_dark(ctx, !self.prefs.dark),
+            Command::TogglePanel(p) => {
+                self.prefs.left_panel = (self.prefs.left_panel != Some(p)).then_some(p);
+                self.prefs_dirty = true;
+            }
+            Command::ToggleTools => {
+                self.prefs.tools_panel = !self.prefs.tools_panel;
+                self.prefs_dirty = true;
+            }
             Command::FullScreen => {
                 self.fullscreen = !self.fullscreen;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
@@ -282,10 +293,82 @@ impl GeraApp {
         for doc in &mut self.docs {
             doc.set_dark(dark);
         }
+        self.prefs_dirty = true;
+    }
+
+    /// Grava as preferências quando o usuário solta o mouse (não a cada pixel de arrasto).
+    fn save_prefs_when_idle(&mut self, ctx: &egui::Context) {
+        if !self.prefs_dirty || ctx.input(|i| i.pointer.any_down()) {
+            return;
+        }
+        self.prefs_dirty = false;
         if let Some(file) = store::config_file(PREFS_FILE) {
             if let Err(e) = store::save_json(&file, &self.prefs) {
                 self.status = format!("Não foi possível gravar as preferências: {e}");
             }
+        }
+    }
+
+    /// Barras, trilho, painéis laterais e páginas do documento ativo (fora da tela cheia).
+    fn document_view(&mut self, ui: &mut egui::Ui) {
+        let mut prefs = self.prefs.clone();
+        let mut cmd = None;
+        let mut tool_id = None;
+        let Some(i) = self.tabs.doc_index(self.tabs.active()) else {
+            return;
+        };
+        let doc = &mut self.docs[i];
+        doc.begin();
+        cmd = egui::Panel::top("ferramentas-doc")
+            .show(ui, |ui| toolbar::show(ui, doc))
+            .inner
+            .or(cmd);
+        if doc.comment_tools {
+            cmd = egui::Panel::top("comentar")
+                .show(ui, |ui| toolbar::comment_row(ui, doc))
+                .inner
+                .or(cmd);
+        }
+        doc.show_status(ui);
+        let clicked = egui::Panel::left("trilho")
+            .exact_size(40.0)
+            .resizable(false)
+            .show(ui, |ui| panels::rail(ui, prefs.left_panel))
+            .inner;
+        if let Some(p) = clicked {
+            prefs.left_panel = (prefs.left_panel != Some(p)).then_some(p);
+        }
+        if let Some(p) = prefs.left_panel {
+            let r = egui::Panel::left("painel-esquerdo")
+                .resizable(true)
+                .default_size(prefs.left_width)
+                .size_range(MIN_PANEL..=MAX_PANEL)
+                .show(ui, |ui| doc.side_panel(ui, p));
+            prefs.left_width = r.response.rect.width();
+        }
+        if prefs.tools_panel {
+            let r = egui::Panel::right("painel-ferramentas")
+                .resizable(true)
+                .default_size(prefs.tools_width)
+                .size_range(MIN_PANEL..=MAX_PANEL)
+                .show(ui, tools_hub::side_list);
+            prefs.tools_width = r.response.rect.width();
+            tool_id = r.inner;
+        }
+        doc.show_canvas(ui);
+        let width_changed = |a: f32, b: f32| (a - b).abs() > 0.5;
+        if prefs.left_panel != self.prefs.left_panel
+            || width_changed(prefs.left_width, self.prefs.left_width)
+            || width_changed(prefs.tools_width, self.prefs.tools_width)
+        {
+            self.prefs = prefs;
+            self.prefs_dirty = true;
+        }
+        if let Some(id) = tool_id {
+            self.run_tool(ui.ctx(), id);
+        }
+        if let Some(cmd) = cmd {
+            self.run(ui.ctx(), cmd);
         }
     }
 
@@ -298,6 +381,8 @@ impl GeraApp {
             doc_mode: view.map(|v| v.mode),
             doc_cover: view.is_some_and(|v| v.cover),
             dark: self.prefs.dark,
+            left: self.prefs.left_panel,
+            tools_panel: self.prefs.tools_panel,
             recents: &self.recents,
             tabs: [
                 (HOME, "Início".to_string()),
@@ -428,6 +513,7 @@ impl eframe::App for GeraApp {
                 self.request_close(ctx, all, true);
             }
         }
+        self.save_prefs_when_idle(ctx);
         if self.closing.is_none() {
             for cmd in commands::from_keyboard(ctx) {
                 self.run(ctx, cmd);
@@ -491,27 +577,11 @@ impl eframe::App for GeraApp {
                     self.run_tool(ui.ctx(), id);
                 }
             }
-            _ if !self.fullscreen => {
-                let mut cmd = None;
-                if let Some(doc) = self.active_doc() {
-                    cmd = egui::Panel::top("ferramentas-doc")
-                        .show(ui, |ui| toolbar::show(ui, doc))
-                        .inner;
-                    if doc.comment_tools {
-                        cmd = egui::Panel::top("comentar")
-                            .show(ui, |ui| toolbar::comment_row(ui, doc))
-                            .inner
-                            .or(cmd);
-                    }
-                    doc.show(ui, true);
-                }
-                if let Some(cmd) = cmd {
-                    self.run(ui.ctx(), cmd);
-                }
-            }
+            _ if !self.fullscreen => self.document_view(ui),
             _ => {
                 if let Some(doc) = self.active_doc() {
-                    doc.show(ui, false); // tela cheia: só as páginas
+                    doc.begin(); // tela cheia: só as páginas
+                    doc.show_canvas(ui);
                 }
             }
         }

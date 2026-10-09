@@ -1,13 +1,6 @@
 use crate::view::DocView;
+use app_state::prefs::LeftPanel;
 use pdf_core::{AnnotInfo, AnnotKind, NewAnnot, OutlineItem, PageSize, Worker};
-
-#[derive(Default, Clone, Copy, PartialEq, Eq)]
-pub enum SidebarTab {
-    #[default]
-    Thumbnails,
-    Outline,
-    Annotations,
-}
 
 pub enum SidebarAction {
     None,
@@ -61,23 +54,19 @@ fn pending_label(a: &NewAnnot) -> String {
 
 pub fn show(
     ui: &mut egui::Ui,
-    tab: &mut SidebarTab,
+    panel: LeftPanel,
     view: &mut DocView,
     worker: &Worker,
     outline: &[OutlineItem],
     saved: &[AnnotInfo],
     pending: &[NewAnnot],
 ) -> SidebarAction {
-    ui.horizontal(|ui| {
-        ui.selectable_value(tab, SidebarTab::Thumbnails, "Páginas");
-        ui.selectable_value(tab, SidebarTab::Outline, "Índice");
-        ui.selectable_value(tab, SidebarTab::Annotations, "Anotações");
-    });
+    ui.strong(panel.label());
     ui.separator();
-    match *tab {
-        SidebarTab::Thumbnails => thumbnails(ui, view, worker),
-        SidebarTab::Outline => outline_list(ui, outline),
-        SidebarTab::Annotations => annotation_list(ui, saved, pending),
+    match panel {
+        LeftPanel::Thumbnails => thumbnails(ui, view, worker),
+        LeftPanel::Outline => outline_list(ui, outline),
+        LeftPanel::Annotations => annotation_list(ui, saved, pending),
     }
 }
 

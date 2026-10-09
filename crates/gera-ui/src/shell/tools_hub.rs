@@ -50,7 +50,6 @@ pub fn hub(ui: &mut egui::Ui) -> Option<&'static str> {
 }
 
 /// Lista compacta para o painel direito.
-#[allow(dead_code)] // painel direito chega na tarefa 11
 pub fn side_list(ui: &mut egui::Ui) -> Option<&'static str> {
     let mut clicked = None;
     ui.heading("Ferramentas");
