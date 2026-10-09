@@ -1,6 +1,6 @@
 mod common;
 use common::write_sample;
-use pdf_core::{CancelToken, NewAnnot, PdfError, PdfRect, Request, Response, Worker};
+use pdf_core::{CancelToken, NewAnnot, PdfError, PdfRect, Request, Response, Rotation, Worker};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,12 +35,14 @@ fn cancelled_render_is_skipped_and_order_is_kept() {
         page: 0,
         scale: 1.0,
         invert: false,
+        rotation: Rotation::R0,
         cancel: cancelled,
     });
     w.send(Request::Render {
         page: 1,
         scale: 1.0,
         invert: false,
+        rotation: Rotation::R0,
         cancel: CancelToken::new(),
     });
     match recv(&w) {
@@ -138,6 +140,7 @@ fn render_is_served_while_a_long_search_is_running() {
         page: 0,
         scale: 0.5,
         invert: false,
+        rotation: Rotation::R0,
         cancel: CancelToken::new(),
     });
     let mut rendered_before_done = false;

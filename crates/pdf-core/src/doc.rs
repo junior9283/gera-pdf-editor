@@ -1,6 +1,7 @@
 use crate::error::{PdfError, Result};
 use crate::types::{
-    AnnotInfo, AnnotKind, DocSummary, NewAnnot, OutlineItem, PageSize, PdfRect, RenderedPage, Word,
+    AnnotInfo, AnnotKind, DocSummary, NewAnnot, OutlineItem, PageSize, PdfRect, RenderedPage,
+    Rotation, Word,
 };
 use mupdf::pdf::{Encryption, PdfAnnotationType, PdfDocument, PdfPage, PdfWriteOptions};
 use mupdf::{Colorspace, Matrix, Point, Quad, Rect, TextExtractOptions};
@@ -77,12 +78,25 @@ impl PdfDoc {
     }
 
     pub fn render(&self, page: i32, scale: f32, invert: bool) -> Result<RenderedPage> {
+        self.render_rotated(page, scale, invert, Rotation::R0)
+    }
+
+    /// Como `render`, com a vista girada (horário). O MuPDF posiciona a imagem pela caixa da
+    /// página já transformada, então a origem continua no canto superior esquerdo.
+    pub fn render_rotated(
+        &self,
+        page: i32,
+        scale: f32,
+        invert: bool,
+        rotation: Rotation,
+    ) -> Result<RenderedPage> {
         let page = self.load(page)?;
         let size = size_of(&page)?;
         if !scale.is_finite() || scale <= 0.0 || scale > max_render_scale(&size) {
             return Err(PdfError::InvalidScale(scale));
         }
-        let ctm = Matrix::new_scale(scale, scale);
+        let mut ctm = Matrix::new_rotate(f32::from(rotation.degrees()));
+        ctm.scale(scale, scale); // escala uniforme: comuta com a rotação
         let pix = page.to_pixmap(&ctm, &Colorspace::device_rgb(), false, true)?;
         let (w, h, stride) = (
             pix.width() as usize,

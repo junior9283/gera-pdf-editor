@@ -122,6 +122,7 @@ impl DocTab {
                     scale,
                     invert,
                     image,
+                    ..
                 } => {
                     let mut is_page = false;
                     if let Some(view) = self.view.as_mut() {

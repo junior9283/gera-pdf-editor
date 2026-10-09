@@ -126,3 +126,44 @@ pub struct DocSummary {
     pub outline: Vec<OutlineItem>,
     pub annots: Vec<AnnotInfo>,
 }
+
+/// Rotação da vista, no sentido horário. Só muda a tela, nunca o arquivo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Rotation {
+    #[default]
+    R0,
+    R90,
+    R180,
+    R270,
+}
+
+impl Rotation {
+    pub fn degrees(self) -> u16 {
+        match self {
+            Rotation::R0 => 0,
+            Rotation::R90 => 90,
+            Rotation::R180 => 180,
+            Rotation::R270 => 270,
+        }
+    }
+
+    /// Um quarto de volta no sentido horário.
+    pub fn cw(self) -> Self {
+        match self {
+            Rotation::R0 => Rotation::R90,
+            Rotation::R90 => Rotation::R180,
+            Rotation::R180 => Rotation::R270,
+            Rotation::R270 => Rotation::R0,
+        }
+    }
+
+    /// Um quarto de volta no sentido anti-horário.
+    pub fn ccw(self) -> Self {
+        self.cw().cw().cw()
+    }
+
+    /// A 90° e 270° largura e altura trocam de lugar.
+    pub fn is_sideways(self) -> bool {
+        matches!(self, Rotation::R90 | Rotation::R270)
+    }
+}

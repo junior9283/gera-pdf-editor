@@ -169,6 +169,7 @@ impl DocView {
             page,
             scale,
             invert: self.dark,
+            rotation: pdf_core::Rotation::R0,
             cancel,
         });
     }
