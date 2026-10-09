@@ -11,7 +11,11 @@ use app_state::transform::PageMap;
 use app_state::zoom::{self, Fit};
 use pdf_core::{AnnotInfo, DocSummary, OutlineItem, PdfError, Request, Response, Worker};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::TryRecvError;
+
+/// Numeração das abas (identidade na interface), única durante a sessão.
+static NEXT_TAB: AtomicU64 = AtomicU64::new(0);
 
 /// Texturas novas por quadro (cada uma custa conversão e envio à GPU na thread da UI).
 const MAX_RENDERS_PER_FRAME: usize = 2;
@@ -49,6 +53,8 @@ pub enum DocEvent {
 /// Um documento aberto: worker próprio, vista, busca, edição e painel lateral.
 pub struct DocTab {
     pub(crate) worker: Worker,
+    /// Identidade estável da aba na interface (rolagem do canvas e das listas laterais).
+    id: egui::Id,
     /// Identidade da aba (caminho canônico).
     pub(crate) path: PathBuf,
     /// Tema escuro herdado da casca.
@@ -86,6 +92,7 @@ impl DocTab {
         let ctx = ctx.clone();
         Self {
             worker: Worker::spawn(move || ctx.request_repaint()),
+            id: egui::Id::new(("documento", NEXT_TAB.fetch_add(1, Ordering::Relaxed))),
             path,
             dark,
             events: Vec::new(),
@@ -200,6 +207,11 @@ impl DocTab {
 
     pub fn take_events(&mut self) -> Vec<DocEvent> {
         std::mem::take(&mut self.events)
+    }
+
+    #[cfg(test)]
+    fn scroll_id(&self) -> egui::Id {
+        self.id
     }
 
     pub fn title(&self) -> String {
@@ -399,15 +411,11 @@ impl DocTab {
     }
 
     /// Barra de status (some na tela cheia).
-    pub fn show_status(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::bottom("status").show(ui, |ui| {
-            let unsaved = self.edit.pending.items().len();
-            let text = match unsaved {
-                0 => self.status.clone(),
-                n => format!("{} — {n} alterações não salvas", self.status),
-            };
-            ui.label(text);
-        });
+    /// Barra de status; `shell` é a mensagem da casca (erros do seletor, de abertura...).
+    pub fn show_status(&mut self, ui: &mut egui::Ui, shell: &str) {
+        let unsaved = self.edit.pending.items().len();
+        let text = status_line(shell, &self.status, unsaved);
+        egui::Panel::bottom("status").show(ui, |ui| ui.label(text));
     }
 
     /// Páginas, janelas de nota e senha e fim do quadro (depois dos painéis laterais).
@@ -425,15 +433,20 @@ impl DocTab {
         let Some(view) = self.view.as_mut() else {
             return;
         };
-        let action = sidebar::show(
-            ui,
-            panel,
-            view,
-            &self.worker,
-            &self.outline,
-            &self.saved_annots,
-            self.edit.pending.items(),
-        );
+        // cada aba com seu id: as listas guardam a própria rolagem
+        let action = ui
+            .push_id(self.id, |ui| {
+                sidebar::show(
+                    ui,
+                    panel,
+                    view,
+                    &self.worker,
+                    &self.outline,
+                    &self.saved_annots,
+                    self.edit.pending.items(),
+                )
+            })
+            .inner;
         if let SidebarAction::JumpToPage(page) = action {
             if let Some(y) = view.go_to(page as i32, None) {
                 self.jump_to = Some(y);
@@ -528,22 +541,41 @@ impl DocTab {
             self.jump_to = Some(self.last.scroll_y * ratio);
         }
         let (worker, edit, search) = (&self.worker, &mut self.edit, &self.search);
-        self.last = canvas::show_pages(
-            ui,
-            view,
-            worker,
-            self.jump_to.take(),
-            &mut |ui, page, rect, map: &PageMap| {
-                paint_search_hits(ui, search, page as i32, map);
-                edit.on_page(ui, worker, page as i32, rect, map);
-            },
-        );
+        let jump_to = self.jump_to.take();
+        // cada aba com seu id: a área de rolagem guarda a posição de cada documento
+        self.last = ui
+            .push_id(self.id, |ui| {
+                canvas::show_pages(
+                    ui,
+                    view,
+                    worker,
+                    jump_to,
+                    &mut |ui, page, rect, map: &PageMap| {
+                        paint_search_hits(ui, search, page as i32, map);
+                        edit.on_page(ui, worker, page as i32, rect, map);
+                    },
+                )
+            })
+            .inner;
         let now = ui.input(|i| i.time);
         if self.last.turn != 0 && now - self.turned_at > 0.25 && view.turn(self.last.turn) {
             self.turned_at = now;
             self.jump_to = Some(0.0);
         }
     }
+}
+
+/// Texto da barra de status: a mensagem da casca (se houver) vem antes da do documento.
+fn status_line(shell: &str, doc: &str, unsaved: usize) -> String {
+    let mut line = match (shell.is_empty(), doc.is_empty()) {
+        (true, _) => doc.to_string(),
+        (false, true) => shell.to_string(),
+        (false, false) => format!("{shell} · {doc}"),
+    };
+    if unsaved > 0 {
+        line.push_str(&format!(" — {unsaved} alterações não salvas"));
+    }
+    line
 }
 
 /// Realça os resultados da busca na página (o atual em laranja).
@@ -555,5 +587,36 @@ fn paint_search_hits(ui: &egui::Ui, search: &SearchState, page: i32, map: &PageM
             egui::Color32::from_rgba_unmultiplied(255, 230, 0, 90)
         };
         ui.painter().rect_filled(screen_rect(r, map), 2.0, color);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_tab_has_its_own_scroll_state() {
+        let ctx = egui::Context::default();
+        let a = DocTab::new(&ctx, PathBuf::from("/a.pdf"), false);
+        let b = DocTab::new(&ctx, PathBuf::from("/b.pdf"), false);
+        assert_ne!(
+            a.scroll_id(),
+            b.scroll_id(),
+            "rolar uma aba não pode mover a outra"
+        );
+    }
+
+    #[test]
+    fn shell_messages_show_in_the_document_status_bar() {
+        assert_eq!(
+            status_line("", "doc.pdf — 3 páginas", 0),
+            "doc.pdf — 3 páginas"
+        );
+        assert_eq!(
+            status_line("", "doc.pdf", 2),
+            "doc.pdf — 2 alterações não salvas"
+        );
+        let line = status_line("Esse arquivo já está aberto em outra aba.", "doc.pdf", 0);
+        assert!(line.starts_with("Esse arquivo já está aberto"), "{line}");
     }
 }

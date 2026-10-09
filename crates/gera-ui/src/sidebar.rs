@@ -1,6 +1,7 @@
 use crate::view::DocView;
 use app_state::prefs::LeftPanel;
-use pdf_core::{AnnotInfo, AnnotKind, NewAnnot, OutlineItem, PageSize, Worker};
+use app_state::transform;
+use pdf_core::{AnnotInfo, AnnotKind, NewAnnot, OutlineItem, PageSize, Rotation, Worker};
 
 pub enum SidebarAction {
     None,
@@ -9,13 +10,19 @@ pub enum SidebarAction {
 
 const THUMB_WIDTH: f32 = 110.0;
 
-/// Escala para que a miniatura da página tenha `THUMB_WIDTH` pontos de largura.
-fn thumb_scale(size: &PageSize) -> f32 {
-    THUMB_WIDTH / size.width.max(1.0)
+/// Tamanho da página como aparece na miniatura (com a rotação da vista).
+fn shown(size: &PageSize, rotation: Rotation) -> (f32, f32) {
+    transform::rotated((size.width.max(1.0), size.height.max(1.0)), rotation)
 }
 
-fn thumb_height(size: &PageSize) -> f32 {
-    THUMB_WIDTH * size.height / size.width.max(1.0)
+/// Escala para que a miniatura da página tenha `THUMB_WIDTH` pontos de largura.
+fn thumb_scale(size: &PageSize, rotation: Rotation) -> f32 {
+    THUMB_WIDTH / shown(size, rotation).0
+}
+
+fn thumb_height(size: &PageSize, rotation: Rotation) -> f32 {
+    let (w, h) = shown(size, rotation);
+    THUMB_WIDTH * h / w
 }
 
 fn annot_label(kind: &str, page: i32, contents: &str, unsaved: bool) -> String {
@@ -75,7 +82,8 @@ fn thumbnails(ui: &mut egui::Ui, view: &mut DocView, worker: &Worker) -> Sidebar
     let Some(first) = view.sizes.first().copied() else {
         return SidebarAction::None;
     };
-    let thumb_h = thumb_height(&first);
+    let rotation = view.rotation;
+    let thumb_h = thumb_height(&first, rotation);
     let row_h = thumb_h + 22.0;
     let mut action = SidebarAction::None;
     egui::ScrollArea::vertical().auto_shrink(false).show_rows(
@@ -84,7 +92,7 @@ fn thumbnails(ui: &mut egui::Ui, view: &mut DocView, worker: &Worker) -> Sidebar
         view.sizes.len(),
         |ui, rows| {
             for i in rows {
-                let scale = thumb_scale(&view.sizes[i]);
+                let scale = thumb_scale(&view.sizes[i], rotation);
                 view.request_at(worker, i as i32, scale);
                 let (rect, response) =
                     ui.allocate_exact_size(egui::vec2(THUMB_WIDTH, row_h), egui::Sense::click());
@@ -177,8 +185,8 @@ mod tests {
             width: 100.0,
             height: 200.0,
         };
-        assert_eq!(thumb_height(&size), 2.0 * THUMB_WIDTH);
-        assert!((thumb_scale(&size) - THUMB_WIDTH / 100.0).abs() < 1e-6);
+        assert_eq!(thumb_height(&size, Rotation::R0), 2.0 * THUMB_WIDTH);
+        assert!((thumb_scale(&size, Rotation::R0) - THUMB_WIDTH / 100.0).abs() < 1e-6);
     }
 
     #[test]
@@ -187,7 +195,10 @@ mod tests {
             width: 0.0,
             height: 0.0,
         };
-        assert!(thumb_height(&zero).is_finite() && thumb_scale(&zero).is_finite());
+        assert!(
+            thumb_height(&zero, Rotation::R0).is_finite()
+                && thumb_scale(&zero, Rotation::R0).is_finite()
+        );
     }
 
     #[test]
@@ -214,5 +225,17 @@ mod tests {
         };
         assert_eq!(saved_label(&info), "Sublinhado — p. 2");
         assert_eq!(pending_label(&pending), "Sublinhado — p. 2 (não salvo)");
+    }
+
+    #[test]
+    fn thumbnails_follow_the_view_rotation() {
+        let size = PageSize {
+            width: 100.0,
+            height: 200.0,
+        };
+        // a 90° a página fica deitada: a miniatura também (e a escala usa o lado que vira largura)
+        assert_eq!(thumb_height(&size, Rotation::R90), THUMB_WIDTH / 2.0);
+        assert!((thumb_scale(&size, Rotation::R90) - THUMB_WIDTH / 200.0).abs() < 1e-6);
+        assert_eq!(thumb_height(&size, Rotation::R180), 2.0 * THUMB_WIDTH);
     }
 }

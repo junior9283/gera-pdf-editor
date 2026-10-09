@@ -7,7 +7,7 @@ use crate::shell::home::{self, HomeAction};
 use crate::shell::menus::{self, MenuState};
 use crate::shell::tabs::{self as tab_bar, TabAction, TabLabel};
 use crate::shell::{help, panels, toolbar, tools_hub};
-use app_state::close::{CloseFlow, Step};
+use app_state::close::{plan_close, CloseFlow, Step};
 use app_state::prefs::{Prefs, MAX_PANEL, MIN_PANEL};
 use app_state::recents::{now_secs, RecentFiles};
 use app_state::store::{self, BackgroundSaver};
@@ -104,6 +104,7 @@ impl GeraApp {
         if old == new {
             return;
         }
+        self.status.clear(); // a mensagem era sobre a aba anterior
         if let Some(doc) = self.doc_at(old) {
             doc.suspend();
         }
@@ -150,20 +151,25 @@ impl GeraApp {
 
     /// Fecha as abas de `paths`, perguntando antes pelas que têm alterações pendentes.
     fn request_close(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>, quit: bool) {
-        let mut dirty = Vec::new();
-        for path in paths {
-            let Some(tab) = self.tabs.find(&path) else {
-                continue;
-            };
-            if self.doc_at(tab).is_some_and(|d| d.needs_confirm()) {
-                dirty.push(path);
-            } else {
-                self.close_tab(tab);
+        let targets = paths
+            .into_iter()
+            .filter_map(|p| {
+                let confirm = self
+                    .tabs
+                    .find(&p)
+                    .and_then(|t| self.doc_at(t))?
+                    .needs_confirm();
+                Some((p, confirm))
+            })
+            .collect();
+        let (close_now, flow) = plan_close(targets, quit);
+        for path in close_now {
+            if let Some(t) = self.tabs.find(&path) {
+                self.close_tab(t);
             }
         }
-        if !dirty.is_empty() {
-            self.closing = Some(CloseFlow::new(dirty, quit));
-        } else if quit {
+        self.closing = flow;
+        if quit && self.closing.is_none() {
             self.allow_close = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -357,7 +363,7 @@ impl GeraApp {
                 .inner
                 .or(cmd);
         }
-        doc.show_status(ui);
+        doc.show_status(ui, &self.status);
         let clicked = egui::Panel::left("trilho")
             .exact_size(40.0)
             .resizable(false)

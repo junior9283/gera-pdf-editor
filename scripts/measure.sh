@@ -14,6 +14,8 @@ BIN=target/release/gera-pdf-editor
 SIZE=$(stat -c%s "$BIN")
 
 TABS_DIR=$(mktemp -d)
+# configuração descartável: as medições não podem entrar nos recentes nem nas preferências do usuário
+export XDG_CONFIG_HOME="$TABS_DIR/config"
 cleanup() { rm -rf "$TABS_DIR"; if [ -n "${TMP_SAMPLE:-}" ]; then rm -f "$TMP_SAMPLE"; fi; }
 trap cleanup EXIT
 

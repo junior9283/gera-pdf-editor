@@ -91,6 +91,19 @@ impl CloseFlow {
     }
 }
 
+/// Decide o que fechar já e sobre o que perguntar. `targets`: (documento, precisa confirmar).
+/// Ao sair do app nada fecha antes da confirmação: cancelar a saída deixa todas as abas como estavam.
+pub fn plan_close(targets: Vec<(PathBuf, bool)>, quit: bool) -> (Vec<PathBuf>, Option<CloseFlow>) {
+    let (ask, clean): (Vec<_>, Vec<_>) = targets.into_iter().partition(|&(_, confirm)| confirm);
+    let clean: Vec<PathBuf> = clean.into_iter().map(|(p, _)| p).collect();
+    if ask.is_empty() {
+        return (clean, None);
+    }
+    let ask = ask.into_iter().map(|(p, _)| p).collect();
+    let now = if quit { Vec::new() } else { clean };
+    (now, Some(CloseFlow::new(ask, quit)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +151,22 @@ mod tests {
         assert!(f.is_done());
         assert_eq!(f.answer(Answer::Discard), Step::Abort);
         assert_eq!(f.saved(true), Step::Abort);
+    }
+
+    #[test]
+    fn closing_tabs_closes_clean_ones_now_and_asks_about_the_rest() {
+        let (now, flow) = plan_close(vec![(p("a"), false), (p("b"), true)], false);
+        assert_eq!(now, [p("a")]);
+        assert_eq!(flow.as_ref().and_then(|f| f.current()), Some(&p("b")));
+        let (now, flow) = plan_close(vec![(p("a"), false)], false);
+        assert_eq!((now, flow.is_none()), (vec![p("a")], true));
+    }
+
+    #[test]
+    fn quitting_keeps_every_tab_open_until_the_user_confirms() {
+        // cancelar a saída não pode fazer sumir as abas que não tinham pendências
+        let (now, flow) = plan_close(vec![(p("a"), false), (p("b"), true)], true);
+        assert!(now.is_empty());
+        assert!(flow.is_some_and(|f| f.quit()));
     }
 }
