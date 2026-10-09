@@ -1,5 +1,7 @@
 use crate::error::{PdfError, Result};
-use crate::types::{AnnotInfo, AnnotKind, NewAnnot, PageSize, PdfRect, RenderedPage, Word};
+use crate::types::{
+    AnnotInfo, AnnotKind, DocSummary, NewAnnot, OutlineItem, PageSize, PdfRect, RenderedPage, Word,
+};
 use mupdf::pdf::{Encryption, PdfAnnotationType, PdfDocument, PdfPage, PdfWriteOptions};
 use mupdf::{Colorspace, Matrix, Point, Quad, Rect, TextExtractOptions};
 use std::path::{Path, PathBuf};
@@ -248,5 +250,36 @@ impl PdfDoc {
         written?;
         self.path = dest.to_path_buf();
         Ok(())
+    }
+
+    pub fn outline(&self) -> Result<Vec<OutlineItem>> {
+        let mut out = Vec::new();
+        flatten(&self.inner.outlines()?, 0, &mut out);
+        Ok(out)
+    }
+
+    /// Índice e anotações corrompidos não impedem abrir o documento; por isso `unwrap_or_default`.
+    pub fn summary(&self) -> Result<DocSummary> {
+        let sizes = (0..self.page_count()?)
+            .map(|p| self.page_size(p))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(DocSummary {
+            path: self.path.clone(),
+            sizes,
+            outline: self.outline().unwrap_or_default(),
+            annots: self.all_annotations().unwrap_or_default(),
+        })
+    }
+}
+
+/// Destinos externos (URI) viram `page: None`; `OutlineItem` não guarda o URI.
+fn flatten(items: &[mupdf::Outline], depth: usize, out: &mut Vec<OutlineItem>) {
+    for it in items {
+        out.push(OutlineItem {
+            title: it.title.clone(),
+            page: it.dest.as_ref().map(|d| d.loc.page_number as i32),
+            depth,
+        });
+        flatten(&it.down, depth + 1, out);
     }
 }
