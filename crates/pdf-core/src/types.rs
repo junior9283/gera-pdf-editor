@@ -29,6 +29,12 @@ impl From<mupdf::Rect> for PdfRect {
     }
 }
 
+impl From<PdfRect> for mupdf::Rect {
+    fn from(r: PdfRect) -> Self {
+        mupdf::Rect::new(r.x0, r.y0, r.x1, r.y1)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PageSize {
     pub width: f32,
