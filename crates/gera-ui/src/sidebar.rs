@@ -43,6 +43,7 @@ fn kind_label(kind: AnnotKind) -> &'static str {
         AnnotKind::Note => "Nota",
         AnnotKind::Ink => "Desenho",
         AnnotKind::StrikeOut => "Riscado",
+        AnnotKind::Other => "Anotação",
     }
 }
 
@@ -216,6 +217,10 @@ mod tests {
     #[test]
     fn saved_and_pending_annotations_get_the_same_kind_names() {
         let info = AnnotInfo {
+            id: 1,
+            color: None,
+            opacity: 1.0,
+            width: None,
             kind: AnnotKind::Underline,
             page: 1,
             rect: PdfRect::new(0.0, 0.0, 1.0, 1.0),

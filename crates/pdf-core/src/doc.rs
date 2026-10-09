@@ -3,7 +3,11 @@ use crate::types::{
     AnnotInfo, AnnotKind, DocProperties, DocSummary, NewAnnot, OutlineItem, PageSize, PdfRect,
     RenderedPage, Rotation, TextSelection, Word,
 };
-use mupdf::pdf::{Encryption, PdfAnnotationType, PdfDocument, PdfPage, PdfWriteOptions};
+use mupdf::pdf::{
+    AnnotationFlags, Encryption, PdfAnnotation, PdfAnnotationType, PdfDocument, PdfPage,
+    PdfWriteOptions,
+};
+use mupdf::color::AnnotationColor;
 use mupdf::{
     Colorspace, Matrix, MetadataName, Point, Quad, Rect, TextExtractOptions, TextPageFlags,
 };
@@ -331,15 +335,50 @@ fn utf8_path(path: &Path) -> Result<&str> {
         .ok_or_else(|| PdfError::Engine("caminho não é UTF-8 válido".into()))
 }
 
-fn kind_of(t: PdfAnnotationType) -> Option<AnnotKind> {
+fn kind_of(t: PdfAnnotationType) -> AnnotKind {
     match t {
-        PdfAnnotationType::Highlight => Some(AnnotKind::Highlight),
-        PdfAnnotationType::Underline => Some(AnnotKind::Underline),
-        PdfAnnotationType::Text => Some(AnnotKind::Note),
-        PdfAnnotationType::Ink => Some(AnnotKind::Ink),
-        PdfAnnotationType::StrikeOut => Some(AnnotKind::StrikeOut),
-        _ => None,
+        PdfAnnotationType::Highlight => AnnotKind::Highlight,
+        PdfAnnotationType::Underline => AnnotKind::Underline,
+        PdfAnnotationType::Text => AnnotKind::Note,
+        PdfAnnotationType::Ink => AnnotKind::Ink,
+        PdfAnnotationType::StrikeOut => AnnotKind::StrikeOut,
+        _ => AnnotKind::Other,
     }
+}
+
+/// Cor da anotação em RGB (cinza e CMYK convertidos de forma simples).
+fn rgb_of(c: AnnotationColor) -> [f32; 3] {
+    match c {
+        AnnotationColor::Gray(g) => [g, g, g],
+        AnnotationColor::Rgb { red, green, blue } => [red, green, blue],
+        AnnotationColor::Cmyk {
+            cyan,
+            magenta,
+            yellow,
+            key,
+        } => [cyan, magenta, yellow].map(|v| 1.0 - (v + key).min(1.0)),
+    }
+}
+
+/// Número do objeto PDF da anotação (identidade estável).
+pub(crate) fn annot_id(annot: &PdfAnnotation) -> Result<i32> {
+    Ok(annot.object().as_indirect()?)
+}
+
+pub(crate) fn annot_info(annot: &PdfAnnotation, page: i32) -> Result<AnnotInfo> {
+    let kind = kind_of(annot.r#type()?);
+    Ok(AnnotInfo {
+        id: annot_id(annot)?,
+        kind,
+        page,
+        rect: annot.bounds()?.into(),
+        contents: annot.contents()?.unwrap_or_default().to_owned(),
+        color: annot.color()?.map(rgb_of),
+        opacity: annot.opacity()?,
+        width: (kind == AnnotKind::Ink)
+            .then(|| annot.border_width())
+            .transpose()?,
+    })
 }
 
 fn temp_path(dest: &Path) -> Result<PathBuf> {
@@ -358,14 +397,10 @@ impl PdfDoc {
         let page_ref = self.inner.load_pdf_page(page)?;
         let mut out = Vec::new();
         for annot in page_ref.annotations() {
-            if let Some(kind) = kind_of(annot.r#type()?) {
-                out.push(AnnotInfo {
-                    kind,
-                    page,
-                    rect: annot.bounds()?.into(),
-                    contents: annot.contents()?.unwrap_or_default().to_owned(),
-                });
+            if annot.flags()?.contains(AnnotationFlags::IS_HIDDEN) {
+                continue; // apagada (até salvar) ou escondida de fábrica: invisível, fora da lista
             }
+            out.push(annot_info(&annot, page)?);
         }
         Ok(out)
     }

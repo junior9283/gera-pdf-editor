@@ -62,14 +62,34 @@ pub enum AnnotKind {
     Note,
     Ink,
     StrikeOut,
+    /// Tipo que não criamos (de outro programa): selecionável e apagável.
+    Other,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnnotInfo {
+    /// Número do objeto no PDF: identidade estável da anotação.
+    pub id: i32,
     pub kind: AnnotKind,
     pub page: i32,
     pub rect: PdfRect,
     pub contents: String,
+    pub color: Option<[f32; 3]>,
+    pub opacity: f32,
+    /// Espessura do traço (desenho).
+    pub width: Option<f32>,
+}
+
+impl AnnotInfo {
+    /// Pode ser arrastada (marcações de texto ficam presas às palavras, como no Acrobat).
+    pub fn movable(&self) -> bool {
+        matches!(self.kind, AnnotKind::Note | AnnotKind::Ink)
+    }
+
+    /// Tem alças para mudar de tamanho.
+    pub fn resizable(&self) -> bool {
+        self.kind == AnnotKind::Ink
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -203,4 +223,36 @@ pub struct DocProperties {
     pub pages: i32,
     pub first_page: PageSize,
     pub file_size: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(kind: AnnotKind) -> AnnotInfo {
+        AnnotInfo {
+            id: 1,
+            kind,
+            page: 0,
+            rect: PdfRect::new(0.0, 0.0, 1.0, 1.0),
+            contents: String::new(),
+            color: None,
+            opacity: 1.0,
+            width: None,
+        }
+    }
+
+    #[test]
+    fn only_notes_and_drawings_move_and_only_drawings_resize() {
+        assert!(info(AnnotKind::Note).movable() && !info(AnnotKind::Note).resizable());
+        assert!(info(AnnotKind::Ink).movable() && info(AnnotKind::Ink).resizable());
+        for k in [
+            AnnotKind::Highlight,
+            AnnotKind::Underline,
+            AnnotKind::StrikeOut,
+            AnnotKind::Other,
+        ] {
+            assert!(!info(k).movable() && !info(k).resizable(), "{k:?}");
+        }
+    }
 }
