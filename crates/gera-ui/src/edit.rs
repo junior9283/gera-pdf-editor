@@ -1,6 +1,6 @@
+use app_state::tools::Tool;
 use app_state::transform::PageMap;
-use app_state::{annots::PendingAnnots, tools::Tool};
-use pdf_core::{NewAnnot, PdfRect, Request, TextSelection, Worker};
+use pdf_core::{AnnotOp, NewAnnot, PdfRect, Request, TextSelection, Worker};
 use std::path::PathBuf;
 
 /// Texto selecionado: numa página (com as áreas marcadas) ou o documento inteiro (Ctrl+A).
@@ -48,11 +48,12 @@ impl Markup {
     }
 }
 
-/// Ferramenta ativa, anotações pendentes e gestos em andamento.
+/// Ferramenta ativa, gestos em andamento e as edições ainda não enviadas ao worker.
 #[derive(Default)]
 pub struct EditState {
     pub tool: Tool,
-    pub pending: PendingAnnots,
+    /// Edições de anotação geradas neste quadro; a aba as envia ao worker (`take_ops`).
+    ops: Vec<AnnotOp>,
     pub saving: bool,
     stroke: Vec<(f32, f32)>,
     pub selection: Option<Selection>,
@@ -77,23 +78,19 @@ fn paint_stroke(painter: &egui::Painter, points: &[(f32, f32)], map: &PageMap) {
 }
 
 impl EditState {
-    /// Guarda uma anotação nova. Recusa durante o salvamento: o que for criado agora seria
-    /// descartado quando a resposta `Saved` limpar as pendentes.
-    pub fn add(&mut self, annot: NewAnnot) -> bool {
-        !self.saving && self.pending.add(annot)
+    /// Cria uma anotação (vai ao worker, que a grava no documento em memória).
+    pub fn add(&mut self, annot: NewAnnot) {
+        self.ops.push(AnnotOp::Create(annot));
     }
 
-    pub fn undo(&mut self) -> bool {
-        !self.saving && self.pending.undo()
+    /// As edições geradas desde a última chamada, na ordem.
+    pub fn take_ops(&mut self) -> Vec<AnnotOp> {
+        std::mem::take(&mut self.ops)
     }
 
-    pub fn redo(&mut self) -> bool {
-        !self.saving && self.pending.redo()
-    }
-
-    /// Descarta anotações pendentes e gestos (ao abrir outro documento ou depois de salvar).
+    /// Descarta gestos e edições não enviadas (ao abrir outro documento).
     pub fn reset(&mut self) {
-        self.pending.clear();
+        self.ops.clear();
         self.saving = false;
         self.stroke.clear();
         self.note_draft = None;
@@ -177,7 +174,7 @@ impl EditState {
         }
     }
 
-    /// Trata o mouse sobre uma página visível e desenha as anotações pendentes dela.
+    /// Trata o mouse sobre uma página visível e desenha os gestos em andamento nela.
     pub fn on_page(
         &mut self,
         ui: &mut egui::Ui,
@@ -194,11 +191,6 @@ impl EditState {
         let pointer = response
             .interact_pointer_pos()
             .map(|p| map.to_page(p.into()));
-        if self.saving {
-            // durante o salvamento só mostra as pendentes: gestos novos seriam perdidos
-            self.paint_pending(ui.painter(), page, map);
-            return;
-        }
         match self.tool {
             Tool::Select | Tool::Highlight | Tool::Underline => {
                 self.drag_text(worker, &response, pointer, page, map);
@@ -211,7 +203,6 @@ impl EditState {
             }
             Tool::Ink => self.draw_ink(ui, &response, pointer, page, map),
         }
-        self.paint_pending(ui.painter(), page, map);
         self.paint_selection(ui.painter(), page, map);
     }
 
@@ -321,58 +312,8 @@ impl EditState {
         }
     }
 
-    fn paint_pending(&self, painter: &egui::Painter, page: i32, map: &PageMap) {
-        for item in self.pending.items().iter().filter(|a| a.page() == page) {
-            match item {
-                NewAnnot::Highlight { rects, .. } => {
-                    for r in rects {
-                        painter.rect_filled(
-                            screen_rect(r, map),
-                            0.0,
-                            egui::Color32::from_rgba_unmultiplied(255, 235, 0, 110),
-                        );
-                    }
-                }
-                NewAnnot::Underline { rects, .. } => {
-                    for r in rects {
-                        let r = screen_rect(r, map);
-                        painter.line_segment(
-                            [r.left_bottom(), r.right_bottom()],
-                            egui::Stroke::new(1.5, egui::Color32::BLUE),
-                        );
-                    }
-                }
-                NewAnnot::StrikeOut { rects, .. } => {
-                    for r in rects {
-                        let r = screen_rect(r, map);
-                        let y = r.center().y;
-                        painter.line_segment(
-                            [egui::pos2(r.left(), y), egui::pos2(r.right(), y)],
-                            egui::Stroke::new(1.5, egui::Color32::RED),
-                        );
-                    }
-                }
-                NewAnnot::Note { at, .. } => {
-                    let icon = egui::Rect::from_min_size(
-                        map.to_screen(*at).into(),
-                        egui::vec2(24.0 * map.zoom, 24.0 * map.zoom),
-                    );
-                    painter.rect_filled(icon, 3.0, egui::Color32::from_rgb(255, 200, 0));
-                }
-                NewAnnot::Ink { strokes, .. } => {
-                    for s in strokes {
-                        paint_stroke(painter, s, map);
-                    }
-                }
-            }
-        }
-    }
-
     /// Janelinha para digitar o texto de uma nota.
     pub fn note_window(&mut self, ui: &mut egui::Ui) {
-        if self.saving {
-            return; // o rascunho espera o fim do salvamento
-        }
         let Some((page, at, mut text)) = self.note_draft.take() else {
             return;
         };
@@ -391,31 +332,19 @@ impl EditState {
                 });
             });
         match choice {
-            Some(true) => {
-                self.add(NewAnnot::Note { page, at, text });
-            }
+            Some(true) => self.add(NewAnnot::Note { page, at, text }),
             Some(false) => {}
             None => self.note_draft = Some((page, at, text)),
         }
     }
 
-    /// Pede ao worker para gravar as pendentes; ignora se não há nada ou já está salvando.
+    /// Pede ao worker para gravar o documento em `dest`; ignora se já está salvando. As edições
+    /// feitas durante a gravação chegam ao worker depois dela e ficam como alterações novas.
     pub fn save(&mut self, worker: &Worker, dest: PathBuf) {
-        if self.pending.is_dirty() {
-            self.save_as(worker, dest);
+        if !self.saving {
+            self.saving = true;
+            worker.send(Request::Save { dest });
         }
-    }
-
-    /// Grava o documento em `dest` com as pendentes (mesmo sem nenhuma: "Salvar como").
-    pub fn save_as(&mut self, worker: &Worker, dest: PathBuf) {
-        if self.saving {
-            return;
-        }
-        self.saving = true;
-        worker.send(Request::Save {
-            pending: self.pending.items().to_vec(),
-            dest,
-        });
     }
 }
 
@@ -440,62 +369,35 @@ mod tests {
     }
 
     #[test]
-    fn reset_drops_pending_work_and_unlocks_saving() {
+    fn reset_drops_unsent_edits_and_unlocks_saving() {
         let mut edit = EditState::default();
-        edit.pending.add(NewAnnot::Note {
+        edit.add(NewAnnot::Note {
             page: 0,
             at: (0.0, 0.0),
             text: "a".into(),
         });
         edit.saving = true;
         edit.reset();
-        assert!(!edit.pending.is_dirty() && !edit.saving);
-    }
-
-    fn note(text: &str) -> NewAnnot {
-        NewAnnot::Note {
-            page: 0,
-            at: (0.0, 0.0),
-            text: text.into(),
-        }
+        assert!(edit.take_ops().is_empty() && !edit.saving);
     }
 
     #[test]
-    fn edits_made_while_saving_are_refused_instead_of_silently_lost() {
+    fn a_second_save_waits_for_the_first() {
         let worker = Worker::spawn(|| {});
         let mut edit = EditState::default();
-        assert!(edit.add(note("a")));
         edit.save(&worker, "x.pdf".into());
         assert!(edit.saving);
-        assert!(!edit.add(note("b")), "nada novo durante o salvamento");
-        assert!(
-            !edit.undo() && !edit.redo(),
-            "desfazer/refazer também ficam bloqueados"
-        );
-        assert_eq!(
-            edit.pending.items().len(),
-            1,
-            "o que foi enviado continua intacto"
-        );
-        edit.reset(); // resposta Saved
-        assert!(!edit.pending.is_dirty());
-        assert!(edit.add(note("c")), "depois de salvar volta a aceitar");
-        assert!(edit.undo() && edit.redo());
-    }
-
-    #[test]
-    fn save_is_ignored_when_clean_or_already_saving() {
-        let worker = Worker::spawn(|| {});
-        let mut edit = EditState::default();
-        edit.save(&worker, "x.pdf".into());
-        assert!(!edit.saving, "nada pendente: não salva");
-        edit.pending.add(NewAnnot::Note {
+        edit.add(NewAnnot::Note {
             page: 0,
             at: (0.0, 0.0),
             text: "a".into(),
         });
-        edit.save(&worker, "x.pdf".into());
-        assert!(edit.saving);
+        assert_eq!(
+            edit.take_ops().len(),
+            1,
+            "editar durante a gravação é permitido"
+        );
+        assert!(edit.take_ops().is_empty(), "cada edição sai uma vez só");
     }
 
     fn sel(text: &str) -> TextSelection {
@@ -527,8 +429,8 @@ mod tests {
         };
         e.on_selection(3, 2, sel("x"));
         assert!(matches!(
-            e.pending.items(),
-            [NewAnnot::Highlight { page: 2, .. }]
+            e.take_ops()[..],
+            [AnnotOp::Create(NewAnnot::Highlight { page: 2, .. })]
         ));
         assert!(e.selection.is_none());
     }
@@ -545,8 +447,8 @@ mod tests {
         };
         e.mark_selection(Markup::StrikeOut);
         assert!(matches!(
-            e.pending.items(),
-            [NewAnnot::StrikeOut { page: 1, .. }]
+            e.take_ops()[..],
+            [AnnotOp::Create(NewAnnot::StrikeOut { page: 1, .. })]
         ));
         assert!(e.selection.is_none());
     }
@@ -562,7 +464,7 @@ mod tests {
             ..Default::default()
         };
         e.mark_selection(Markup::Highlight);
-        assert!(e.pending.items().is_empty());
+        assert!(e.take_ops().is_empty());
     }
 
     #[test]

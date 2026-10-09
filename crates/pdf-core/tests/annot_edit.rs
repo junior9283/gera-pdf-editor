@@ -241,3 +241,35 @@ fn print_copy_comes_from_the_edited_document() {
         .unwrap()
         .is_empty());
 }
+
+#[test]
+fn failed_save_keeps_the_edits_and_stays_dirty() {
+    let (dir, _p, mut d) = doc();
+    d.apply(AnnotOp::Create(note())).unwrap();
+    d.apply(AnnotOp::Create(ink())).unwrap();
+    let ink_id = d.annotations(0).unwrap()[1].id;
+    d.apply(AnnotOp::Delete {
+        page: 0,
+        id: ink_id,
+    })
+    .unwrap();
+    let bad = dir.path().join("nao-existe").join("b.pdf");
+    assert!(d.save(&bad).is_err());
+    assert_eq!(
+        only(&d).kind,
+        AnnotKind::Note,
+        "a nota continua; a apagada não volta"
+    );
+    assert!(d.is_dirty(), "ainda há o que salvar");
+    let good = dir.path().join("b.pdf");
+    d.save(&good).unwrap();
+    assert!(!d.is_dirty());
+    assert_eq!(
+        PdfDoc::open(&good, None)
+            .unwrap()
+            .annotations(0)
+            .unwrap()
+            .len(),
+        1
+    );
+}

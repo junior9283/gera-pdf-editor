@@ -41,6 +41,8 @@ pub struct PdfDoc {
     pub(crate) password: Option<String>,
     /// Desfazer/refazer das edições de anotação desde a última gravação.
     history: History,
+    /// Edições que sobreviveram a uma gravação que falhou (o histórico delas já se perdeu).
+    unsaved: bool,
 }
 
 /// Abre o arquivo e, se for protegido, autentica com `password`.
@@ -64,6 +66,7 @@ impl PdfDoc {
             path: path.to_path_buf(),
             password: password.map(str::to_owned),
             history: History::default(),
+            unsaved: false,
         })
     }
 
@@ -383,9 +386,8 @@ impl PdfDoc {
         Ok(all)
     }
 
-    /// Aplica `pending`, grava em arquivo temporário ao lado de `dest` e renomeia.
-    /// Em qualquer erro descarta as mudanças em memória (recarrega do disco) e devolve o erro.
-    /// Cria as anotações `pending` e grava (atalho usado pelos testes e pela v1).
+    /// Cria as anotações `pending` e grava (atalho dos testes). Em qualquer erro descarta as
+    /// mudanças em memória (relê do disco) e devolve o erro.
     pub fn save_with(&mut self, pending: &[NewAnnot], dest: &Path) -> Result<()> {
         let count = self.page_count()?;
         if let Some(bad) = pending
@@ -395,22 +397,22 @@ impl PdfDoc {
         {
             return Err(PdfError::PageOutOfRange(bad));
         }
-        for a in pending {
-            if let Err(e) = self.apply(AnnotOp::Create(a.clone())) {
-                self.discard_changes()?;
-                return Err(e);
-            }
-        }
-        self.save(dest)
-    }
-
-    /// Grava o documento em memória em `dest`: as anotações escondidas por nós (apagadas) saem de
-    /// verdade; o histórico recomeça. Em erro, descarta as mudanças em memória (relê do disco).
-    pub fn save(&mut self, dest: &Path) -> Result<()> {
-        let result = self.purge_hidden().and_then(|()| self.write(dest));
+        let result = pending
+            .iter()
+            .try_for_each(|a| self.apply(AnnotOp::Create(a.clone())).map(drop))
+            .and_then(|()| self.save(dest));
         if result.is_err() {
             self.discard_changes()?;
         }
+        result
+    }
+
+    /// Grava o documento em memória em `dest`: as anotações escondidas por nós (apagadas) saem de
+    /// verdade; o histórico recomeça. Em erro, as edições continuam em memória (só o histórico se
+    /// perde, porque as apagadas já saíram) e o documento segue com alterações a salvar.
+    pub fn save(&mut self, dest: &Path) -> Result<()> {
+        let result = self.purge_hidden().and_then(|()| self.write(dest));
+        self.unsaved = result.is_err() && (self.unsaved || self.history.can_undo());
         self.history = History::default();
         result
     }
@@ -419,6 +421,7 @@ impl PdfDoc {
     fn discard_changes(&mut self) -> Result<()> {
         self.inner = open_authenticated(&self.path, self.password.as_deref())?;
         self.history = History::default();
+        self.unsaved = false;
         Ok(())
     }
 
@@ -531,7 +534,7 @@ impl PdfDoc {
 
     /// Há edições desde a última gravação?
     pub fn is_dirty(&self) -> bool {
-        self.history.can_undo()
+        self.unsaved || self.history.can_undo()
     }
 
     pub fn outline(&self) -> Result<Vec<OutlineItem>> {
