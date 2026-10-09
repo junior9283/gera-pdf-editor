@@ -302,3 +302,33 @@ fn stamp_survives_move_and_save_on_a_rotated_page() {
         1
     );
 }
+
+/// Há pixels azuis dentro do retângulo (em pontos) da página renderizada a 1:1?
+fn has_blue_inside(d: &PdfDoc, r: PdfRect) -> bool {
+    let img = d.render(0, 1.0, false).unwrap();
+    let w = img.width as usize;
+    (r.y0 as usize + 3..r.y1 as usize - 3).any(|y| {
+        (r.x0 as usize + 3..r.x1 as usize - 3).any(|x| {
+            let p = &img.rgb[(y * w + x) * 3..][..3];
+            p[2] > 150 && p[0] < 90
+        })
+    })
+}
+
+#[test]
+fn removing_a_fill_redraws_the_shape_without_it() {
+    let (_d, _p, mut d) = doc();
+    let s = created(&mut d, shape(false));
+    d.apply(AnnotOp::Fill {
+        page: 0,
+        id: s.id,
+        color: Some([0.1, 0.45, 0.95]),
+    })
+    .unwrap();
+    assert!(has_blue_inside(&d, s.rect));
+    d.undo().unwrap();
+    assert!(
+        !has_blue_inside(&d, s.rect),
+        "o desfazer tem que apagar o azul da tela"
+    );
+}

@@ -298,7 +298,7 @@ pub(crate) fn apply_edit(
                 ColorEdit::Keep => {}
                 ColorEdit::Set(c) if text_box => a.set_color(c)?,
                 ColorEdit::Set(c) => a.set_interior_color(c)?,
-                ColorEdit::Clear => a.object().dict_delete(key)?,
+                ColorEdit::Clear => clear_key(&mut a, key)?,
             }
             Edit::Fill {
                 page,
@@ -339,6 +339,15 @@ pub(crate) fn apply_edit(
     Ok(inverse)
 }
 
+/// Tira uma chave do dicionário da anotação e pede ao MuPDF que refaça a aparência (mexer no
+/// dicionário direto não avisa o MuPDF; reaplicar a opacidade marca a anotação como alterada).
+fn clear_key(a: &mut PdfAnnotation, key: &str) -> Result<()> {
+    a.object().dict_delete(key)?;
+    let opacity = a.opacity()?;
+    a.set_opacity(opacity)?;
+    Ok(())
+}
+
 fn set_style(
     a: &mut PdfAnnotation,
     color: ColorEdit,
@@ -348,7 +357,7 @@ fn set_style(
     match color {
         ColorEdit::Keep => {}
         ColorEdit::Set(c) => a.set_color(c)?,
-        ColorEdit::Clear => a.object().dict_delete("C")?,
+        ColorEdit::Clear => clear_key(a, "C")?,
     }
     a.set_opacity(opacity.clamp(0.0, 1.0))?;
     if let Some(w) = width {

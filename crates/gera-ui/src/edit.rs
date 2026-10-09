@@ -1,10 +1,15 @@
 use crate::create::ShapeDrag;
 use crate::shell::annot_props::{self, PropsDraft};
-use app_state::annot_geom::{annot_hit, dist_to_segment, handle_at, resized, Handle};
+use app_state::annot_geom::{
+    annot_hit, dist_to_segment, handle_at, line_handle_at, resized, snap_45, Handle,
+};
 use app_state::stamps::StampKind;
 use app_state::tools::Tool;
 use app_state::transform::PageMap;
-use pdf_core::{AnnotInfo, AnnotKind, AnnotOp, NewAnnot, PdfRect, Request, TextSelection, Worker};
+use pdf_core::{
+    AnnotInfo, AnnotKind, AnnotOp, LineEnd, NewAnnot, PdfRect, Request, Segment, TextSelection,
+    Worker,
+};
 use std::path::PathBuf;
 
 /// Texto selecionado: numa página (com as áreas marcadas) ou o documento inteiro (Ctrl+A).
@@ -30,6 +35,11 @@ struct SelectDrag {
 enum Grab {
     Move,
     Resize(Handle),
+    /// Uma ponta da linha; `fixed` é a outra.
+    LinePoint {
+        end: LineEnd,
+        fixed: (f32, f32),
+    },
 }
 
 /// Arrasto de anotação em andamento (mover ou redimensionar pela alça).
@@ -42,6 +52,8 @@ struct AnnotDrag {
     grab: Grab,
     from: (f32, f32),
     to: (f32, f32),
+    /// Pontos da linha arrastada (o contorno de uma linha é ela mesma, não o retângulo).
+    line: Option<Segment>,
 }
 
 /// Menor lado (pontos) de um desenho redimensionado.
@@ -62,6 +74,17 @@ impl AnnotDrag {
                 let (x, y) = h.point(r);
                 resized(r, h, (x + dx, y + dy), MIN_SIZE)
             }
+            Grab::LinePoint { .. } => r,
+        }
+    }
+
+    /// Onde a linha ficaria se o mouse fosse solto agora (só para linhas).
+    fn preview_line(&self) -> Option<Segment> {
+        let (dx, dy) = self.offset();
+        match (self.grab, self.line) {
+            (Grab::LinePoint { fixed, .. }, _) => Some((fixed, self.to)),
+            (Grab::Move, Some((a, b))) => Some(((a.0 + dx, a.1 + dy), (b.0 + dx, b.1 + dy))),
+            _ => None,
         }
     }
 
@@ -78,6 +101,12 @@ impl AnnotDrag {
                 page,
                 id,
                 rect: self.preview(),
+            },
+            Grab::LinePoint { end, .. } => AnnotOp::MoveLinePoint {
+                page,
+                id,
+                end,
+                to: self.to,
             },
         })
     }
@@ -438,13 +467,22 @@ impl EditState {
             let Some(p) = pressed.map(|p| map.to_page(p.into())).or(pointer) else {
                 return false;
             };
-            let handle = self
+            let size = 5.0 / map.zoom;
+            let selected = self
                 .selected
                 .and_then(|s| find(annots, s))
-                .filter(|a| a.page == page && a.resizable())
-                .and_then(|a| Some((a, handle_at(a.rect, p, 5.0 / map.zoom)?)));
-            let grab = match handle {
-                Some((a, h)) => Some((a, Grab::Resize(h))),
+                .filter(|a| a.page == page);
+            let line_end = selected.and_then(|a| {
+                let (s, e) = a.line?;
+                let end = line_handle_at(s, e, p, size)?;
+                let fixed = if end == LineEnd::Start { e } else { s };
+                Some((a, Grab::LinePoint { end, fixed }))
+            });
+            let handle = selected
+                .filter(|a| a.resizable())
+                .and_then(|a| Some((a, Grab::Resize(handle_at(a.rect, p, size)?))));
+            let grab = match line_end.or(handle) {
+                Some(found) => Some(found),
                 None => hit(p)
                     .and_then(|s| find(annots, s))
                     .filter(|a| a.movable())
@@ -463,12 +501,19 @@ impl EditState {
                 grab,
                 from: p,
                 to: p,
+                line: a.line,
             });
             return true;
         }
         if let Some(drag) = self.annot_drag.as_mut().filter(|d| d.page == page) {
             if let Some(p) = pointer {
-                drag.to = p;
+                drag.to = match drag.grab {
+                    // Shift prende a ponta em múltiplos de 45°, como ao desenhar
+                    Grab::LinePoint { fixed, .. } if response.ctx.input(|i| i.modifiers.shift) => {
+                        snap_45(fixed, p)
+                    }
+                    _ => p,
+                };
             }
             if !response.dragged() {
                 self.ops.extend(drag.op());
@@ -546,6 +591,16 @@ impl EditState {
         page: i32,
         map: &PageMap,
     ) {
+        let dashed = egui::Stroke::new(1.5, SELECTED);
+        if let Some((a, b)) = self
+            .annot_drag
+            .filter(|d| d.page == page)
+            .and_then(|d| d.preview_line())
+        {
+            let ends = [map.to_screen(a).into(), map.to_screen(b).into()];
+            painter.extend(egui::Shape::dashed_line(&ends, dashed, 6.0, 4.0));
+            return;
+        }
         if let Some(drag) = self.annot_drag.filter(|d| d.page == page) {
             let r = screen_rect(&drag.preview(), map);
             let corners = [
@@ -570,6 +625,23 @@ impl EditState {
         else {
             return;
         };
+        let handle = |c: (f32, f32)| {
+            let square =
+                egui::Rect::from_center_size(map.to_screen(c).into(), egui::vec2(7.0, 7.0));
+            painter.rect_filled(square, 0.0, egui::Color32::WHITE);
+            painter.rect_stroke(
+                square,
+                0.0,
+                egui::Stroke::new(1.0, SELECTED),
+                egui::StrokeKind::Inside,
+            );
+        };
+        if let Some((s, e)) = a.line {
+            // linha selecionada: alças nas duas pontas, como no Acrobat
+            handle(s);
+            handle(e);
+            return;
+        }
         let r = screen_rect(&a.rect, map).expand(2.0);
         painter.rect_stroke(
             r,
@@ -579,15 +651,7 @@ impl EditState {
         );
         if a.resizable() {
             for h in Handle::ALL {
-                let c = map.to_screen(h.point(a.rect));
-                let square = egui::Rect::from_center_size(c.into(), egui::vec2(7.0, 7.0));
-                painter.rect_filled(square, 0.0, egui::Color32::WHITE);
-                painter.rect_stroke(
-                    square,
-                    0.0,
-                    egui::Stroke::new(1.0, SELECTED),
-                    egui::StrokeKind::Inside,
-                );
+                handle(h.point(a.rect));
             }
         }
     }
@@ -902,6 +966,7 @@ mod tests {
             grab,
             from: (110.0, 110.0),
             to,
+            line: None,
         }
     }
 
@@ -1008,5 +1073,25 @@ mod tests {
             None,
             "dentro do retângulo, longe da linha"
         );
+    }
+
+    #[test]
+    fn dragging_a_line_end_sends_the_new_point() {
+        let d = AnnotDrag {
+            page: 0,
+            id: 3,
+            rect: PdfRect::new(0.0, 0.0, 100.0, 50.0),
+            grab: Grab::LinePoint {
+                end: LineEnd::End,
+                fixed: (0.0, 0.0),
+            },
+            from: (100.0, 50.0),
+            to: (130.0, 70.0),
+            line: Some(((0.0, 0.0), (100.0, 50.0))),
+        };
+        assert!(matches!(
+            d.op(),
+            Some(AnnotOp::MoveLinePoint { id: 3, end: LineEnd::End, to, .. }) if to == (130.0, 70.0)
+        ));
     }
 }
