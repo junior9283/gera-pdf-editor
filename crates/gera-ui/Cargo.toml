@@ -1,0 +1,15 @@
+[package]
+name = "gera-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gera-pdf-editor"
+path = "src/main.rs"
+
+[dependencies]
+pdf-core = { path = "../pdf-core" }
+app-state = { path = "../app-state" }
+egui = "0.36"
+eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }

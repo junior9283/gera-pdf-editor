@@ -1,0 +1,12 @@
+[package]
+name = "pdf-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mupdf = { version = "0.8", default-features = false, features = ["base14-fonts", "system-fonts"] }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
