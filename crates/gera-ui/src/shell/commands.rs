@@ -110,6 +110,14 @@ pub fn shortcut_of(cmd: &Command) -> Option<KeyboardShortcut> {
         .map(|(s, _)| s)
 }
 
+/// Dica de botão: rótulo do comando e, se houver, o atalho ("Salvar (Ctrl+S)").
+pub fn hover(ctx: &egui::Context, cmd: &Command) -> String {
+    match shortcut_of(cmd) {
+        Some(sc) => format!("{} ({})", cmd.label(), ctx.format_shortcut(&sc)),
+        None => cmd.label(),
+    }
+}
+
 /// Enquanto o usuário digita, estes atalhos são do campo de texto.
 fn belongs_to_text_fields(cmd: &Command) -> bool {
     matches!(

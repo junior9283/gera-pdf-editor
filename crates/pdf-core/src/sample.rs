@@ -82,3 +82,26 @@ pub fn sample_pdf_sized(pages: usize, rotate: i32, size: (u32, u32)) -> Vec<u8> 
     );
     out
 }
+
+/// Pixel mais escuro da imagem (soma dos 3 canais): referência para conferir a rotação.
+pub fn darkest_pixel(img: &crate::RenderedPage) -> (usize, usize) {
+    let w = img.width as usize;
+    let i = img
+        .rgb
+        .chunks(3)
+        .enumerate()
+        .min_by_key(|(_, p)| p.iter().map(|&b| u32::from(b)).sum::<u32>())
+        .map_or(0, |(i, _)| i);
+    (i % w.max(1), i / w.max(1))
+}
+
+/// Há tinta escura em volta de (x, y)? (vizinhança 3x3, por causa da suavização das bordas)
+pub fn dark_near(img: &crate::RenderedPage, x: usize, y: usize) -> bool {
+    let (w, h) = (img.width as usize, img.height as usize);
+    (x.saturating_sub(1)..(x + 2).min(w)).any(|xx| {
+        (y.saturating_sub(1)..(y + 2).min(h)).any(|yy| {
+            let i = (yy * w + xx) * 3;
+            img.rgb[i..i + 3].iter().map(|&b| u32::from(b)).sum::<u32>() < 300
+        })
+    })
+}

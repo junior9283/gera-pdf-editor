@@ -2,6 +2,7 @@
 use serde::{de::DeserializeOwned, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
 
 const APP_DIR: &str = "gera-pdf-editor";
 
@@ -24,19 +25,82 @@ pub fn load_json<T: DeserializeOwned + Default>(path: &Path) -> T {
 
 /// Grava em um temporário na mesma pasta, força ao disco e só então troca o arquivo.
 pub fn save_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
+    write_atomic(path, &to_json(value)?)
+}
+
+fn to_json<T: Serialize>(value: &T) -> std::io::Result<Vec<u8>> {
+    serde_json::to_vec_pretty(value).map_err(std::io::Error::other)
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path
         .parent()
         .ok_or_else(|| std::io::Error::other("caminho sem pasta"))?;
     std::fs::create_dir_all(dir)?;
-    let bytes = serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?;
     let tmp = path.with_extension("json.tmp");
     let written = std::fs::File::create(&tmp)
-        .and_then(|mut f| f.write_all(&bytes).and_then(|()| f.sync_all()))
+        .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()))
         .and_then(|()| std::fs::rename(&tmp, path));
     if written.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
     written
+}
+
+/// Grava arquivos JSON numa thread à parte (o fsync não trava a interface), na ordem dos pedidos:
+/// uma thread só, então dois pedidos para o mesmo arquivo nunca disputam o temporário.
+pub struct BackgroundSaver {
+    /// `None` só durante o `drop`, para encerrar a thread.
+    jobs: Option<Sender<(PathBuf, Vec<u8>)>>,
+    errors: Receiver<String>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Default for BackgroundSaver {
+    fn default() -> Self {
+        let (jobs, rx) = mpsc::channel::<(PathBuf, Vec<u8>)>();
+        let (err_tx, errors) = mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("gravacao".into())
+            .spawn(move || {
+                for (path, bytes) in rx {
+                    if let Err(e) = write_atomic(&path, &bytes) {
+                        let _ =
+                            err_tx.send(format!("Não foi possível gravar {}: {e}", path.display()));
+                    }
+                }
+            })
+            .ok();
+        Self {
+            jobs: Some(jobs),
+            errors,
+            thread,
+        }
+    }
+}
+
+impl BackgroundSaver {
+    /// Serializa agora (rápido) e grava em segundo plano. Os tipos do app sempre serializam.
+    pub fn save<T: Serialize>(&self, path: PathBuf, value: &T) {
+        if let (Ok(bytes), Some(jobs)) = (to_json(value), &self.jobs) {
+            let _ = jobs.send((path, bytes));
+        }
+    }
+
+    /// Última falha de gravação, se houver.
+    pub fn take_error(&self) -> Option<String> {
+        self.errors.try_iter().last()
+    }
+}
+
+impl Drop for BackgroundSaver {
+    /// Ao fechar o app, termina as gravações pendentes em vez de perdê-las.
+    fn drop(&mut self) {
+        drop(self.jobs.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -86,5 +150,52 @@ mod tests {
         std::fs::write(&file, b"x").unwrap();
         // a "pasta" de destino é um arquivo comum
         assert!(save_json(&file.join("x.json"), &Sample::default()).is_err());
+    }
+
+    fn wait_for(cond: impl Fn() -> bool) -> bool {
+        (0..200).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            cond()
+        })
+    }
+
+    #[test]
+    fn background_saver_writes_in_order_and_reports_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.json");
+        let saver = BackgroundSaver::default();
+        for n in 1..=5 {
+            saver.save(
+                path.clone(),
+                &Sample {
+                    n,
+                    s: String::new(),
+                },
+            );
+        }
+        assert!(
+            wait_for(|| load_json::<Sample>(&path).n == 5),
+            "o último pedido vence"
+        );
+        let file = dir.path().join("arquivo");
+        std::fs::write(&file, b"x").unwrap();
+        saver.save(file.join("x.json"), &Sample::default());
+        assert!(wait_for(|| saver.take_error().is_some()));
+    }
+
+    #[test]
+    fn dropping_the_saver_finishes_pending_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.json");
+        let saver = BackgroundSaver::default();
+        saver.save(
+            path.clone(),
+            &Sample {
+                n: 9,
+                s: "fim".into(),
+            },
+        );
+        drop(saver); // o app fechando
+        assert_eq!(load_json::<Sample>(&path).n, 9);
     }
 }

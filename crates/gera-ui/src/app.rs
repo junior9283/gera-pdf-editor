@@ -1,18 +1,19 @@
 use crate::bench::Bench;
-use crate::doc_tab::DocTab;
+use crate::doc_tab::{DocEvent, DocTab};
 use crate::open_dialog::{FileDialogs, Picked};
-use crate::shell::close::{self, CloseFlow, Step};
+use crate::shell::close;
 use crate::shell::commands::{self, Command};
 use crate::shell::home::{self, HomeAction};
 use crate::shell::menus::{self, MenuState};
 use crate::shell::tabs::{self as tab_bar, TabAction, TabLabel};
 use crate::shell::{help, panels, toolbar, tools_hub};
+use app_state::close::{CloseFlow, Step};
 use app_state::prefs::{Prefs, MAX_PANEL, MIN_PANEL};
 use app_state::recents::{now_secs, RecentFiles};
-use app_state::store;
+use app_state::store::{self, BackgroundSaver};
 use app_state::tabs::{canonical, tab_title, TabList, FIXED, HOME, TOOLS};
 use app_state::tools_catalog;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const RECENTS_FILE: &str = "recentes.json";
 const PREFS_FILE: &str = "preferencias.json";
@@ -23,7 +24,10 @@ pub struct GeraApp {
     docs: Vec<DocTab>,
     dialogs: FileDialogs,
     recents: RecentFiles,
+    /// Recentes que ainda existem no disco (atualizado ao entrar no Início, não a cada quadro).
+    recent_exists: Vec<bool>,
     prefs: Prefs,
+    saver: BackgroundSaver,
     /// Mensagem da casca (falhas do seletor ou de abertura), mostrada no Início.
     status: String,
     closing: Option<CloseFlow>,
@@ -31,6 +35,8 @@ pub struct GeraApp {
     allow_close: bool,
     /// Preferências mudaram e ainda não foram gravadas.
     prefs_dirty: bool,
+    /// Recentes mudaram e ainda não foram gravados.
+    recents_dirty: bool,
     fullscreen: bool,
     /// Ligar a linha Comentar no próximo documento aberto pelo seletor.
     comment_after_open: bool,
@@ -48,11 +54,7 @@ impl GeraApp {
         bench: Option<Bench>,
     ) -> Self {
         let prefs = store::config_file(PREFS_FILE).map_or_else(Prefs::default, |p| Prefs::load(&p));
-        cc.egui_ctx.set_visuals(if prefs.dark {
-            egui::Visuals::dark()
-        } else {
-            egui::Visuals::light()
-        });
+        cc.egui_ctx.set_visuals(visuals(prefs.dark));
         let mut app = Self {
             tabs: TabList::default(),
             docs: Vec::new(),
@@ -60,11 +62,14 @@ impl GeraApp {
             recents: store::config_file(RECENTS_FILE)
                 .map(|p| RecentFiles::load(&p))
                 .unwrap_or_default(),
+            recent_exists: Vec::new(),
             prefs,
+            saver: BackgroundSaver::default(),
             status: String::new(),
             closing: None,
             allow_close: false,
             prefs_dirty: false,
+            recents_dirty: false,
             fullscreen: false,
             comment_after_open: false,
             last_doc: None,
@@ -72,6 +77,7 @@ impl GeraApp {
             show_about: false,
             bench,
         };
+        app.refresh_recent_exists();
         for path in paths {
             app.open_path(&cc.egui_ctx, path);
         }
@@ -80,25 +86,51 @@ impl GeraApp {
 
     pub(crate) fn open_path(&mut self, ctx: &egui::Context, path: PathBuf) {
         let path = canonical(&path);
-        let before = self.tabs.active();
-        let (tab, created) = self.tabs.open(path.clone());
+        let mut created = false;
+        self.switch_tab(|tabs| created = tabs.open(path.clone()).1);
         if created {
             let mut doc = DocTab::new(ctx, path.clone(), self.prefs.dark);
             doc.open(path);
             self.docs.push(doc);
         }
-        self.tabs.activate(before); // `activate` abaixo suspende a aba que estava na frente
-        self.activate(tab);
+    }
+
+    /// Único ponto de troca da aba da frente: suspende a que saiu (libera texturas) e lembra o
+    /// último documento visto (para o hub voltar a ele).
+    fn switch_tab(&mut self, change: impl FnOnce(&mut TabList)) {
+        let old = self.tabs.active();
+        change(&mut self.tabs);
+        let new = self.tabs.active();
+        if old == new {
+            return;
+        }
+        if let Some(doc) = self.doc_at(old) {
+            doc.suspend();
+        }
+        if let Some(p) = self.tabs.doc_path(new) {
+            self.last_doc = Some(p.to_path_buf());
+        } else if new == HOME {
+            self.refresh_recent_exists();
+        }
     }
 
     fn activate(&mut self, tab: usize) {
-        let old = self.tabs.active();
-        self.tabs.activate(tab);
-        if old != self.tabs.active() {
-            if let Some(doc) = self.doc_at(old) {
-                doc.suspend();
-            }
-        }
+        self.switch_tab(|tabs| tabs.activate(tab));
+    }
+
+    fn active_path(&self) -> Option<PathBuf> {
+        self.tabs
+            .doc_path(self.tabs.active())
+            .map(Path::to_path_buf)
+    }
+
+    fn refresh_recent_exists(&mut self) {
+        self.recent_exists = self
+            .recents
+            .items()
+            .iter()
+            .map(|r| r.path.exists())
+            .collect();
     }
 
     fn doc_at(&mut self, tab: usize) -> Option<&mut DocTab> {
@@ -123,10 +155,7 @@ impl GeraApp {
             let Some(tab) = self.tabs.find(&path) else {
                 continue;
             };
-            if self
-                .doc_at(tab)
-                .is_some_and(|d| d.is_dirty() || d.edit.saving)
-            {
+            if self.doc_at(tab).is_some_and(|d| d.needs_confirm()) {
                 dirty.push(path);
             } else {
                 self.close_tab(tab);
@@ -142,11 +171,17 @@ impl GeraApp {
 
     fn remember(&mut self, path: PathBuf) {
         self.recents.add(path, now_secs());
-        if let Some(file) = store::config_file(RECENTS_FILE) {
-            if let Err(e) = self.recents.save(&file) {
-                self.status = format!("Não foi possível gravar os recentes: {e}");
-            }
-        }
+        self.recents_changed();
+    }
+
+    fn forget(&mut self, path: &Path) {
+        self.recents.remove(path);
+        self.recents_changed();
+    }
+
+    fn recents_changed(&mut self) {
+        self.recents_dirty = true;
+        self.refresh_recent_exists();
     }
 
     /// Respostas dos workers e do seletor de arquivos.
@@ -161,23 +196,22 @@ impl GeraApp {
             } else {
                 None
             };
-            let doc = &mut self.docs[i];
-            doc.poll(ctx, bench);
-            let (opened, failure, renamed) =
-                (doc.take_opened(), doc.take_failure(), doc.take_renamed());
-            let path = doc.path.clone();
-            if opened {
-                self.remember(path);
-            }
-            if let Some(dest) = renamed {
-                let dest = canonical(&dest);
-                self.tabs.rename(tab, dest.clone());
-                self.docs[i].path = dest.clone();
-                self.remember(dest);
-            }
-            if let Some(msg) = failure {
-                self.status = msg;
-                self.close_tab(tab);
+            self.docs[i].poll(ctx, bench);
+            for event in self.docs[i].take_events() {
+                match event {
+                    DocEvent::Opened => self.remember(self.docs[i].path.clone()),
+                    DocEvent::Renamed(dest) => {
+                        let dest = canonical(&dest);
+                        self.tabs.rename(tab, dest.clone());
+                        self.docs[i].path = dest.clone();
+                        self.remember(dest);
+                    }
+                    DocEvent::Failed(msg) => {
+                        self.status = msg;
+                        self.close_tab(tab);
+                        break;
+                    }
+                }
             }
         }
         if let Some(picked) = self.dialogs.poll() {
@@ -232,14 +266,12 @@ impl GeraApp {
                 }
             }
             Command::SaveAs => {
-                if let Some(i) = self.tabs.doc_index(self.tabs.active()) {
-                    let path = self.tabs.docs()[i].clone();
+                if let Some(path) = self.active_path() {
                     self.dialogs.save_as(ctx, path);
                 }
             }
             Command::CloseTab => {
-                if let Some(i) = self.tabs.doc_index(self.tabs.active()) {
-                    let path = self.tabs.docs()[i].clone();
+                if let Some(path) = self.active_path() {
                     self.request_close(ctx, vec![path], false);
                 }
             }
@@ -255,7 +287,7 @@ impl GeraApp {
             }
             Command::ToggleDark => self.set_dark(ctx, !self.prefs.dark),
             Command::TogglePanel(p) => {
-                self.prefs.left_panel = (self.prefs.left_panel != Some(p)).then_some(p);
+                self.prefs.toggle_left(p);
                 self.prefs_dirty = true;
             }
             Command::ToggleTools => {
@@ -266,17 +298,8 @@ impl GeraApp {
                 self.fullscreen = !self.fullscreen;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
             }
-            Command::NextTab | Command::PrevTab => {
-                let old = self.tabs.active();
-                if cmd == Command::NextTab {
-                    self.tabs.next();
-                } else {
-                    self.tabs.prev();
-                }
-                let new = self.tabs.active();
-                self.tabs.activate(old);
-                self.activate(new);
-            }
+            Command::NextTab => self.switch_tab(TabList::next),
+            Command::PrevTab => self.switch_tab(TabList::prev),
             Command::ActivateTab(t) => self.activate(t),
             Command::Shortcuts => self.show_shortcuts = true,
             Command::About => self.show_about = true,
@@ -285,44 +308,49 @@ impl GeraApp {
 
     fn set_dark(&mut self, ctx: &egui::Context, dark: bool) {
         self.prefs.dark = dark;
-        ctx.set_visuals(if dark {
-            egui::Visuals::dark()
-        } else {
-            egui::Visuals::light()
-        });
+        ctx.set_visuals(visuals(dark));
         for doc in &mut self.docs {
             doc.set_dark(dark);
         }
         self.prefs_dirty = true;
     }
 
-    /// Grava as preferências quando o usuário solta o mouse (não a cada pixel de arrasto).
-    fn save_prefs_when_idle(&mut self, ctx: &egui::Context) {
-        if !self.prefs_dirty || ctx.input(|i| i.pointer.any_down()) {
-            return;
+    /// Grava preferências e recentes em segundo plano, quando o usuário solta o mouse (não a cada
+    /// pixel de um arrasto de painel).
+    fn persist_when_idle(&mut self, ctx: &egui::Context) {
+        if let Some(e) = self.saver.take_error() {
+            self.status = e;
         }
-        self.prefs_dirty = false;
-        if let Some(file) = store::config_file(PREFS_FILE) {
-            if let Err(e) = store::save_json(&file, &self.prefs) {
-                self.status = format!("Não foi possível gravar as preferências: {e}");
+        if !ctx.input(|i| i.pointer.any_down()) {
+            self.persist();
+        }
+    }
+
+    /// Enfileira a gravação do que mudou.
+    fn persist(&mut self) {
+        if std::mem::take(&mut self.prefs_dirty) {
+            if let Some(file) = store::config_file(PREFS_FILE) {
+                self.saver.save(file, &self.prefs);
+            }
+        }
+        if std::mem::take(&mut self.recents_dirty) {
+            if let Some(file) = store::config_file(RECENTS_FILE) {
+                self.saver.save(file, &self.recents);
             }
         }
     }
 
     /// Barras, trilho, painéis laterais e páginas do documento ativo (fora da tela cheia).
     fn document_view(&mut self, ui: &mut egui::Ui) {
-        let mut prefs = self.prefs.clone();
-        let mut cmd = None;
-        let mut tool_id = None;
         let Some(i) = self.tabs.doc_index(self.tabs.active()) else {
             return;
         };
+        let mut prefs = self.prefs.clone();
         let doc = &mut self.docs[i];
         doc.begin();
-        cmd = egui::Panel::top("ferramentas-doc")
+        let mut cmd = egui::Panel::top("ferramentas-doc")
             .show(ui, |ui| toolbar::show(ui, doc))
-            .inner
-            .or(cmd);
+            .inner;
         if doc.comment_tools {
             cmd = egui::Panel::top("comentar")
                 .show(ui, |ui| toolbar::comment_row(ui, doc))
@@ -336,7 +364,7 @@ impl GeraApp {
             .show(ui, |ui| panels::rail(ui, prefs.left_panel))
             .inner;
         if let Some(p) = clicked {
-            prefs.left_panel = (prefs.left_panel != Some(p)).then_some(p);
+            prefs.toggle_left(p);
         }
         if let Some(p) = prefs.left_panel {
             let r = egui::Panel::left("painel-esquerdo")
@@ -346,15 +374,15 @@ impl GeraApp {
                 .show(ui, |ui| doc.side_panel(ui, p));
             prefs.left_width = r.response.rect.width();
         }
-        if prefs.tools_panel {
+        let tool_id = prefs.tools_panel.then(|| {
             let r = egui::Panel::right("painel-ferramentas")
                 .resizable(true)
                 .default_size(prefs.tools_width)
                 .size_range(MIN_PANEL..=MAX_PANEL)
                 .show(ui, tools_hub::side_list);
             prefs.tools_width = r.response.rect.width();
-            tool_id = r.inner;
-        }
+            r.inner
+        });
         doc.show_canvas(ui);
         let width_changed = |a: f32, b: f32| (a - b).abs() > 0.5;
         if prefs.left_panel != self.prefs.left_panel
@@ -364,7 +392,7 @@ impl GeraApp {
             self.prefs = prefs;
             self.prefs_dirty = true;
         }
-        if let Some(id) = tool_id {
+        if let Some(id) = tool_id.flatten() {
             self.run_tool(ui.ctx(), id);
         }
         if let Some(cmd) = cmd {
@@ -479,14 +507,12 @@ impl GeraApp {
             }
         }
     }
+}
 
-    fn forget(&mut self, path: &std::path::Path) {
-        self.recents.remove(path);
-        if let Some(file) = store::config_file(RECENTS_FILE) {
-            if let Err(e) = self.recents.save(&file) {
-                self.status = format!("Não foi possível gravar os recentes: {e}");
-            }
-        }
+impl Drop for GeraApp {
+    /// O app fechando: grava o que ainda estava pendente (o `saver` espera terminar).
+    fn drop(&mut self) {
+        self.persist();
     }
 }
 
@@ -505,7 +531,7 @@ impl eframe::App for GeraApp {
         // Fechar a janela com alterações pendentes (em qualquer aba) pergunta antes.
         if ctx.input(|i| i.viewport().close_requested())
             && !self.allow_close
-            && self.docs.iter().any(|d| d.is_dirty() || d.edit.saving)
+            && self.docs.iter().any(DocTab::needs_confirm)
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if self.closing.is_none() {
@@ -513,7 +539,7 @@ impl eframe::App for GeraApp {
                 self.request_close(ctx, all, true);
             }
         }
-        self.save_prefs_when_idle(ctx);
+        self.persist_when_idle(ctx);
         if self.closing.is_none() {
             for cmd in commands::from_keyboard(ctx) {
                 self.run(ctx, cmd);
@@ -546,8 +572,7 @@ impl eframe::App for GeraApp {
             match action {
                 Some(TabAction::Activate(t)) => self.activate(t),
                 Some(TabAction::Close(t)) => {
-                    if let Some(i) = self.tabs.doc_index(t) {
-                        let path = self.tabs.docs()[i].clone();
+                    if let Some(path) = self.tabs.doc_path(t).map(Path::to_path_buf) {
                         self.request_close(ui.ctx(), vec![path], false);
                     }
                 }
@@ -555,14 +580,12 @@ impl eframe::App for GeraApp {
                 None => {}
             }
         }
-        let active = self.tabs.active();
-        if let Some(i) = self.tabs.doc_index(active) {
-            self.last_doc = Some(self.tabs.docs()[i].clone());
-        }
-        match active {
+        match self.tabs.active() {
             HOME => {
                 let action = egui::CentralPanel::default()
-                    .show(ui, |ui| home::show(ui, &self.recents, &self.status))
+                    .show(ui, |ui| {
+                        home::show(ui, &self.recents, &self.recent_exists, &self.status)
+                    })
                     .inner;
                 match action {
                     Some(HomeAction::OpenDialog) => self.dialogs.open(ui.ctx()),
@@ -588,5 +611,13 @@ impl eframe::App for GeraApp {
         self.drive_close(ui);
         help::shortcuts_window(ui, &mut self.show_shortcuts);
         help::about_window(ui, &mut self.show_about);
+    }
+}
+
+fn visuals(dark: bool) -> egui::Visuals {
+    if dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
     }
 }

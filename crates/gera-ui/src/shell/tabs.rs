@@ -1,4 +1,5 @@
 //! Barra de abas: Início e Ferramentas fixas, documentos com ✕ e o ＋.
+use crate::shell::commands::{hover, Command};
 use app_state::tabs::{FIXED, HOME, TOOLS};
 
 pub struct TabLabel {
@@ -38,7 +39,7 @@ pub fn show(ui: &mut egui::Ui, active: usize, docs: &[TabLabel]) -> Option<TabAc
             }
             if ui
                 .small_button("✕")
-                .on_hover_text("Fechar (Ctrl+W)")
+                .on_hover_text(hover(ui.ctx(), &Command::CloseTab))
                 .clicked()
             {
                 action = Some(TabAction::Close(tab));
@@ -46,7 +47,7 @@ pub fn show(ui: &mut egui::Ui, active: usize, docs: &[TabLabel]) -> Option<TabAc
         }
         if ui
             .button("＋")
-            .on_hover_text("Abrir arquivo (Ctrl+O)")
+            .on_hover_text(hover(ui.ctx(), &Command::Open))
             .clicked()
         {
             action = Some(TabAction::New);

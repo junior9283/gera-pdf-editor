@@ -19,14 +19,10 @@ pub struct EditState {
     note_draft: Option<(i32, (f32, f32), String)>,
 }
 
-fn to_pos(p: (f32, f32)) -> egui::Pos2 {
-    egui::pos2(p.0, p.1)
-}
-
 /// Retângulo da página (pontos) -> retângulo na tela.
 pub(crate) fn screen_rect(r: &PdfRect, map: &PageMap) -> egui::Rect {
     let (min, max) = map.rect_to_screen(r);
-    egui::Rect::from_min_max(to_pos(min), to_pos(max))
+    egui::Rect::from_min_max(min.into(), max.into())
 }
 
 /// Anotação de marcação que cobre `words`, se `tool` marca texto.
@@ -48,7 +44,7 @@ fn selection_text(words: &[Word]) -> String {
 }
 
 fn paint_stroke(painter: &egui::Painter, points: &[(f32, f32)], map: &PageMap) {
-    let pts = points.iter().map(|&p| to_pos(map.to_screen(p))).collect();
+    let pts = points.iter().map(|&p| map.to_screen(p).into()).collect();
     painter.line(pts, egui::Stroke::new(2.0, egui::Color32::RED));
 }
 
@@ -92,7 +88,7 @@ impl EditState {
         );
         let pointer = response
             .interact_pointer_pos()
-            .map(|p| map.to_page((p.x, p.y)));
+            .map(|p| map.to_page(p.into()));
         if self.saving {
             // durante o salvamento só mostra as pendentes: gestos novos seriam perdidos
             self.paint_pending(ui.painter(), page, map);
@@ -197,7 +193,7 @@ impl EditState {
                 }
                 NewAnnot::Note { at, .. } => {
                     let icon = egui::Rect::from_min_size(
-                        to_pos(map.to_screen(*at)),
+                        map.to_screen(*at).into(),
                         egui::vec2(24.0 * map.zoom, 24.0 * map.zoom),
                     );
                     painter.rect_filled(icon, 3.0, egui::Color32::from_rgb(255, 200, 0));

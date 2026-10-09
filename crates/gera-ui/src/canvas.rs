@@ -59,7 +59,7 @@ pub fn show_pages(
             );
             let scale = view.scale_for(i);
             paint_page(ui, view, i as i32, rect, scale);
-            let map = view.page_map(i, (rect.min.x, rect.min.y));
+            let map = view.page_map(i, rect.min.into());
             on_page(ui, i, rect, &map);
         }
         if paged {

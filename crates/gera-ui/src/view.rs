@@ -40,6 +40,8 @@ pub struct DocView {
     pub cover: bool,
     /// Modos página a página: linha (página ou par) mostrada.
     pub spread: usize,
+    /// Tamanho de cada página na tela com zoom 1, já girada.
+    dims: Vec<(f32, f32)>,
     /// Largura e altura da maior linha com zoom 1 (base dos ajustes).
     base: (f32, f32),
     pub layout: Layout,
@@ -63,6 +65,7 @@ impl DocView {
             mode: ViewMode::default(),
             cover: false,
             spread: 0,
+            dims: Vec::new(),
             base: (1.0, 1.0),
             layout: Layout::default(),
             dark: false,
@@ -72,20 +75,26 @@ impl DocView {
             requested: HashMap::new(),
             wanted: HashSet::new(),
         };
-        view.relayout();
+        view.reshape();
         view
     }
 
-    fn relayout(&mut self) {
-        let dims: Vec<(f32, f32)> = self
+    /// Rotação, modo ou capa mudaram: refaz as dimensões giradas e a base dos ajustes.
+    fn reshape(&mut self) {
+        self.dims = self
             .sizes
             .iter()
             .map(|s| transform::rotated((s.width, s.height), self.rotation))
             .collect();
-        self.layout = Layout::with_mode(&dims, self.zoom, self.mode, self.cover);
-        let unit = Layout::with_mode(&dims, 1.0, self.mode, self.cover);
+        let unit = Layout::with_mode(&self.dims, 1.0, self.mode, self.cover);
         self.base = (unit.max_width(), unit.max_row_height());
-        self.spread = self.spread.min(self.layout.row_count().saturating_sub(1));
+        self.relayout();
+    }
+
+    /// Só o zoom mudou: um layout novo, sem recalcular as dimensões.
+    fn relayout(&mut self) {
+        self.layout = Layout::with_mode(&self.dims, self.zoom, self.mode, self.cover);
+        self.spread = self.spread.min(self.layout.last_row());
     }
 
     /// Aplica o zoom (limitado) e refaz o layout; devolve a razão novo/antigo.
@@ -117,27 +126,27 @@ impl DocView {
         if rotation != self.rotation {
             self.rotation = rotation;
             self.clear_cache(); // as texturas da rotação antiga não servem mais
-            self.relayout();
+            self.reshape();
         }
     }
 
     /// Troca o modo de exibição mantendo `current_page` na tela.
     pub fn set_mode(&mut self, mode: ViewMode, current_page: usize) {
         self.mode = mode;
-        self.relayout();
+        self.reshape();
         self.spread = self.layout.row_of(current_page);
     }
 
     /// Modos página a página: avança (`+1`) ou volta (`-1`) uma tela; devolve se mudou.
     pub fn turn(&mut self, step: i32) -> bool {
-        let last = self.layout.row_count().saturating_sub(1) as i64;
+        let last = self.layout.last_row() as i64;
         let new = (self.spread as i64 + i64::from(step)).clamp(0, last) as usize;
         std::mem::replace(&mut self.spread, new) != new
     }
 
     /// Modos página a página: vai para a linha `row` (limitada à última).
     pub fn turn_to(&mut self, row: usize) {
-        self.spread = row.min(self.layout.row_count().saturating_sub(1));
+        self.spread = row.min(self.layout.last_row());
     }
 
     /// Faixa vertical do layout mostrada na área de rolagem: `(topo, altura)`. Tudo, ou só a

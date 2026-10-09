@@ -54,6 +54,10 @@ impl TabList {
     pub fn doc_index(&self, tab: usize) -> Option<usize> {
         tab.checked_sub(FIXED).filter(|&i| i < self.docs.len())
     }
+    /// Caminho do documento da aba `tab`, se for uma aba de documento.
+    pub fn doc_path(&self, tab: usize) -> Option<&Path> {
+        self.doc_index(tab).map(|i| self.docs[i].as_path())
+    }
     pub fn find(&self, path: &Path) -> Option<usize> {
         self.docs.iter().position(|p| p == path).map(|i| FIXED + i)
     }
@@ -171,6 +175,8 @@ mod tests {
     #[test]
     fn rename_follows_save_as() {
         let mut t = three();
+        assert_eq!(t.doc_path(HOME), None);
+        assert_eq!(t.doc_path(FIXED), Some(p("a").as_path()));
         t.rename(FIXED, p("novo"));
         assert_eq!(t.find(&p("novo")), Some(FIXED));
         assert_eq!(t.find(&p("a")), None);

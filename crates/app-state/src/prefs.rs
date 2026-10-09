@@ -67,6 +67,15 @@ impl Prefs {
         store::load_json::<Self>(path).sanitized()
     }
 
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        store::save_json(path, self)
+    }
+
+    /// Abre o painel `p`, ou fecha se ele já estiver aberto.
+    pub fn toggle_left(&mut self, p: LeftPanel) {
+        self.left_panel = (self.left_panel != Some(p)).then_some(p);
+    }
+
     /// Larguras dentro de `MIN_PANEL..=MAX_PANEL` (valores estranhos voltam ao padrão).
     pub fn sanitized(mut self) -> Self {
         let defaults = Self::default();
@@ -113,6 +122,15 @@ mod tests {
             Some(LeftPanel::Thumbnails),
             "campo ausente: padrão"
         );
+    }
+
+    #[test]
+    fn toggling_a_panel_opens_or_closes_it() {
+        let mut p = Prefs::default();
+        p.toggle_left(LeftPanel::Thumbnails);
+        assert_eq!(p.left_panel, None);
+        p.toggle_left(LeftPanel::Outline);
+        assert_eq!(p.left_panel, Some(LeftPanel::Outline));
     }
 
     #[test]

@@ -4,7 +4,8 @@ use crate::shell::commands::{shortcut_of, Command};
 use app_state::layout::ViewMode;
 use app_state::prefs::LeftPanel;
 use app_state::recents::RecentFiles;
-use app_state::tabs::tab_title;
+use app_state::tabs::{tab_title, FIXED};
+use app_state::tools_catalog;
 use app_state::zoom::Fit;
 
 pub struct MenuState<'a> {
@@ -41,6 +42,16 @@ fn check(ui: &mut egui::Ui, out: &mut Option<Command>, cmd: Command, checked: bo
     }
 }
 
+/// Ferramenta do catálogo ainda não pronta: o texto "em breve" vem do próprio catálogo.
+fn soon_tool(ui: &mut egui::Ui, id: &str) {
+    if let Some(t) = tools_catalog::find(id) {
+        ui.add_enabled(
+            false,
+            egui::Button::new(format!("{}  · {}", t.name, tools_catalog::badge(t))),
+        );
+    }
+}
+
 fn soon(ui: &mut egui::Ui, label: &str, phase: &str) {
     ui.add_enabled(
         false,
@@ -72,7 +83,7 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
             ui.separator();
             item(ui, &mut out, doc(DocCommand::Save), has_doc);
             item(ui, &mut out, Command::SaveAs, has_doc);
-            soon(ui, "Exportar", "v5");
+            soon_tool(ui, "exportar");
             ui.separator();
             soon(ui, "Propriedades", "v1.1-B");
             soon(ui, "Imprimir", "v1.1-B");
@@ -151,9 +162,8 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
             check(ui, &mut out, Command::ToggleDark, s.dark, true);
         });
         ui.menu_button("Assinar", |ui| {
-            soon(ui, "Preencher e assinar", "v3");
-            soon(ui, "Assinatura digital (certificado)", "v3");
-            soon(ui, "Validar assinaturas", "v3");
+            soon_tool(ui, "assinar");
+            soon_tool(ui, "certificados");
         });
         ui.menu_button("Janela", |ui| {
             for (tab, title) in &s.tabs {
@@ -167,7 +177,7 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
             ui.separator();
             item(ui, &mut out, Command::NextTab, true);
             item(ui, &mut out, Command::PrevTab, true);
-            item(ui, &mut out, Command::CloseAll, s.tabs.len() > 2);
+            item(ui, &mut out, Command::CloseAll, s.tabs.len() > FIXED);
         });
         ui.menu_button("Ajuda", |ui| {
             item(ui, &mut out, Command::Shortcuts, true);

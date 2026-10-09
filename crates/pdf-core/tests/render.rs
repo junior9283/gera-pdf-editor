@@ -1,6 +1,7 @@
 mod common;
 use common::write_sample;
-use pdf_core::{PdfDoc, PdfError, RenderedPage, Rotation};
+use pdf_core::sample::{dark_near, darkest_pixel as darkest};
+use pdf_core::{PdfDoc, PdfError, Rotation};
 
 fn doc(rotate: i32) -> (tempfile::TempDir, PdfDoc) {
     let dir = tempfile::tempdir().unwrap();
@@ -103,30 +104,6 @@ fn max_render_scale_respects_both_the_side_and_the_pixel_limits() {
         height: 0.0,
     };
     assert!(max_render_scale(&zero).is_finite() && max_render_scale(&zero) > 0.0);
-}
-
-/// Pixel mais escuro da imagem (soma dos 3 canais).
-fn darkest(img: &RenderedPage) -> (usize, usize) {
-    let w = img.width as usize;
-    let i = img
-        .rgb
-        .chunks(3)
-        .enumerate()
-        .min_by_key(|(_, p)| p.iter().map(|&b| b as u32).sum::<u32>())
-        .map(|(i, _)| i)
-        .unwrap();
-    (i % w, i / w)
-}
-
-/// Há tinta escura em volta de (x, y)? (vizinhança 3x3, por causa da suavização das bordas)
-fn dark_near(img: &RenderedPage, x: usize, y: usize) -> bool {
-    let (w, h) = (img.width as usize, img.height as usize);
-    (x.saturating_sub(1)..(x + 2).min(w)).any(|xx| {
-        (y.saturating_sub(1)..(y + 2).min(h)).any(|yy| {
-            let i = (yy * w + xx) * 3;
-            img.rgb[i..i + 3].iter().map(|&b| b as u32).sum::<u32>() < 300
-        })
-    })
 }
 
 #[test]

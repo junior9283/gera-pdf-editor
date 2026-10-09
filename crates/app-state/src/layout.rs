@@ -155,11 +155,15 @@ impl Layout {
     pub fn row_count(&self) -> usize {
         self.rows.len()
     }
+    /// Índice da última linha (0 sem páginas).
+    pub fn last_row(&self) -> usize {
+        self.rows.len().saturating_sub(1)
+    }
     /// Linha da página `page` (a última, se a página não existir).
     pub fn row_of(&self, page: usize) -> usize {
         self.rows
             .partition_point(|r| r.pages.end <= page)
-            .min(self.rows.len().saturating_sub(1))
+            .min(self.last_row())
     }
     pub fn row_pages(&self, row: usize) -> Range<usize> {
         self.rows.get(row).map_or(0..0, |r| r.pages.clone())

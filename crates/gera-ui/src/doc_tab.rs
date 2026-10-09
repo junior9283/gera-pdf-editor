@@ -36,6 +36,16 @@ pub enum DocCommand {
     },
 }
 
+/// O que aconteceu com o documento e interessa à casca (abas e recentes).
+#[derive(Debug, PartialEq)]
+pub enum DocEvent {
+    Opened,
+    /// Não abriu: a aba deve ser fechada.
+    Failed(String),
+    /// "Salvar como" concluído no novo caminho.
+    Renamed(PathBuf),
+}
+
 /// Um documento aberto: worker próprio, vista, busca, edição e painel lateral.
 pub struct DocTab {
     pub(crate) worker: Worker,
@@ -43,14 +53,10 @@ pub struct DocTab {
     pub(crate) path: PathBuf,
     /// Tema escuro herdado da casca.
     dark: bool,
-    /// Abriu com sucesso desde a última consulta.
-    opened: bool,
-    /// Falha ao abrir (a aba deve ser fechada).
-    failure: Option<String>,
+    /// Eventos ainda não lidos pela casca.
+    events: Vec<DocEvent>,
     /// "Salvar como" em andamento: novo caminho.
     save_dest: Option<PathBuf>,
-    /// "Salvar como" concluído: a casca atualiza a aba.
-    renamed: Option<PathBuf>,
     pub(crate) view: Option<DocView>,
     pub(crate) status: String,
     /// Último quadro do canvas (rolagem e página atual).
@@ -82,10 +88,8 @@ impl DocTab {
             worker: Worker::spawn(move || ctx.request_repaint()),
             path,
             dark,
-            opened: false,
-            failure: None,
+            events: Vec::new(),
             save_dest: None,
-            renamed: None,
             view: None,
             status: String::new(),
             last: CanvasFrame::default(),
@@ -108,46 +112,42 @@ impl DocTab {
         self.edit.pending.is_dirty()
     }
 
+    /// Fechar esta aba precisa de confirmação (pendências ou salvamento em andamento)?
+    pub fn needs_confirm(&self) -> bool {
+        self.is_dirty() || self.edit.saving
+    }
+
     pub fn run(&mut self, cmd: DocCommand) {
-        match cmd {
-            DocCommand::Save => return self.save(),
-            DocCommand::Undo => {
-                self.edit.undo();
-                return;
-            }
-            DocCommand::Redo => {
-                self.edit.redo();
-                return;
-            }
-            DocCommand::Find => {
-                self.focus_search = true;
-                return;
-            }
-            _ => {}
-        }
+        let page = self.last.current_page;
         let Some(view) = self.view.as_mut() else {
             return;
         };
-        let page = self.last.current_page as i32;
         match cmd {
+            DocCommand::Save => self.save(),
+            DocCommand::Undo => {
+                self.edit.undo();
+            }
+            DocCommand::Redo => {
+                self.edit.redo();
+            }
+            DocCommand::Find => self.focus_search = true,
             DocCommand::ZoomIn | DocCommand::ZoomOut | DocCommand::ZoomReset => {
                 let z = match cmd {
                     DocCommand::ZoomIn => zoom::zoom_in(view.zoom),
                     DocCommand::ZoomOut => zoom::zoom_out(view.zoom),
                     _ => zoom::DEFAULT_ZOOM,
                 };
-                let ratio = view.set_manual_zoom(z);
-                self.jump_to = Some(self.last.scroll_y * ratio);
+                self.zoom_to(z);
             }
             DocCommand::Fit(fit) => view.fit = fit,
             DocCommand::Mode(mode) => {
-                view.set_mode(mode, page.max(0) as usize);
-                self.jump_to = view.go_to(page, None);
+                view.set_mode(mode, page);
+                self.jump_to = view.go_to(page as i32, None);
             }
             DocCommand::ToggleCover => {
                 view.cover = !view.cover;
-                view.set_mode(view.mode, page.max(0) as usize);
-                self.jump_to = view.go_to(page, None);
+                let mode = view.mode;
+                self.run(DocCommand::Mode(mode));
             }
             DocCommand::Rotate { clockwise } => {
                 let r = if clockwise {
@@ -156,9 +156,16 @@ impl DocTab {
                     view.rotation.ccw()
                 };
                 view.set_rotation(r);
-                self.jump_to = view.go_to(page, None);
+                self.jump_to = view.go_to(page as i32, None);
             }
-            DocCommand::Save | DocCommand::Undo | DocCommand::Redo | DocCommand::Find => {}
+        }
+    }
+
+    /// Zoom escolhido pelo usuário, mantendo o mesmo ponto do documento na tela.
+    fn zoom_to(&mut self, z: f32) {
+        if let Some(view) = self.view.as_mut() {
+            let ratio = view.set_manual_zoom(z);
+            self.jump_to = Some(self.last.scroll_y * ratio);
         }
     }
 
@@ -191,16 +198,8 @@ impl DocTab {
         }
     }
 
-    pub fn take_opened(&mut self) -> bool {
-        std::mem::take(&mut self.opened)
-    }
-
-    pub fn take_failure(&mut self) -> Option<String> {
-        self.failure.take()
-    }
-
-    pub fn take_renamed(&mut self) -> Option<PathBuf> {
-        self.renamed.take()
+    pub fn take_events(&mut self) -> Vec<DocEvent> {
+        std::mem::take(&mut self.events)
     }
 
     pub fn title(&self) -> String {
@@ -235,7 +234,7 @@ impl DocTab {
         self.search.start(&self.worker);
         self.last = CanvasFrame::default();
         self.jump_to = Some(0.0);
-        self.opened = true;
+        self.events.push(DocEvent::Opened);
     }
 
     pub fn poll(&mut self, ctx: &egui::Context, mut bench: Option<&mut Bench>) {
@@ -266,10 +265,8 @@ impl DocTab {
                 Response::OpenFailed(e) => {
                     self.status = format!("Erro: {e}");
                     if self.view.is_none() {
-                        self.failure = Some(format!(
-                            "Não foi possível abrir {}: {e}",
-                            self.path.display()
-                        ));
+                        let msg = format!("Não foi possível abrir {}: {e}", self.path.display());
+                        self.events.push(DocEvent::Failed(msg));
                     }
                 }
                 Response::Rendered {
@@ -323,7 +320,7 @@ impl DocTab {
                         if let Some(view) = self.view.as_mut() {
                             view.path = dest.clone();
                         }
-                        self.renamed = Some(dest);
+                        self.events.push(DocEvent::Renamed(dest));
                     }
                 }
                 Response::SaveFailed(msg) => {
@@ -387,9 +384,10 @@ impl DocTab {
             }
         }
         let zoom_delta = ctx.input(|i| i.zoom_delta()); // Ctrl+roda e gesto de pinça
-        if let (true, Some(view)) = ((zoom_delta - 1.0).abs() > f32::EPSILON, self.view.as_mut()) {
-            let ratio = view.set_manual_zoom(view.zoom * zoom_delta);
-            self.jump_to = Some(self.last.scroll_y * ratio);
+        if (zoom_delta - 1.0).abs() > f32::EPSILON {
+            if let Some(z) = self.view.as_ref().map(|v| v.zoom * zoom_delta) {
+                self.zoom_to(z);
+            }
         }
     }
 

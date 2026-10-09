@@ -84,6 +84,18 @@ pub const CATALOG: &[ToolEntry] = &[
     tool("recortar", "Recortar páginas", "⛶", Organize, Planned("v2"), "Ajustar as margens das páginas"),
 ];
 
+pub fn find(id: &str) -> Option<&'static ToolEntry> {
+    CATALOG.iter().find(|t| t.id == id)
+}
+
+/// "Em breve · v2" para o que ainda não existe; vazio para o que está pronto.
+pub fn badge(t: &ToolEntry) -> String {
+    match t.status {
+        Ready => String::new(),
+        Planned(phase) => format!("Em breve · {phase}"),
+    }
+}
+
 pub fn in_category(c: Category) -> impl Iterator<Item = &'static ToolEntry> {
     CATALOG.iter().filter(move |t| t.category == c)
 }
@@ -120,6 +132,12 @@ mod tests {
             .map(|t| t.id)
             .collect();
         assert_eq!(ready, [COMMENT]);
+        assert_eq!(find(COMMENT).map(badge).as_deref(), Some(""));
+        assert_eq!(
+            find("organizar").map(badge).as_deref(),
+            Some("Em breve · v2")
+        );
+        assert!(find("inexistente").is_none());
         assert!(CATALOG.iter().all(|t| t.status == Status::Ready
             || matches!(t.status, Status::Planned(p) if p.starts_with('v'))));
     }

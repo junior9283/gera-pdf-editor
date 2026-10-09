@@ -1,12 +1,5 @@
 //! Aba Ferramentas (grade de cartões) e a lista resumida do painel direito.
-use app_state::tools_catalog::{in_category, Category, Status, ToolEntry};
-
-fn badge(t: &ToolEntry) -> String {
-    match t.status {
-        Status::Ready => String::new(),
-        Status::Planned(phase) => format!("Em breve · {phase}"),
-    }
-}
+use app_state::tools_catalog::{badge, in_category, Category, Status, ToolEntry};
 
 /// Cartão de uma ferramenta; devolve `true` se clicado (só as prontas são clicáveis).
 fn card(ui: &mut egui::Ui, t: &ToolEntry) -> bool {

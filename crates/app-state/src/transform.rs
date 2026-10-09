@@ -64,7 +64,8 @@ impl PageMap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pdf_core::{sample::sample_pdf, PdfDoc, RenderedPage};
+    use pdf_core::sample::{dark_near, darkest_pixel as darkest, sample_pdf};
+    use pdf_core::PdfDoc;
 
     const ALL: [Rotation; 4] = [Rotation::R0, Rotation::R90, Rotation::R180, Rotation::R270];
 
@@ -135,28 +136,6 @@ mod tests {
         m.zoom = 0.0;
         let p = m.to_page((10.0, 10.0));
         assert!(p.0.is_finite() && p.1.is_finite());
-    }
-
-    fn darkest(img: &RenderedPage) -> (usize, usize) {
-        let w = img.width as usize;
-        let i = img
-            .rgb
-            .chunks(3)
-            .enumerate()
-            .min_by_key(|(_, p)| p.iter().map(|&b| b as u32).sum::<u32>())
-            .map(|(i, _)| i)
-            .unwrap();
-        (i % w, i / w)
-    }
-
-    fn dark_near(img: &RenderedPage, x: usize, y: usize) -> bool {
-        let (w, h) = (img.width as usize, img.height as usize);
-        (x.saturating_sub(1)..(x + 2).min(w)).any(|xx| {
-            (y.saturating_sub(1)..(y + 2).min(h)).any(|yy| {
-                let i = (yy * w + xx) * 3;
-                img.rgb[i..i + 3].iter().map(|&b| b as u32).sum::<u32>() < 300
-            })
-        })
     }
 
     /// O `PageMap` tem que concordar com o render girado do MuPDF; senão as anotações feitas com a

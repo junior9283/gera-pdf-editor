@@ -9,7 +9,13 @@ pub enum HomeAction {
     Forget(PathBuf),
 }
 
-pub fn show(ui: &mut egui::Ui, recents: &RecentFiles, status: &str) -> Option<HomeAction> {
+/// `exists[i]`: o recente `i` ainda está no disco (calculado pela casca, não a cada quadro).
+pub fn show(
+    ui: &mut egui::Ui,
+    recents: &RecentFiles,
+    exists: &[bool],
+    status: &str,
+) -> Option<HomeAction> {
     let mut action = None;
     ui.vertical_centered(|ui| {
         ui.add_space(32.0);
@@ -39,8 +45,8 @@ pub fn show(ui: &mut egui::Ui, recents: &RecentFiles, status: &str) -> Option<Ho
                 .striped(true)
                 .num_columns(4)
                 .show(ui, |ui| {
-                    for r in recents.items() {
-                        let exists = r.path.exists();
+                    for (n, r) in recents.items().iter().enumerate() {
+                        let exists = exists.get(n).copied().unwrap_or(true);
                         let mut name =
                             egui::RichText::new(format!("📄 {}", tab_title(&r.path, 60)));
                         if !exists {
