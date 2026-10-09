@@ -80,11 +80,18 @@ impl PrintDialog {
         let mut choice = None;
         egui::Modal::new(egui::Id::new("imprimir")).show(ui.ctx(), |ui| {
             ui.heading("Imprimir");
-            ui.horizontal_top(|ui| {
-                ui.vertical(|ui| self.options_ui(ui, total));
-                ui.separator();
-                ui.vertical(|ui| self.preview_ui(ui, view, worker, total));
-            });
+            // altura limitada à janela: em telas pequenas as opções rolam, os botões ficam visíveis
+            let max_height = (ui.ctx().content_rect().height() - 140.0).max(200.0);
+            egui::ScrollArea::vertical()
+                .max_height(max_height)
+                .show(ui, |ui| {
+                    ui.horizontal_top(|ui| {
+                        ui.vertical(|ui| self.options_ui(ui, total));
+                        // espaço, não `separator`: numa linha o separador ocupa a altura toda
+                        ui.add_space(16.0);
+                        ui.vertical(|ui| self.preview_ui(ui, view, worker, total));
+                    });
+                });
             ui.separator();
             let problem = self.problem(total);
             if let Some(p) = &problem {
@@ -134,13 +141,13 @@ impl PrintDialog {
         ui.radio_value(&mut o.pages, Pages::Current, "Página atual");
         ui.horizontal(|ui| {
             ui.radio_value(&mut o.pages, Pages::Ranges, "Páginas");
-            let field = ui.add_enabled(
-                o.pages == Pages::Ranges,
+            // como no Acrobat: clicar ou digitar no campo já escolhe "Páginas"
+            let field = ui.add(
                 egui::TextEdit::singleline(&mut o.ranges)
                     .hint_text("1-3, 7")
                     .desired_width(110.0),
             );
-            if field.gained_focus() {
+            if field.gained_focus() || field.changed() {
                 o.pages = Pages::Ranges;
             }
         });

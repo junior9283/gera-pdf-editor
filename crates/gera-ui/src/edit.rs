@@ -201,7 +201,7 @@ impl EditState {
         }
         match self.tool {
             Tool::Select | Tool::Highlight | Tool::Underline => {
-                self.drag_text(worker, &response, pointer, page);
+                self.drag_text(worker, &response, pointer, page, map);
                 self.selection_menu(&response, page);
             }
             Tool::Note => {
@@ -223,12 +223,16 @@ impl EditState {
         response: &egui::Response,
         pointer: Option<(f32, f32)>,
         page: i32,
+        map: &PageMap,
     ) {
         if response.clicked() {
             self.selection = None;
         }
         if response.drag_started() {
-            if let Some(p) = pointer {
+            // O arrasto só "começa" depois de o mouse andar alguns pixels: a seleção parte de onde
+            // o botão foi apertado, senão a primeira letra sob o mouse ficaria de fora.
+            let pressed = response.ctx.input(|i| i.pointer.press_origin());
+            if let Some(p) = pressed.map(|p| map.to_page(p.into())).or(pointer) {
                 self.select_drag = Some(SelectDrag {
                     page,
                     from: p,
