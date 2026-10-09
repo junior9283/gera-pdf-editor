@@ -13,11 +13,16 @@ cargo build --release -p gera-ui -q
 BIN=target/release/gera-pdf-editor
 SIZE=$(stat -c%s "$BIN")
 
+TABS_DIR=$(mktemp -d)
+# configuração descartável: as medições não podem entrar nos recentes nem nas preferências do usuário
+export XDG_CONFIG_HOME="$TABS_DIR/config"
+cleanup() { rm -rf "$TABS_DIR"; if [ -n "${TMP_SAMPLE:-}" ]; then rm -f "$TMP_SAMPLE"; fi; }
+trap cleanup EXIT
+
 if [ -n "${1:-}" ]; then
   SAMPLE=$1; LABEL="PDF real"
 else
-  SAMPLE=$(mktemp --suffix=.pdf); LABEL="PDF sintético (texto simples: melhor caso)"
-  trap 'rm -f "$SAMPLE"' EXIT
+  TMP_SAMPLE=$(mktemp --suffix=.pdf); SAMPLE=$TMP_SAMPLE; LABEL="PDF sintético (texto simples: melhor caso)"
   cargo run --release -q -p pdf-core --example make_sample -- "$SAMPLE" 100
 fi
 echo "amostra: $LABEL"
@@ -42,10 +47,17 @@ MS=$(median "${MS_LIST[@]}"); RSS=$(median "${RSS_LIST[@]}")
 SCROLL=$(bench --bench-scroll | grep '^BENCH scroll')
 RSS_SCROLL=$(field rss_kb "$SCROLL")
 
+# três abas abertas ao mesmo tempo (cópias: caminhos diferentes viram abas diferentes)
+for n in 1 2 3; do cp "$SAMPLE" "$TABS_DIR/aba$n.pdf"; done
+TABS=$(timeout 60 "$BIN" --bench-open "$TABS_DIR/aba1.pdf" "$TABS_DIR/aba2.pdf" "$TABS_DIR/aba3.pdf" | grep '^BENCH') \
+  || { echo "FALHA: o app não respondeu em 60 s com 3 abas" >&2; exit 1; }
+RSS_TABS=$(field rss_kb "$TABS")
+
 echo "binario_bytes=$SIZE (limite $MAX_BIN)"
 echo "open_ms=${MS_LIST[*]} (mediana $MS, limite $MAX_MS)"
 echo "rss_kb=${RSS_LIST[*]} (mediana $RSS, limite $MAX_RSS_KB)"
 echo "$SCROLL (limite rss_kb<$MAX_RSS_KB)"
+echo "rss_kb_3_abas=$RSS_TABS (limite $MAX_RSS_KB)"
 
 FAIL=0
 # valor ausente (medição que falhou) conta como falha
@@ -54,4 +66,5 @@ check "tamanho do binário" "$SIZE" "$MAX_BIN"
 check "abertura (ms)" "$MS" "$MAX_MS"
 check "memória na abertura (kB)" "$RSS" "$MAX_RSS_KB"
 check "memória após rolar (kB)" "$RSS_SCROLL" "$MAX_RSS_KB"
+check "memória com 3 abas (kB)" "$RSS_TABS" "$MAX_RSS_KB"
 exit $FAIL

@@ -1,4 +1,6 @@
 use crate::view::DocView;
+use app_state::nav::paged_step;
+use app_state::transform::PageMap;
 use pdf_core::Worker;
 
 #[derive(Default)]
@@ -7,52 +9,95 @@ pub struct CanvasFrame {
     pub current_page: usize,
     /// Altura visível da área de rolagem (para PageUp/PageDown).
     pub viewport_h: f32,
+    /// Modos página a página: a roda pediu a tela seguinte (`+1`) ou a anterior (`-1`).
+    pub turn: i32,
 }
 
-/// Rola e desenha só as páginas visíveis (mais uma de cada lado, pré-carregadas).
-/// `on_page` roda depois de pintar cada página visível, para sobrepor anotações e tratar o mouse.
+/// Rola e desenha só as páginas visíveis (mais as vizinhas, pré-carregadas). Nos modos página a
+/// página mostra só a linha atual. `on_page` roda depois de pintar cada página visível, para
+/// sobrepor anotações e tratar o mouse.
 pub fn show_pages(
     ui: &mut egui::Ui,
     view: &mut DocView,
     worker: &Worker,
     jump_to: Option<f32>,
-    on_page: &mut dyn FnMut(&mut egui::Ui, usize, egui::Rect),
+    on_page: &mut dyn FnMut(&mut egui::Ui, usize, egui::Rect, &PageMap),
 ) -> CanvasFrame {
     view.set_ppp(ui.ctx().pixels_per_point());
     view.set_max_side(ui.ctx().input(|i| i.max_texture_side) as f32);
+    let paged = view.mode.is_paged();
+    let (win_top, win_h) = view.window();
     let mut area = egui::ScrollArea::both().auto_shrink(false);
     if let Some(y) = jump_to {
         area = area.vertical_scroll_offset(y.max(0.0));
     }
     let out = area.show_viewport(ui, |ui, viewport| {
-        let total = egui::vec2(view.layout.max_width(), view.layout.total_height());
+        let total = egui::vec2(view.layout.max_width(), win_h);
         ui.set_min_size(total);
         let origin = ui.max_rect().min;
-        let content_w = ui.max_rect().width().max(total.x);
-        let visible = view.layout.visible_range(viewport.min.y, viewport.height());
-        for i in view.layout.expand(visible.clone(), 1) {
+        let left = origin.x + (ui.max_rect().width() - total.x).max(0.0) / 2.0;
+        let (visible, around) = if paged {
+            let row = view.layout.row_pages(view.spread);
+            let around = view.layout.expand(row.clone(), view.mode.columns());
+            (row, around)
+        } else {
+            let visible = view.layout.visible_range(viewport.min.y, viewport.height());
+            let around = view.layout.expand(visible.clone(), 1);
+            (visible, around)
+        };
+        for i in around {
             let scale = view.scale_for(i);
             view.request_at(worker, i as i32, scale);
         }
-        for i in visible {
-            let w = view.layout.page_width(i);
-            let x = origin.x + (content_w - w).max(0.0) / 2.0;
+        for i in visible.clone() {
             let rect = egui::Rect::from_min_size(
-                egui::pos2(x, origin.y + view.layout.page_top(i)),
-                egui::vec2(w, view.layout.page_height(i)),
+                egui::pos2(
+                    left + view.layout.page_x(i),
+                    origin.y + view.layout.page_top(i) - win_top,
+                ),
+                egui::vec2(view.layout.page_width(i), view.layout.page_height(i)),
             );
             let scale = view.scale_for(i);
             paint_page(ui, view, i as i32, rect, scale);
-            on_page(ui, i, rect);
+            let map = view.page_map(i, rect.min.into());
+            on_page(ui, i, rect, &map);
         }
-        view.layout
-            .page_at(viewport.min.y + viewport.height() * 0.3)
+        if paged {
+            visible.start
+        } else {
+            view.layout
+                .page_at(viewport.min.y + viewport.height() * 0.3)
+        }
     });
+    let turn = if paged && ui.rect_contains_pointer(out.inner_rect) {
+        let max_offset = (out.content_size.y - out.inner_rect.height()).max(0.0);
+        paged_step(out.state.offset.y, max_offset, wheel_y(ui))
+    } else {
+        0
+    };
     CanvasFrame {
         scroll_y: out.state.offset.y,
         current_page: out.inner,
         viewport_h: out.inner_rect.height(),
+        turn,
     }
+}
+
+/// Giro da roda neste quadro (sem Ctrl, que é zoom). Lido dos eventos brutos porque a área de
+/// rolagem consome o delta suavizado.
+fn wheel_y(ui: &egui::Ui) -> f32 {
+    ui.input(|i| {
+        i.raw
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                egui::Event::MouseWheel {
+                    delta, modifiers, ..
+                } if !modifiers.command => Some(delta.y),
+                _ => None,
+            })
+            .sum()
+    })
 }
 
 fn paint_page(ui: &egui::Ui, view: &mut DocView, page: i32, rect: egui::Rect, scale: f32) {

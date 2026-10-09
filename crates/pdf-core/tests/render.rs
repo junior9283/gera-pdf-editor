@@ -1,6 +1,7 @@
 mod common;
 use common::write_sample;
-use pdf_core::{PdfDoc, PdfError};
+use pdf_core::sample::{dark_near, darkest_pixel as darkest};
+use pdf_core::{PdfDoc, PdfError, Rotation};
 
 fn doc(rotate: i32) -> (tempfile::TempDir, PdfDoc) {
     let dir = tempfile::tempdir().unwrap();
@@ -103,4 +104,44 @@ fn max_render_scale_respects_both_the_side_and_the_pixel_limits() {
         height: 0.0,
     };
     assert!(max_render_scale(&zero).is_finite() && max_render_scale(&zero) > 0.0);
+}
+
+#[test]
+fn view_rotation_swaps_dimensions_and_moves_content_clockwise() {
+    let (_d, doc) = doc(0);
+    let r0 = doc.render_rotated(0, 0.5, false, Rotation::R0).unwrap();
+    assert_eq!(
+        r0,
+        doc.render(0, 0.5, false).unwrap(),
+        "R0 é o render de sempre"
+    );
+    let r90 = doc.render_rotated(0, 0.5, false, Rotation::R90).unwrap();
+    let r180 = doc.render_rotated(0, 0.5, false, Rotation::R180).unwrap();
+    let r270 = doc.render_rotated(0, 0.5, false, Rotation::R270).unwrap();
+    assert_eq!((r0.width, r0.height), (306, 396));
+    assert_eq!((r90.width, r90.height), (396, 306));
+    assert_eq!((r180.width, r180.height), (306, 396));
+    assert_eq!((r270.width, r270.height), (396, 306));
+    let (x, y) = darkest(&r0);
+    let (w, h) = (306usize, 396usize);
+    assert!(
+        dark_near(&r90, h - 1 - y, x),
+        "90° horário: (x, y) -> (h-y, x)"
+    );
+    assert!(
+        dark_near(&r180, w - 1 - x, h - 1 - y),
+        "180°: (x, y) -> (w-x, h-y)"
+    );
+    assert!(dark_near(&r270, y, w - 1 - x), "270°: (x, y) -> (y, w-x)");
+}
+
+#[test]
+fn rotation_steps_and_degrees() {
+    assert_eq!(Rotation::default(), Rotation::R0);
+    assert_eq!(Rotation::R0.cw(), Rotation::R90);
+    assert_eq!(Rotation::R270.cw(), Rotation::R0);
+    assert_eq!(Rotation::R0.ccw(), Rotation::R270);
+    assert_eq!(Rotation::R180.degrees(), 180);
+    assert!(Rotation::R90.is_sideways() && Rotation::R270.is_sideways());
+    assert!(!Rotation::R0.is_sideways() && !Rotation::R180.is_sideways());
 }

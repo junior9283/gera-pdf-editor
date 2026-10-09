@@ -1,5 +1,5 @@
 use crate::error::PdfError;
-use crate::types::{AnnotInfo, DocSummary, NewAnnot, PdfRect, RenderedPage, Word};
+use crate::types::{AnnotInfo, DocSummary, NewAnnot, PdfRect, RenderedPage, Rotation, Word};
 use crate::PdfDoc;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,6 +31,7 @@ pub enum Request {
         page: i32,
         scale: f32,
         invert: bool,
+        rotation: Rotation,
         cancel: CancelToken,
     },
     Search {
@@ -57,6 +58,7 @@ pub enum Response {
         page: i32,
         scale: f32,
         invert: bool,
+        rotation: Rotation,
         image: RenderedPage,
     },
     RenderFailed {
@@ -140,16 +142,18 @@ impl State {
                 page,
                 scale,
                 invert,
+                rotation,
                 cancel,
             } => {
                 let Some(d) = self.doc.as_ref().filter(|_| !cancel.is_cancelled()) else {
                     return;
                 };
-                match d.render(page, scale, invert) {
+                match d.render_rotated(page, scale, invert, rotation) {
                     Ok(image) => send(Response::Rendered {
                         page,
                         scale,
                         invert,
+                        rotation,
                         image,
                     }),
                     Err(e) => send(Response::RenderFailed {

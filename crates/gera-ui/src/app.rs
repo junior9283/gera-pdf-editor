@@ -1,389 +1,524 @@
 use crate::bench::Bench;
-use crate::canvas::{self, CanvasFrame};
-use crate::edit::{screen_rect, EditState};
-use crate::search::SearchState;
-use crate::sidebar::{self, SidebarAction, SidebarTab};
-use crate::view::DocView;
-use app_state::nav::{nav_target, NavKey};
-use app_state::tools::Tool;
-use app_state::zoom;
-use pdf_core::{AnnotInfo, DocSummary, OutlineItem, PdfError, Request, Response, Worker};
-use std::path::PathBuf;
-use std::sync::mpsc::TryRecvError;
+use crate::doc_tab::{DocEvent, DocTab};
+use crate::open_dialog::{FileDialogs, Picked};
+use crate::shell::close;
+use crate::shell::commands::{self, Command};
+use crate::shell::home::{self, HomeAction};
+use crate::shell::menus::{self, MenuState};
+use crate::shell::tabs::{self as tab_bar, TabAction, TabLabel};
+use crate::shell::{help, panels, toolbar, tools_hub};
+use app_state::close::{plan_close, CloseFlow, Step};
+use app_state::prefs::{Prefs, MAX_PANEL, MIN_PANEL};
+use app_state::recents::{now_secs, RecentFiles};
+use app_state::store::{self, BackgroundSaver};
+use app_state::tabs::{canonical, tab_title, TabList, FIXED, HOME, TOOLS};
+use app_state::tools_catalog;
+use std::path::{Path, PathBuf};
 
-/// Texturas novas por quadro (cada uma custa conversão e envio à GPU na thread da UI).
-const MAX_RENDERS_PER_FRAME: usize = 2;
+const RECENTS_FILE: &str = "recentes.json";
+const PREFS_FILE: &str = "preferencias.json";
 
 pub struct GeraApp {
-    pub(crate) worker: Worker,
-    pub(crate) view: Option<DocView>,
-    pub(crate) status: String,
-    /// Último quadro do canvas (rolagem e página atual).
-    pub(crate) last: CanvasFrame,
-    pub(crate) jump_to: Option<f32>,
-    pub(crate) search: SearchState,
-    pub(crate) edit: EditState,
-    /// Anotações já gravadas no PDF aberto.
-    pub(crate) saved_annots: Vec<AnnotInfo>,
-    /// Janela "descartar alterações?" aberta (o usuário tentou fechar com anotações pendentes).
-    confirm_close: bool,
-    /// O motor de PDF (thread do worker) parou; já avisado.
-    engine_stopped: bool,
-    tab: SidebarTab,
-    outline: Vec<OutlineItem>,
-    /// Caminho que está sendo aberto (para pedir a senha de um PDF protegido).
-    opening: Option<PathBuf>,
-    /// Pedido de senha: (caminho, senha digitada).
-    password_prompt: Option<(PathBuf, String)>,
-    /// Modo de medição (`--bench-open` / `--bench-scroll`).
+    tabs: TabList,
+    /// Um por aba de documento, na mesma ordem de `tabs.docs()`.
+    docs: Vec<DocTab>,
+    dialogs: FileDialogs,
+    recents: RecentFiles,
+    /// Recentes que ainda existem no disco (atualizado ao entrar no Início, não a cada quadro).
+    recent_exists: Vec<bool>,
+    prefs: Prefs,
+    saver: BackgroundSaver,
+    /// Mensagem da casca (falhas do seletor ou de abertura), mostrada no Início.
+    status: String,
+    closing: Option<CloseFlow>,
+    /// Saída já confirmada: não interceptar o fechamento da janela de novo.
+    allow_close: bool,
+    /// Preferências mudaram e ainda não foram gravadas.
+    prefs_dirty: bool,
+    /// Recentes mudaram e ainda não foram gravados.
+    recents_dirty: bool,
+    fullscreen: bool,
+    /// Ligar a linha Comentar no próximo documento aberto pelo seletor.
+    comment_after_open: bool,
+    /// Último documento que esteve na frente (para o hub voltar a ele).
+    last_doc: Option<PathBuf>,
+    show_shortcuts: bool,
+    show_about: bool,
     bench: Option<Bench>,
 }
 
 impl GeraApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
-        path: Option<PathBuf>,
+        paths: Vec<PathBuf>,
         bench: Option<Bench>,
     ) -> Self {
-        let ctx = cc.egui_ctx.clone();
-        let worker = Worker::spawn(move || ctx.request_repaint());
+        let prefs = store::config_file(PREFS_FILE).map_or_else(Prefs::default, |p| Prefs::load(&p));
+        cc.egui_ctx.set_visuals(visuals(prefs.dark));
         let mut app = Self {
-            worker,
-            view: None,
-            status: "Arraste um PDF para cá ou execute: gera-pdf-editor arquivo.pdf".into(),
-            last: CanvasFrame::default(),
-            jump_to: None,
-            search: SearchState::default(),
-            edit: EditState::default(),
-            saved_annots: Vec::new(),
-            confirm_close: false,
-            engine_stopped: false,
-            tab: SidebarTab::default(),
-            outline: Vec::new(),
-            opening: None,
-            password_prompt: None,
+            tabs: TabList::default(),
+            docs: Vec::new(),
+            dialogs: FileDialogs::default(),
+            recents: store::config_file(RECENTS_FILE)
+                .map(|p| RecentFiles::load(&p))
+                .unwrap_or_default(),
+            recent_exists: Vec::new(),
+            prefs,
+            saver: BackgroundSaver::default(),
+            status: String::new(),
+            closing: None,
+            allow_close: false,
+            prefs_dirty: false,
+            recents_dirty: false,
+            fullscreen: false,
+            comment_after_open: false,
+            last_doc: None,
+            show_shortcuts: false,
+            show_about: false,
             bench,
         };
-        if let Some(path) = path {
-            app.open(path);
+        app.refresh_recent_exists();
+        for path in paths {
+            app.open_path(&cc.egui_ctx, path);
         }
         app
     }
 
-    pub(crate) fn open(&mut self, path: PathBuf) {
-        self.open_with(path, None);
+    pub(crate) fn open_path(&mut self, ctx: &egui::Context, path: PathBuf) {
+        let path = canonical(&path);
+        let mut created = false;
+        self.switch_tab(|tabs| created = tabs.open(path.clone()).1);
+        if created {
+            let mut doc = DocTab::new(ctx, path.clone(), self.prefs.dark);
+            doc.open(path);
+            self.docs.push(doc);
+        }
     }
 
-    fn open_with(&mut self, path: PathBuf, password: Option<String>) {
-        self.status = format!("Abrindo {}…", path.display());
-        self.opening = Some(path.clone());
-        self.worker.send(Request::Open { path, password });
+    /// Único ponto de troca da aba da frente: suspende a que saiu (libera texturas) e lembra o
+    /// último documento visto (para o hub voltar a ele).
+    fn switch_tab(&mut self, change: impl FnOnce(&mut TabList)) {
+        let old = self.tabs.active();
+        change(&mut self.tabs);
+        let new = self.tabs.active();
+        if old == new {
+            return;
+        }
+        self.status.clear(); // a mensagem era sobre a aba anterior
+        if let Some(doc) = self.doc_at(old) {
+            doc.suspend();
+        }
+        if let Some(p) = self.tabs.doc_path(new) {
+            self.last_doc = Some(p.to_path_buf());
+        } else if new == HOME {
+            self.refresh_recent_exists();
+        }
     }
 
-    fn on_opened(&mut self, summary: DocSummary) {
-        self.saved_annots = summary.annots;
-        self.outline = summary.outline;
-        self.password_prompt = None;
-        self.edit.reset();
-        self.status = format!(
-            "{} — {} páginas",
-            summary.path.display(),
-            summary.sizes.len()
-        );
-        let dark = self.view.as_ref().is_some_and(|v| v.dark); // o tema escuro vale para a sessão
-        let mut view = DocView::new(summary.path, summary.sizes);
-        view.dark = dark;
-        self.view = Some(view);
-        self.search.text.clear(); // descarta a busca (e os destaques) do documento anterior
-        self.search.start(&self.worker);
-        self.last = CanvasFrame::default();
-        self.jump_to = Some(0.0);
+    fn activate(&mut self, tab: usize) {
+        self.switch_tab(|tabs| tabs.activate(tab));
     }
 
+    fn active_path(&self) -> Option<PathBuf> {
+        self.tabs
+            .doc_path(self.tabs.active())
+            .map(Path::to_path_buf)
+    }
+
+    fn refresh_recent_exists(&mut self) {
+        self.recent_exists = self
+            .recents
+            .items()
+            .iter()
+            .map(|r| r.path.exists())
+            .collect();
+    }
+
+    fn doc_at(&mut self, tab: usize) -> Option<&mut DocTab> {
+        let i = self.tabs.doc_index(tab)?;
+        self.docs.get_mut(i)
+    }
+
+    fn active_doc(&mut self) -> Option<&mut DocTab> {
+        self.doc_at(self.tabs.active())
+    }
+
+    fn close_tab(&mut self, tab: usize) {
+        if let Some(i) = self.tabs.close(tab) {
+            self.docs.remove(i); // o Worker cai junto e a thread termina
+        }
+    }
+
+    /// Fecha as abas de `paths`, perguntando antes pelas que têm alterações pendentes.
+    fn request_close(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>, quit: bool) {
+        let targets = paths
+            .into_iter()
+            .filter_map(|p| {
+                let confirm = self
+                    .tabs
+                    .find(&p)
+                    .and_then(|t| self.doc_at(t))?
+                    .needs_confirm();
+                Some((p, confirm))
+            })
+            .collect();
+        let (close_now, flow) = plan_close(targets, quit);
+        for path in close_now {
+            if let Some(t) = self.tabs.find(&path) {
+                self.close_tab(t);
+            }
+        }
+        self.closing = flow;
+        if quit && self.closing.is_none() {
+            self.allow_close = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    fn remember(&mut self, path: PathBuf) {
+        self.recents.add(path, now_secs());
+        self.recents_changed();
+    }
+
+    fn forget(&mut self, path: &Path) {
+        self.recents.remove(path);
+        self.recents_changed();
+    }
+
+    fn recents_changed(&mut self) {
+        self.recents_dirty = true;
+        self.refresh_recent_exists();
+    }
+
+    /// Respostas dos workers e do seletor de arquivos.
     fn poll(&mut self, ctx: &egui::Context) {
-        let mut renders = 0;
-        loop {
-            let response = match self.worker.rx.try_recv() {
-                Ok(response) => response,
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    if !self.engine_stopped {
-                        self.engine_stopped = true;
-                        self.edit.saving = false;
-                        self.status =
-                            "O motor de PDF parou. Salve o que for possível e reabra o aplicativo."
-                                .into();
-                    }
-                    break;
-                }
+        let active = self.tabs.active();
+        for tab in (FIXED..self.tabs.len()).rev() {
+            let Some(i) = self.tabs.doc_index(tab) else {
+                continue;
             };
-            match response {
-                Response::Opened(summary) => self.on_opened(summary),
-                Response::OpenFailed(
-                    e @ (PdfError::PasswordRequired | PdfError::WrongPassword),
-                ) => {
-                    self.status = e.to_string();
-                    self.password_prompt = self.opening.clone().map(|p| (p, String::new()));
-                }
-                Response::OpenFailed(e) => self.status = format!("Erro: {e}"),
-                Response::Rendered {
-                    page,
-                    scale,
-                    invert,
-                    image,
-                } => {
-                    let mut is_page = false;
-                    if let Some(view) = self.view.as_mut() {
-                        view.on_rendered(ctx, page, scale, invert, image);
-                        is_page = view.is_page_scale(page as usize, scale);
+            let bench = if tab == active {
+                self.bench.as_mut()
+            } else {
+                None
+            };
+            self.docs[i].poll(ctx, bench);
+            for event in self.docs[i].take_events() {
+                match event {
+                    DocEvent::Opened => self.remember(self.docs[i].path.clone()),
+                    DocEvent::Renamed(dest) => {
+                        let dest = canonical(&dest);
+                        self.tabs.rename(tab, dest.clone());
+                        self.docs[i].path = dest.clone();
+                        self.remember(dest);
                     }
-                    if is_page {
-                        // só a página do canvas conta, não as miniaturas
-                        if let Some(bench) = self.bench.as_mut() {
-                            bench.on_first_page(ctx);
-                        }
-                    }
-                    renders += 1;
-                    if renders >= MAX_RENDERS_PER_FRAME {
-                        ctx.request_repaint(); // o resto das respostas fica para o próximo quadro
+                    DocEvent::Failed(msg) => {
+                        self.status = msg;
+                        self.close_tab(tab);
                         break;
                     }
                 }
-                Response::RenderFailed { page, error } => {
-                    self.status = format!("Página {}: {error}", page + 1)
-                }
-                Response::SearchHits { id, page, rects } => {
-                    let had_hits = self.search.current().is_some();
-                    self.search.on_hits(id, page, rects);
-                    // rola até o primeiro resultado (resultados de busca antiga não mudam `current`)
-                    let first = self.search.current().filter(|_| !had_hits);
-                    if let Some(y) =
-                        first.and_then(|(p, r)| self.view.as_ref()?.scroll_target(p, r.y0))
-                    {
-                        self.jump_to = Some(y);
+            }
+        }
+        if let Some(picked) = self.dialogs.poll() {
+            match picked {
+                Picked::Open(files) => {
+                    for f in files {
+                        self.open_path(ctx, f);
+                    }
+                    if std::mem::take(&mut self.comment_after_open) {
+                        if let Some(doc) = self.active_doc() {
+                            doc.comment_tools = true;
+                        }
                     }
                 }
-                Response::SearchDone { id } => self.search.on_done(id),
-                Response::Words { tag, page, words } => self.edit.on_words(ctx, tag, page, words),
-                Response::Saved { annots } => {
-                    self.edit.reset();
-                    self.saved_annots = annots;
-                    if let Some(view) = self.view.as_mut() {
-                        view.clear_cache(); // as páginas precisam ser renderizadas de novo, agora com as anotações
-                    }
-                    self.status = "Salvo.".into();
-                }
-                Response::SaveFailed(msg) => {
-                    self.edit.saving = false;
-                    self.status = format!("Não foi possível salvar: {msg}");
+                Picked::SaveAs { doc, dest } => self.save_as(doc, dest),
+                Picked::Cancelled => self.comment_after_open = false,
+                Picked::Failed => {
+                    self.comment_after_open = false;
+                    self.status = "Não foi possível abrir o seletor de arquivos.".into();
                 }
             }
+        }
+    }
+
+    fn save_as(&mut self, doc: PathBuf, dest: PathBuf) {
+        let dest_id = canonical(&dest);
+        let current = self.tabs.find(&doc);
+        if self.tabs.find(&dest_id).is_some_and(|t| Some(t) != current) {
+            self.status = "Esse arquivo já está aberto em outra aba.".into();
+            return;
+        }
+        if let Some(d) = current.and_then(|t| self.doc_at(t)) {
+            d.save_as(dest);
         }
     }
 
     fn handle_drops(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         for file in dropped.iter().map(|f| f.path().to_path_buf()) {
-            if self.view.is_none() {
-                self.open(file);
-            } else if let Ok(exe) = std::env::current_exe() {
-                let _ = std::process::Command::new(exe).arg(file).spawn(); // uma janela por documento
-            }
+            self.open_path(ctx, file);
         }
     }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let Some(view) = self.view.as_mut() else {
-                return;
-            };
-            for tool in Tool::ALL {
-                ui.selectable_value(&mut self.edit.tool, tool, tool.label());
-            }
-            ui.separator();
-            let can_edit = !self.edit.saving;
-            if ui
-                .add_enabled(
-                    can_edit && self.edit.pending.is_dirty(),
-                    egui::Button::new("↶"),
-                )
-                .clicked()
-            {
-                self.edit.undo();
-            }
-            if ui.add_enabled(can_edit, egui::Button::new("↷")).clicked() {
-                self.edit.redo();
-            }
-            let save_label = if self.edit.pending.is_dirty() {
-                "Salvar •"
-            } else {
-                "Salvar"
-            };
-            if ui
-                .add_enabled(!self.edit.saving, egui::Button::new(save_label))
-                .clicked()
-            {
-                self.edit.save(&self.worker, view.path.clone());
-            }
-            ui.separator();
-            if ui
-                .button(if view.dark { "Claro" } else { "Escuro" })
-                .clicked()
-            {
-                view.dark = !view.dark;
-                view.clear_cache();
-                ui.ctx().set_visuals(if view.dark {
-                    egui::Visuals::dark()
+    fn run(&mut self, ctx: &egui::Context, cmd: Command) {
+        match cmd {
+            Command::Open => self.dialogs.open(ctx),
+            Command::OpenRecent(path) => {
+                if path.exists() {
+                    self.open_path(ctx, path);
                 } else {
-                    egui::Visuals::light()
-                });
-            }
-            let mut new_zoom = None;
-            if ui.button("−").clicked() {
-                new_zoom = Some(zoom::zoom_out(view.zoom));
-            }
-            ui.label(format!("{:.0}%", view.zoom * 100.0));
-            if ui.button("+").clicked() {
-                new_zoom = Some(zoom::zoom_in(view.zoom));
-            }
-            if ui.button("Largura").clicked() {
-                view.fit_pending = true;
-            }
-            if let Some(z) = new_zoom {
-                let ratio = view.set_zoom(z);
-                self.jump_to = Some(self.last.scroll_y * ratio);
-            }
-            ui.separator();
-            let count = view.layout.page_count().max(1);
-            let mut page = self.last.current_page + 1;
-            let go = ui.add(egui::DragValue::new(&mut page).range(1..=count).speed(0.2));
-            ui.label(format!("/ {count}"));
-            if go.changed() {
-                if let Some(y) = view.scroll_target(page as i32 - 1, 0.0) {
-                    self.jump_to = Some(y);
+                    self.status = format!("{} não existe mais.", path.display());
                 }
             }
-            ui.separator();
-            let edit = ui.add(
-                egui::TextEdit::singleline(&mut self.search.text)
-                    .hint_text("Buscar…")
-                    .desired_width(160.0),
-            );
-            if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
-                edit.request_focus();
-            }
-            if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                self.search.start(&self.worker);
-                edit.request_focus();
-            }
-            ui.label(self.search.summary());
-            let prev = ui.button("▲").clicked();
-            let next = ui.button("▼").clicked();
-            if prev || next {
-                let target = self.search.step(next);
-                if let Some(y) = target.and_then(|(page, rect)| view.scroll_target(page, rect.y0)) {
-                    self.jump_to = Some(y);
+            Command::SaveAs => {
+                if let Some(path) = self.active_path() {
+                    self.dialogs.save_as(ctx, path);
                 }
             }
+            Command::CloseTab => {
+                if let Some(path) = self.active_path() {
+                    self.request_close(ctx, vec![path], false);
+                }
+            }
+            Command::CloseAll => {
+                let all = self.tabs.docs().to_vec();
+                self.request_close(ctx, all, false);
+            }
+            Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Command::Doc(c) => {
+                if let Some(doc) = self.active_doc() {
+                    doc.run(c);
+                }
+            }
+            Command::ToggleDark => self.set_dark(ctx, !self.prefs.dark),
+            Command::TogglePanel(p) => {
+                self.prefs.toggle_left(p);
+                self.prefs_dirty = true;
+            }
+            Command::ToggleTools => {
+                self.prefs.tools_panel = !self.prefs.tools_panel;
+                self.prefs_dirty = true;
+            }
+            Command::FullScreen => {
+                self.fullscreen = !self.fullscreen;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+            }
+            Command::NextTab => self.switch_tab(TabList::next),
+            Command::PrevTab => self.switch_tab(TabList::prev),
+            Command::ActivateTab(t) => self.activate(t),
+            Command::Shortcuts => self.show_shortcuts = true,
+            Command::About => self.show_about = true,
+        }
+    }
+
+    fn set_dark(&mut self, ctx: &egui::Context, dark: bool) {
+        self.prefs.dark = dark;
+        ctx.set_visuals(visuals(dark));
+        for doc in &mut self.docs {
+            doc.set_dark(dark);
+        }
+        self.prefs_dirty = true;
+    }
+
+    /// Grava preferências e recentes em segundo plano, quando o usuário solta o mouse (não a cada
+    /// pixel de um arrasto de painel).
+    fn persist_when_idle(&mut self, ctx: &egui::Context) {
+        if let Some(e) = self.saver.take_error() {
+            self.status = e;
+        }
+        if !ctx.input(|i| i.pointer.any_down()) {
+            self.persist();
+        }
+    }
+
+    /// Enfileira a gravação do que mudou.
+    fn persist(&mut self) {
+        if std::mem::take(&mut self.prefs_dirty) {
+            if let Some(file) = store::config_file(PREFS_FILE) {
+                self.saver.save(file, &self.prefs);
+            }
+        }
+        if std::mem::take(&mut self.recents_dirty) {
+            if let Some(file) = store::config_file(RECENTS_FILE) {
+                self.saver.save(file, &self.recents);
+            }
+        }
+    }
+
+    /// Barras, trilho, painéis laterais e páginas do documento ativo (fora da tela cheia).
+    fn document_view(&mut self, ui: &mut egui::Ui) {
+        let Some(i) = self.tabs.doc_index(self.tabs.active()) else {
+            return;
+        };
+        let mut prefs = self.prefs.clone();
+        let doc = &mut self.docs[i];
+        doc.begin();
+        let mut cmd = egui::Panel::top("ferramentas-doc")
+            .show(ui, |ui| toolbar::show(ui, doc))
+            .inner;
+        if doc.comment_tools {
+            cmd = egui::Panel::top("comentar")
+                .show(ui, |ui| toolbar::comment_row(ui, doc))
+                .inner
+                .or(cmd);
+        }
+        doc.show_status(ui, &self.status);
+        let clicked = egui::Panel::left("trilho")
+            .exact_size(40.0)
+            .resizable(false)
+            .show(ui, |ui| panels::rail(ui, prefs.left_panel))
+            .inner;
+        if let Some(p) = clicked {
+            prefs.toggle_left(p);
+        }
+        if let Some(p) = prefs.left_panel {
+            let r = egui::Panel::left("painel-esquerdo")
+                .resizable(true)
+                .default_size(prefs.left_width)
+                .size_range(MIN_PANEL..=MAX_PANEL)
+                .show(ui, |ui| doc.side_panel(ui, p));
+            prefs.left_width = r.response.rect.width();
+        }
+        let tool_id = prefs.tools_panel.then(|| {
+            let r = egui::Panel::right("painel-ferramentas")
+                .resizable(true)
+                .default_size(prefs.tools_width)
+                .size_range(MIN_PANEL..=MAX_PANEL)
+                .show(ui, tools_hub::side_list);
+            prefs.tools_width = r.response.rect.width();
+            r.inner
         });
+        doc.show_canvas(ui);
+        let width_changed = |a: f32, b: f32| (a - b).abs() > 0.5;
+        if prefs.left_panel != self.prefs.left_panel
+            || width_changed(prefs.left_width, self.prefs.left_width)
+            || width_changed(prefs.tools_width, self.prefs.tools_width)
+        {
+            self.prefs = prefs;
+            self.prefs_dirty = true;
+        }
+        if let Some(id) = tool_id.flatten() {
+            self.run_tool(ui.ctx(), id);
+        }
+        if let Some(cmd) = cmd {
+            self.run(ui.ctx(), cmd);
+        }
     }
 
-    /// Painel lateral (miniaturas, índice, anotações); clicar leva à página.
-    fn sidebar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::left("sidebar")
-            .default_size(150.0)
-            .show(ui, |ui| {
-                let Some(view) = self.view.as_mut() else {
-                    return;
-                };
-                let action = sidebar::show(
-                    ui,
-                    &mut self.tab,
-                    view,
-                    &self.worker,
-                    &self.outline,
-                    &self.saved_annots,
-                    self.edit.pending.items(),
-                );
-                if let SidebarAction::JumpToPage(page) = action {
-                    if let Some(y) = view.scroll_target(page as i32, 0.0) {
-                        self.jump_to = Some(y);
-                    }
+    fn menu_state(&self) -> MenuState<'_> {
+        let view = self
+            .tabs
+            .doc_index(self.tabs.active())
+            .and_then(|i| self.docs[i].view.as_ref());
+        MenuState {
+            doc_mode: view.map(|v| v.mode),
+            doc_cover: view.is_some_and(|v| v.cover),
+            dark: self.prefs.dark,
+            left: self.prefs.left_panel,
+            tools_panel: self.prefs.tools_panel,
+            recents: &self.recents,
+            tabs: [
+                (HOME, "Início".to_string()),
+                (TOOLS, "Ferramentas".to_string()),
+            ]
+            .into_iter()
+            .chain(
+                self.docs
+                    .iter()
+                    .enumerate()
+                    .map(|(n, d)| (FIXED + n, d.title())),
+            )
+            .collect(),
+            active: self.tabs.active(),
+        }
+    }
+
+    /// Avança o fechamento em andamento: pergunta, espera o salvamento ou fecha.
+    fn drive_close(&mut self, ui: &mut egui::Ui) {
+        let Some(flow) = self.closing.as_ref() else {
+            return;
+        };
+        if flow.is_done() {
+            let quit = flow.quit();
+            self.closing = None;
+            if quit {
+                self.allow_close = true;
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            return;
+        }
+        let Some(path) = flow.current().cloned() else {
+            return;
+        };
+        let saving = flow.is_saving();
+        let tab = self.tabs.find(&path);
+        let step = if saving {
+            let ok = match tab.and_then(|t| self.doc_at(t)) {
+                Some(doc) if doc.edit.saving => return, // esperando o worker
+                Some(doc) => !doc.is_dirty(),
+                None => true,
+            };
+            self.closing.as_mut().map(|f| f.saved(ok))
+        } else {
+            if let Some(t) = tab.filter(|&t| t != self.tabs.active()) {
+                self.activate(t); // mostra o documento sobre o qual se pergunta
+            }
+            match close::ask(ui, &tab_title(&path, 60)) {
+                Some(answer) => self.closing.as_mut().map(|f| f.answer(answer)),
+                None => return,
+            }
+        };
+        match step {
+            Some(Step::Save(p)) => {
+                if let Some(doc) = self.tabs.find(&p).and_then(|t| self.doc_at(t)) {
+                    doc.save();
                 }
-            });
-    }
-
-    /// Pedido de senha para abrir um PDF protegido (a senha não é registrada em lugar nenhum).
-    fn password_window(&mut self, ui: &mut egui::Ui) {
-        let Some((path, mut password)) = self.password_prompt.take() else {
-            return;
-        };
-        let (mut submit, mut cancel) = (false, false);
-        egui::Window::new("PDF protegido por senha")
-            .collapsible(false)
-            .show(ui, |ui| {
-                ui.label(&self.status); // "protegido por senha" ou "senha incorreta"
-                let edit = ui.add(egui::TextEdit::singleline(&mut password).password(true));
-                submit = ui.button("Abrir").clicked()
-                    || (edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-                cancel = ui.button("Cancelar").clicked();
-            });
-        if submit {
-            self.open_with(path, Some(password));
-        } else if !cancel {
-            self.password_prompt = Some((path, password));
+            }
+            Some(Step::Close(p)) => {
+                if let Some(t) = self.tabs.find(&p) {
+                    self.close_tab(t);
+                }
+            }
+            Some(Step::Abort) | None => self.closing = None,
         }
     }
 
-    /// Confirmação de saída com anotações não salvas.
-    fn confirm_close_window(&mut self, ui: &mut egui::Ui) {
-        if !self.confirm_close {
-            return;
-        }
-        let ctx = ui.ctx().clone();
-        egui::Window::new("Alterações não salvas")
-            .collapsible(false)
-            .show(ui, |ui| {
-                ui.label(format!(
-                    "Há {} anotação(ões) que ainda não foram salvas no PDF.",
-                    self.edit.pending.items().len()
-                ));
-                ui.horizontal(|ui| {
-                    if ui.button("Sair sem salvar").clicked() {
-                        self.edit.reset(); // sem pendentes, o fechamento não pede confirmação de novo
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                    if ui.button("Voltar").clicked() {
-                        self.confirm_close = false;
-                    }
-                });
-            });
+    fn tab_labels(&self) -> Vec<TabLabel> {
+        self.docs
+            .iter()
+            .map(|d| TabLabel {
+                title: d.title(),
+                tooltip: d.path.display().to_string(),
+                dirty: d.is_dirty(),
+            })
+            .collect()
     }
 
-    fn canvas(&mut self, ui: &mut egui::Ui) {
-        let Some(view) = self.view.as_mut() else {
-            ui.centered_and_justified(|ui| {
-                ui.label(&self.status);
-            });
+    /// Cartão ou item de ferramenta clicado. Só "Comentar" existe nesta fase.
+    fn run_tool(&mut self, ctx: &egui::Context, id: &str) {
+        if id != tools_catalog::COMMENT {
             return;
-        };
-        if view.fit_pending {
-            let ratio = view.fit_width(ui.available_width() - 24.0);
-            view.fit_pending = false;
-            self.jump_to = Some(self.last.scroll_y * ratio);
         }
-        let zoom = view.zoom;
-        let (worker, edit, search) = (&self.worker, &mut self.edit, &self.search);
-        self.last = canvas::show_pages(
-            ui,
-            view,
-            worker,
-            self.jump_to.take(),
-            &mut |ui, page, page_rect| {
-                paint_search_hits(ui, search, page as i32, page_rect, zoom);
-                edit.on_page(ui, worker, page as i32, page_rect, zoom);
-            },
-        );
+        match self.last_doc.clone().and_then(|p| self.tabs.find(&p)) {
+            Some(tab) => {
+                self.activate(tab);
+                if let Some(doc) = self.active_doc() {
+                    doc.comment_tools = true;
+                }
+            }
+            None => {
+                self.comment_after_open = true;
+                self.dialogs.open(ctx);
+            }
+        }
+    }
+}
+
+impl Drop for GeraApp {
+    /// O app fechando: grava o que ainda estava pendente (o `saver` espera terminar).
+    fn drop(&mut self) {
+        self.persist();
     }
 }
 
@@ -391,103 +526,104 @@ impl eframe::App for GeraApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
         self.handle_drops(ctx);
-        if let (Some(bench), Some(view)) = (self.bench.as_mut(), self.view.as_mut()) {
-            if let Some(y) = bench.scroll_step(ctx, view) {
-                self.jump_to = Some(y);
+        if let Some(i) = self.tabs.doc_index(self.tabs.active()) {
+            let doc = &mut self.docs[i];
+            if let (Some(bench), Some(view)) = (self.bench.as_mut(), doc.view.as_mut()) {
+                if let Some(y) = bench.scroll_step(ctx, view) {
+                    doc.jump_to = Some(y);
+                }
             }
         }
-        // Fechar com anotações pendentes pede confirmação, em vez de perdê-las em silêncio.
-        if ctx.input(|i| i.viewport().close_requested()) && self.edit.pending.is_dirty() {
+        // Fechar a janela com alterações pendentes (em qualquer aba) pergunta antes.
+        if ctx.input(|i| i.viewport().close_requested())
+            && !self.allow_close
+            && self.docs.iter().any(DocTab::needs_confirm)
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.confirm_close = true;
-        }
-        // Ctrl+Z/Ctrl+Shift+Z desfazem/refazem anotações, a menos que o usuário esteja digitando
-        // (campo de busca, nota, senha): nesse caso o atalho é do campo de texto.
-        // Refazer vem antes de desfazer, para um atalho não consumir o outro.
-        let typing = ctx.egui_wants_keyboard_input();
-        if !typing {
-            let nav = [
-                (NavKey::PageUp, egui::Key::PageUp),
-                (NavKey::PageDown, egui::Key::PageDown),
-                (NavKey::Home, egui::Key::Home),
-                (NavKey::End, egui::Key::End),
-            ];
-            let pressed = ctx.input_mut(|i| {
-                nav.into_iter()
-                    .find(|&(_, k)| i.consume_key(egui::Modifiers::NONE, k))
-            });
-            if let (Some((key, _)), Some(view)) = (pressed, self.view.as_ref()) {
-                let (scroll, height) = (self.last.scroll_y, self.last.viewport_h);
-                self.jump_to = Some(nav_target(key, scroll, height, view.layout.total_height()));
+            if self.closing.is_none() {
+                let all = self.tabs.docs().to_vec();
+                self.request_close(ctx, all, true);
             }
         }
-        let zoom_delta = ctx.input(|i| i.zoom_delta()); // Ctrl+roda e gesto de pinça
-        if let (true, Some(view)) = ((zoom_delta - 1.0).abs() > f32::EPSILON, self.view.as_mut()) {
-            let ratio = view.set_zoom(view.zoom * zoom_delta);
-            self.jump_to = Some(self.last.scroll_y * ratio);
-        }
-        let (redo, undo, save) = ctx.input_mut(|i| {
-            (
-                !typing
-                    && i.consume_key(
-                        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                        egui::Key::Z,
-                    ),
-                !typing && i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z),
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::S),
-            )
-        });
-        if redo {
-            self.edit.redo();
-        } else if undo {
-            self.edit.undo();
-        }
-        if let (true, Some(view)) = (save, self.view.as_ref()) {
-            self.edit.save(&self.worker, view.path.clone());
+        self.persist_when_idle(ctx);
+        if self.closing.is_none() {
+            for cmd in commands::from_keyboard(ctx) {
+                self.run(ctx, cmd);
+            }
+            if self.fullscreen
+                && !ctx.egui_wants_keyboard_input()
+                && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+            {
+                self.run(ctx, Command::FullScreen);
+            }
+            if let Some(doc) = self.active_doc() {
+                doc.handle_input(ctx);
+            }
         }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if let Some(view) = self.view.as_mut() {
-            view.begin_frame();
+        if !self.fullscreen {
+            let state = self.menu_state();
+            let picked = egui::Panel::top("menus")
+                .show(ui, |ui| menus::menu_bar(ui, &state))
+                .inner;
+            if let Some(cmd) = picked {
+                self.run(ui.ctx(), cmd);
+            }
+            let labels = self.tab_labels();
+            let action = egui::Panel::top("abas")
+                .show(ui, |ui| tab_bar::show(ui, self.tabs.active(), &labels))
+                .inner;
+            match action {
+                Some(TabAction::Activate(t)) => self.activate(t),
+                Some(TabAction::Close(t)) => {
+                    if let Some(path) = self.tabs.doc_path(t).map(Path::to_path_buf) {
+                        self.request_close(ui.ctx(), vec![path], false);
+                    }
+                }
+                Some(TabAction::New) => self.dialogs.open(ui.ctx()),
+                None => {}
+            }
         }
-        egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
-        egui::Panel::bottom("status").show(ui, |ui| {
-            let unsaved = self.edit.pending.items().len();
-            let text = match unsaved {
-                0 => self.status.clone(),
-                n => format!("{} — {n} alterações não salvas", self.status),
-            };
-            ui.label(text);
-        });
-        if self.view.is_some() {
-            self.sidebar(ui);
+        match self.tabs.active() {
+            HOME => {
+                let action = egui::CentralPanel::default()
+                    .show(ui, |ui| {
+                        home::show(ui, &self.recents, &self.recent_exists, &self.status)
+                    })
+                    .inner;
+                match action {
+                    Some(HomeAction::OpenDialog) => self.dialogs.open(ui.ctx()),
+                    Some(HomeAction::Open(p)) => self.open_path(ui.ctx(), p),
+                    Some(HomeAction::Forget(p)) => self.forget(&p),
+                    None => {}
+                }
+            }
+            TOOLS => {
+                let picked = egui::CentralPanel::default().show(ui, tools_hub::hub).inner;
+                if let Some(id) = picked {
+                    self.run_tool(ui.ctx(), id);
+                }
+            }
+            _ if !self.fullscreen => self.document_view(ui),
+            _ => {
+                if let Some(doc) = self.active_doc() {
+                    doc.begin(); // tela cheia: só as páginas
+                    doc.show_canvas(ui);
+                }
+            }
         }
-        egui::CentralPanel::default().show(ui, |ui| self.canvas(ui));
-        self.edit.note_window(ui);
-        self.confirm_close_window(ui);
-        self.password_window(ui);
-        if let Some(view) = self.view.as_mut() {
-            view.end_frame();
-        }
+        self.drive_close(ui);
+        help::shortcuts_window(ui, &mut self.show_shortcuts);
+        help::about_window(ui, &mut self.show_about);
     }
 }
 
-/// Realça os resultados da busca na página (o atual em laranja).
-fn paint_search_hits(
-    ui: &egui::Ui,
-    search: &SearchState,
-    page: i32,
-    page_rect: egui::Rect,
-    zoom: f32,
-) {
-    for (n, r) in search.hits_on(page) {
-        let color = if n == search.current_index() {
-            egui::Color32::from_rgba_unmultiplied(255, 140, 0, 110)
-        } else {
-            egui::Color32::from_rgba_unmultiplied(255, 230, 0, 90)
-        };
-        ui.painter()
-            .rect_filled(screen_rect(r, page_rect.min, zoom), 2.0, color);
+fn visuals(dark: bool) -> egui::Visuals {
+    if dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
     }
 }

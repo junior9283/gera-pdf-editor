@@ -3,3 +3,6 @@
 !crates/pdf-core/tests/fixtures/*.pdf
 .env
 /dist
+
+# companheiro visual do brainstorming
+.superpowers/

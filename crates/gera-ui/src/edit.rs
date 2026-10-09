@@ -1,3 +1,4 @@
+use app_state::transform::PageMap;
 use app_state::{annots::PendingAnnots, tools::Tool};
 use pdf_core::{NewAnnot, PdfRect, Request, Word, Worker};
 use std::collections::HashMap;
@@ -18,22 +19,10 @@ pub struct EditState {
     note_draft: Option<(i32, (f32, f32), String)>,
 }
 
-/// Posição na tela -> coordenadas da página (pontos), dada a origem da página e o zoom.
-fn page_point(pos: egui::Pos2, origin: egui::Pos2, zoom: f32) -> (f32, f32) {
-    ((pos.x - origin.x) / zoom, (pos.y - origin.y) / zoom)
-}
-
-/// Coordenadas da página (pontos) -> posição na tela.
-fn screen_point(p: (f32, f32), origin: egui::Pos2, zoom: f32) -> egui::Pos2 {
-    egui::pos2(origin.x + p.0 * zoom, origin.y + p.1 * zoom)
-}
-
 /// Retângulo da página (pontos) -> retângulo na tela.
-pub(crate) fn screen_rect(r: &PdfRect, origin: egui::Pos2, zoom: f32) -> egui::Rect {
-    egui::Rect::from_two_pos(
-        screen_point((r.x0, r.y0), origin, zoom),
-        screen_point((r.x1, r.y1), origin, zoom),
-    )
+pub(crate) fn screen_rect(r: &PdfRect, map: &PageMap) -> egui::Rect {
+    let (min, max) = map.rect_to_screen(r);
+    egui::Rect::from_min_max(min.into(), max.into())
 }
 
 /// Anotação de marcação que cobre `words`, se `tool` marca texto.
@@ -54,11 +43,8 @@ fn selection_text(words: &[Word]) -> String {
         .join(" ")
 }
 
-fn paint_stroke(painter: &egui::Painter, points: &[(f32, f32)], origin: egui::Pos2, zoom: f32) {
-    let pts = points
-        .iter()
-        .map(|&p| screen_point(p, origin, zoom))
-        .collect();
+fn paint_stroke(painter: &egui::Painter, points: &[(f32, f32)], map: &PageMap) {
+    let pts = points.iter().map(|&p| map.to_screen(p).into()).collect();
     painter.line(pts, egui::Stroke::new(2.0, egui::Color32::RED));
 }
 
@@ -93,7 +79,7 @@ impl EditState {
         worker: &Worker,
         page: i32,
         rect: egui::Rect,
-        zoom: f32,
+        map: &PageMap,
     ) {
         let response = ui.interact(
             rect,
@@ -102,28 +88,27 @@ impl EditState {
         );
         let pointer = response
             .interact_pointer_pos()
-            .map(|p| page_point(p, rect.min, zoom));
+            .map(|p| map.to_page(p.into()));
         if self.saving {
             // durante o salvamento só mostra as pendentes: gestos novos seriam perdidos
-            self.paint_pending(ui.painter(), page, rect.min, zoom);
+            self.paint_pending(ui.painter(), page, map);
             return;
         }
         match self.tool {
             Tool::Select | Tool::Highlight | Tool::Underline => {
-                self.drag_select(ui, worker, &response, pointer, page, rect, zoom)
+                self.drag_select(ui, worker, &response, pointer, page, map)
             }
             Tool::Note => {
                 if let (true, Some(at)) = (response.clicked(), pointer) {
                     self.note_draft = Some((page, at, String::new()));
                 }
             }
-            Tool::Ink => self.draw_ink(ui, &response, pointer, page, rect, zoom),
+            Tool::Ink => self.draw_ink(ui, &response, pointer, page, map),
         }
-        self.paint_pending(ui.painter(), page, rect.min, zoom);
+        self.paint_pending(ui.painter(), page, map);
     }
 
     /// Arrastar um retângulo: ao soltar, pede ao worker as palavras dentro dele.
-    #[allow(clippy::too_many_arguments)]
     fn drag_select(
         &mut self,
         ui: &egui::Ui,
@@ -131,8 +116,7 @@ impl EditState {
         response: &egui::Response,
         pointer: Option<(f32, f32)>,
         page: i32,
-        rect: egui::Rect,
-        zoom: f32,
+        map: &PageMap,
     ) {
         if response.drag_started() {
             self.drag_start = pointer;
@@ -142,7 +126,7 @@ impl EditState {
         };
         let area = PdfRect::from_corners(start, now);
         ui.painter().rect_stroke(
-            screen_rect(&area, rect.min, zoom),
+            screen_rect(&area, map),
             0.0,
             egui::Stroke::new(1.0, egui::Color32::LIGHT_BLUE),
             egui::StrokeKind::Inside,
@@ -166,8 +150,7 @@ impl EditState {
         response: &egui::Response,
         pointer: Option<(f32, f32)>,
         page: i32,
-        rect: egui::Rect,
-        zoom: f32,
+        map: &PageMap,
     ) {
         if response.drag_started() {
             self.stroke.clear();
@@ -183,17 +166,17 @@ impl EditState {
             });
         }
         if self.stroke.len() > 1 {
-            paint_stroke(ui.painter(), &self.stroke, rect.min, zoom);
+            paint_stroke(ui.painter(), &self.stroke, map);
         }
     }
 
-    fn paint_pending(&self, painter: &egui::Painter, page: i32, origin: egui::Pos2, zoom: f32) {
+    fn paint_pending(&self, painter: &egui::Painter, page: i32, map: &PageMap) {
         for item in self.pending.items().iter().filter(|a| a.page() == page) {
             match item {
                 NewAnnot::Highlight { rects, .. } => {
                     for r in rects {
                         painter.rect_filled(
-                            screen_rect(r, origin, zoom),
+                            screen_rect(r, map),
                             0.0,
                             egui::Color32::from_rgba_unmultiplied(255, 235, 0, 110),
                         );
@@ -201,7 +184,7 @@ impl EditState {
                 }
                 NewAnnot::Underline { rects, .. } => {
                     for r in rects {
-                        let r = screen_rect(r, origin, zoom);
+                        let r = screen_rect(r, map);
                         painter.line_segment(
                             [r.left_bottom(), r.right_bottom()],
                             egui::Stroke::new(1.5, egui::Color32::BLUE),
@@ -210,14 +193,14 @@ impl EditState {
                 }
                 NewAnnot::Note { at, .. } => {
                     let icon = egui::Rect::from_min_size(
-                        screen_point(*at, origin, zoom),
-                        egui::vec2(24.0 * zoom, 24.0 * zoom),
+                        map.to_screen(*at).into(),
+                        egui::vec2(24.0 * map.zoom, 24.0 * map.zoom),
                     );
                     painter.rect_filled(icon, 3.0, egui::Color32::from_rgb(255, 200, 0));
                 }
                 NewAnnot::Ink { strokes, .. } => {
                     for s in strokes {
-                        paint_stroke(painter, s, origin, zoom);
+                        paint_stroke(painter, s, map);
                     }
                 }
             }
@@ -271,7 +254,14 @@ impl EditState {
 
     /// Pede ao worker para gravar as pendentes; ignora se não há nada ou já está salvando.
     pub fn save(&mut self, worker: &Worker, dest: PathBuf) {
-        if self.saving || !self.pending.is_dirty() {
+        if self.pending.is_dirty() {
+            self.save_as(worker, dest);
+        }
+    }
+
+    /// Grava o documento em `dest` com as pendentes (mesmo sem nenhuma: "Salvar como").
+    pub fn save_as(&mut self, worker: &Worker, dest: PathBuf) {
+        if self.saving {
             return;
         }
         self.saving = true;
@@ -294,21 +284,14 @@ mod tests {
     }
 
     #[test]
-    fn screen_and_page_coordinates_round_trip() {
-        let origin = egui::pos2(100.0, 50.0);
-        let screen = egui::pos2(160.0, 110.0);
-        let page = page_point(screen, origin, 2.0);
-        assert_eq!(page, (30.0, 30.0));
-        assert_eq!(screen_point(page, origin, 2.0), screen);
-    }
-
-    #[test]
     fn screen_rect_scales_and_offsets_a_page_rect() {
-        let r = screen_rect(
-            &PdfRect::new(10.0, 20.0, 30.0, 40.0),
-            egui::pos2(100.0, 50.0),
-            2.0,
-        );
+        let map = PageMap {
+            origin: (100.0, 50.0),
+            zoom: 2.0,
+            size: (612.0, 792.0),
+            rotation: pdf_core::Rotation::R0,
+        };
+        let r = screen_rect(&PdfRect::new(10.0, 20.0, 30.0, 40.0), &map);
         assert_eq!(
             (r.min, r.max),
             (egui::pos2(120.0, 90.0), egui::pos2(160.0, 130.0))
