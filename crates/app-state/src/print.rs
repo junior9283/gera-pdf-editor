@@ -6,7 +6,8 @@ pub enum Pages {
     #[default]
     All,
     Current,
-    Ranges(String),
+    /// As páginas de `PrintOptions::ranges`.
+    Ranges,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -51,6 +52,13 @@ impl Subset {
             Self::Even => "Só pares",
         }
     }
+    fn cups(self) -> Option<&'static str> {
+        match self {
+            Self::All => None,
+            Self::Odd => Some("page-set=odd"),
+            Self::Even => Some("page-set=even"),
+        }
+    }
 }
 
 impl Duplex {
@@ -60,6 +68,13 @@ impl Duplex {
             Self::None => "Só frente",
             Self::LongEdge => "Frente e verso (borda longa)",
             Self::ShortEdge => "Frente e verso (borda curta)",
+        }
+    }
+    fn cups(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::LongEdge => Some("sides=two-sided-long-edge"),
+            Self::ShortEdge => Some("sides=two-sided-short-edge"),
         }
     }
 }
@@ -73,6 +88,13 @@ impl Orientation {
             Self::Landscape => "Paisagem",
         }
     }
+    fn cups(self) -> Option<&'static str> {
+        match self {
+            Self::Auto => None,
+            Self::Portrait => Some("orientation-requested=3"),
+            Self::Landscape => Some("orientation-requested=4"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +103,8 @@ pub struct PrintOptions {
     pub copies: u16,
     pub grayscale: bool,
     pub pages: Pages,
+    /// Texto do campo "Páginas" ("1-3, 7"), usado quando `pages` é `Ranges`.
+    pub ranges: String,
     pub subset: Subset,
     pub reverse: bool,
     pub sizing: Sizing,
@@ -99,6 +123,7 @@ impl Default for PrintOptions {
             copies: 1,
             grayscale: false,
             pages: Pages::All,
+            ranges: String::new(),
             subset: Subset::All,
             reverse: false,
             sizing: Sizing::Fit,
@@ -108,6 +133,15 @@ impl Default for PrintOptions {
             with_annots: true,
         }
     }
+}
+
+/// Alguma página (largura, altura em pontos) é maior que uma folha A4, em qualquer orientação?
+pub fn any_oversized(sizes: impl IntoIterator<Item = (f32, f32)>) -> bool {
+    const A4: (f32, f32) = (595.0, 842.0);
+    sizes.into_iter().any(|(w, h)| {
+        let (short, long) = (w.min(h), w.max(h));
+        short > A4.0 + 1.0 || long > A4.1 + 1.0
+    })
 }
 
 const RANGE_HINT: &str = "Use números de página, como 1-3, 7.";
@@ -158,8 +192,8 @@ pub fn lp_args(
     match &o.pages {
         Pages::All => {}
         Pages::Current => opts.push(format!("page-ranges={current}")),
-        Pages::Ranges(text) => {
-            let list = parse_ranges(text, total)?
+        Pages::Ranges => {
+            let list = parse_ranges(&o.ranges, total)?
                 .iter()
                 .map(|&(x, y)| {
                     if x == y {
@@ -173,11 +207,7 @@ pub fn lp_args(
             opts.push(format!("page-ranges={list}"));
         }
     }
-    match o.subset {
-        Subset::All => {}
-        Subset::Odd => opts.push("page-set=odd".into()),
-        Subset::Even => opts.push("page-set=even".into()),
-    }
+    opts.extend(o.subset.cups().map(String::from));
     if o.reverse {
         opts.push("outputorder=reverse".into());
     }
@@ -190,16 +220,8 @@ pub fn lp_args(
     if o.per_sheet > 1 {
         opts.push(format!("number-up={}", o.per_sheet));
     }
-    match o.duplex {
-        Duplex::None => {}
-        Duplex::LongEdge => opts.push("sides=two-sided-long-edge".into()),
-        Duplex::ShortEdge => opts.push("sides=two-sided-short-edge".into()),
-    }
-    match o.orientation {
-        Orientation::Auto => {}
-        Orientation::Portrait => opts.push("orientation-requested=3".into()),
-        Orientation::Landscape => opts.push("orientation-requested=4".into()),
-    }
+    opts.extend(o.duplex.cups().map(String::from));
+    opts.extend(o.orientation.cups().map(String::from));
     if o.grayscale {
         opts.push("print-color-mode=monochrome".into());
     }
@@ -273,7 +295,8 @@ mod tests {
         let o = PrintOptions {
             copies: 3,
             grayscale: true,
-            pages: Pages::Ranges("1-3, 7".into()),
+            pages: Pages::Ranges,
+            ranges: "1-3, 7".into(),
             subset: Subset::Odd,
             reverse: true,
             sizing: Sizing::Custom(80),
@@ -332,11 +355,18 @@ mod tests {
     #[test]
     fn invalid_ranges_or_missing_printer_are_errors() {
         let bad = PrintOptions {
-            pages: Pages::Ranges("0".into()),
+            pages: Pages::Ranges,
+            ranges: "0".into(),
             ..opts()
         };
         assert!(lp_args(&bad, 1, 10, false, Path::new("/tmp/x.pdf")).is_err());
         let none = PrintOptions::default();
         assert!(lp_args(&none, 1, 10, false, Path::new("/tmp/x.pdf")).is_err());
+    }
+
+    #[test]
+    fn oversized_pages_are_bigger_than_a4_either_way() {
+        assert!(!any_oversized([(595.0, 842.0), (842.0, 595.0)]));
+        assert!(any_oversized([(595.0, 842.0), (842.0, 1191.0)]));
     }
 }

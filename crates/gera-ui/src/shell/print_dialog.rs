@@ -11,11 +11,27 @@ pub enum PrintChoice {
 
 pub struct PrintDialog {
     pub options: PrintOptions,
-    /// Texto do campo "Páginas" (vale quando `options.pages` é `Ranges`).
-    pub ranges: String,
-    pub printers: Vec<String>,
+    /// Impressoras do CUPS (`None` enquanto a lista ainda está sendo lida).
+    printers: Option<Vec<String>>,
     /// Página mostrada na pré-visualização (0-based).
     preview: usize,
+}
+
+/// Lista suspensa para um enum de opções com rótulo.
+fn enum_combo<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    id: &str,
+    value: &mut T,
+    all: &[T],
+    label: fn(T) -> &'static str,
+) {
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(label(*value))
+        .show_ui(ui, |ui| {
+            for &v in all {
+                ui.selectable_value(value, v, label(v));
+            }
+        });
 }
 
 /// Largura da pré-visualização, em pontos da tela.
@@ -23,29 +39,33 @@ const PREVIEW_WIDTH: f32 = 220.0;
 
 impl PrintDialog {
     /// `current`: página atual (0-based), que também abre a pré-visualização.
-    pub fn new(printers: Vec<String>, default: Option<String>, current: usize) -> Self {
-        let printer = default
-            .filter(|d| printers.contains(d))
-            .or_else(|| printers.first().cloned())
-            .unwrap_or_default();
+    pub fn new(current: usize) -> Self {
         Self {
-            options: PrintOptions {
-                printer,
-                ..Default::default()
-            },
-            ranges: String::new(),
-            printers,
+            options: PrintOptions::default(),
+            printers: None,
             preview: current,
         }
     }
 
+    /// Lista lida do CUPS: começa na impressora padrão (ou na primeira).
+    pub fn set_printers(&mut self, printers: Vec<String>, default: Option<String>) {
+        self.options.printer = default
+            .filter(|d| printers.contains(d))
+            .or_else(|| printers.first().cloned())
+            .unwrap_or_default();
+        self.printers = Some(printers);
+    }
+
     /// O que impede de imprimir agora (o botão fica desativado e a mensagem aparece).
     fn problem(&self, total: usize) -> Option<String> {
+        if self.printers.is_none() {
+            return Some("Procurando impressoras…".into());
+        }
         if self.options.printer.is_empty() {
             return Some("Nenhuma impressora encontrada.".into());
         }
         match self.options.pages {
-            Pages::Ranges(_) => parse_ranges(&self.ranges, total).err(),
+            Pages::Ranges => parse_ranges(&self.options.ranges, total).err(),
             _ => None,
         }
     }
@@ -75,11 +95,7 @@ impl PrintDialog {
                     .add_enabled(problem.is_none(), egui::Button::new("Imprimir"))
                     .clicked()
                 {
-                    let mut options = self.options.clone();
-                    if let Pages::Ranges(_) = options.pages {
-                        options.pages = Pages::Ranges(self.ranges.clone());
-                    }
-                    choice = Some(PrintChoice::Print(options));
+                    choice = Some(PrintChoice::Print(self.options.clone()));
                 }
                 if ui.button("Cancelar").clicked() {
                     choice = Some(PrintChoice::Cancel);
@@ -102,7 +118,7 @@ impl PrintDialog {
                         &o.printer
                     })
                     .show_ui(ui, |ui| {
-                        for p in &self.printers {
+                        for p in self.printers.iter().flatten() {
                             ui.selectable_value(&mut o.printer, p.clone(), p);
                         }
                     });
@@ -117,28 +133,25 @@ impl PrintDialog {
         ui.radio_value(&mut o.pages, Pages::All, format!("Todas ({total})"));
         ui.radio_value(&mut o.pages, Pages::Current, "Página atual");
         ui.horizontal(|ui| {
-            let is_ranges = matches!(o.pages, Pages::Ranges(_));
-            if ui.radio(is_ranges, "Páginas").clicked() {
-                o.pages = Pages::Ranges(String::new());
-            }
+            ui.radio_value(&mut o.pages, Pages::Ranges, "Páginas");
             let field = ui.add_enabled(
-                matches!(o.pages, Pages::Ranges(_)),
-                egui::TextEdit::singleline(&mut self.ranges)
+                o.pages == Pages::Ranges,
+                egui::TextEdit::singleline(&mut o.ranges)
                     .hint_text("1-3, 7")
                     .desired_width(110.0),
             );
             if field.gained_focus() {
-                o.pages = Pages::Ranges(String::new());
+                o.pages = Pages::Ranges;
             }
         });
         egui::CollapsingHeader::new("Mais opções").show(ui, |ui| {
-            egui::ComboBox::from_id_salt("subconjunto")
-                .selected_text(o.subset.label())
-                .show_ui(ui, |ui| {
-                    for v in Subset::ALL {
-                        ui.selectable_value(&mut o.subset, v, v.label());
-                    }
-                });
+            enum_combo(
+                ui,
+                "subconjunto",
+                &mut o.subset,
+                &Subset::ALL,
+                Subset::label,
+            );
             ui.checkbox(&mut o.reverse, "Ordem inversa");
         });
         ui.add_space(6.0);
@@ -186,22 +199,16 @@ impl PrintDialog {
                     });
                 ui.end_row();
                 ui.label("Frente e verso:");
-                egui::ComboBox::from_id_salt("duplex")
-                    .selected_text(o.duplex.label())
-                    .show_ui(ui, |ui| {
-                        for v in Duplex::ALL {
-                            ui.selectable_value(&mut o.duplex, v, v.label());
-                        }
-                    });
+                enum_combo(ui, "duplex", &mut o.duplex, &Duplex::ALL, Duplex::label);
                 ui.end_row();
                 ui.label("Orientação:");
-                egui::ComboBox::from_id_salt("orientacao")
-                    .selected_text(o.orientation.label())
-                    .show_ui(ui, |ui| {
-                        for v in Orientation::ALL {
-                            ui.selectable_value(&mut o.orientation, v, v.label());
-                        }
-                    });
+                enum_combo(
+                    ui,
+                    "orientacao",
+                    &mut o.orientation,
+                    &Orientation::ALL,
+                    Orientation::label,
+                );
                 ui.end_row();
                 ui.label("Comentários e formulários:");
                 egui::ComboBox::from_id_salt("comentarios")
@@ -266,26 +273,29 @@ mod tests {
 
     #[test]
     fn starts_on_the_default_printer_or_the_first_one() {
-        let d = PrintDialog::new(list(&["A", "B"]), Some("B".into()), 0);
+        let mut d = PrintDialog::new(0);
+        d.set_printers(list(&["A", "B"]), Some("B".into()));
         assert_eq!(d.options.printer, "B");
-        let d = PrintDialog::new(list(&["A", "B"]), Some("sumiu".into()), 0);
+        d.set_printers(list(&["A", "B"]), Some("sumiu".into()));
         assert_eq!(d.options.printer, "A");
-        let d = PrintDialog::new(vec![], None, 0);
+        d.set_printers(vec![], None);
         assert_eq!(d.options.printer, "");
     }
 
     #[test]
-    fn printing_needs_a_printer_and_valid_ranges() {
-        let mut d = PrintDialog::new(list(&["A"]), None, 0);
+    fn printing_needs_the_printer_list_a_printer_and_valid_ranges() {
+        let mut d = PrintDialog::new(0);
+        assert_eq!(d.problem(10).as_deref(), Some("Procurando impressoras…"));
+        d.set_printers(list(&["A"]), None);
         assert_eq!(d.problem(10), None);
-        d.options.pages = Pages::Ranges(String::new());
-        d.ranges = "0".into();
+        d.options.pages = Pages::Ranges;
+        d.options.ranges = "0".into();
         assert!(d.problem(10).is_some());
-        d.ranges = "1-3".into();
+        d.options.ranges = "1-3".into();
         assert_eq!(d.problem(10), None);
-        let none = PrintDialog::new(vec![], None, 0);
+        d.set_printers(vec![], None);
         assert_eq!(
-            none.problem(10).as_deref(),
+            d.problem(10).as_deref(),
             Some("Nenhuma impressora encontrada.")
         );
     }

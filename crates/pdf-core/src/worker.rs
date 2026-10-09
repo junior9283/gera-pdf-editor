@@ -1,7 +1,6 @@
 use crate::error::PdfError;
 use crate::types::{
     AnnotInfo, DocProperties, DocSummary, NewAnnot, PdfRect, RenderedPage, Rotation, TextSelection,
-    Word,
 };
 use crate::PdfDoc;
 use std::path::PathBuf;
@@ -41,11 +40,6 @@ pub enum Request {
         id: u64,
         needle: String,
         cancel: CancelToken,
-    },
-    Words {
-        tag: u64,
-        page: i32,
-        area: PdfRect,
     },
     Save {
         pending: Vec<NewAnnot>,
@@ -93,11 +87,6 @@ pub enum Response {
     },
     SearchDone {
         id: u64,
-    },
-    Words {
-        tag: u64,
-        page: i32,
-        words: Vec<Word>,
     },
     Saved {
         annots: Vec<AnnotInfo>,
@@ -215,14 +204,6 @@ impl State {
                     None => send(Response::SearchDone { id }),
                 }
             }
-            Request::Words { tag, page, area } => {
-                let words = self
-                    .doc
-                    .as_ref()
-                    .and_then(|d| d.words_in_rect(page, area).ok())
-                    .unwrap_or_default();
-                send(Response::Words { tag, page, words });
-            }
             Request::Save { pending, dest } => {
                 let Some(d) = self.doc.as_mut() else {
                     send(Response::SaveFailed(NO_DOC.into()));
@@ -255,25 +236,27 @@ impl State {
                     .unwrap_or_default();
                 send(Response::DocumentText { tag, text });
             }
-            Request::Properties => match self.doc.as_ref().map(PdfDoc::properties) {
-                Some(Ok(p)) => send(Response::Properties(p)),
-                Some(Err(e)) => send(Response::PropertiesFailed(e.to_string())),
-                None => send(Response::PropertiesFailed(NO_DOC.into())),
-            },
+            Request::Properties => send(
+                self.with_doc(PdfDoc::properties)
+                    .map_or_else(Response::PropertiesFailed, Response::Properties),
+            ),
             Request::ExportForPrint {
                 pending,
                 dest,
                 with_annots,
-            } => match self
-                .doc
-                .as_ref()
-                .map(|d| d.export_for_print(&pending, &dest, with_annots))
-            {
-                Some(Ok(())) => send(Response::Exported { dest }),
-                Some(Err(e)) => send(Response::ExportFailed(e.to_string())),
-                None => send(Response::ExportFailed(NO_DOC.into())),
-            },
+            } => send(
+                match self.with_doc(|d| d.export_for_print(&pending, &dest, with_annots)) {
+                    Ok(()) => Response::Exported { dest },
+                    Err(e) => Response::ExportFailed(e),
+                },
+            ),
         }
+    }
+
+    /// Roda `f` no documento aberto; erros (e a falta de documento) viram texto para a UI.
+    fn with_doc<T>(&self, f: impl FnOnce(&PdfDoc) -> crate::Result<T>) -> Result<T, String> {
+        let doc = self.doc.as_ref().ok_or_else(|| NO_DOC.to_string())?;
+        f(doc).map_err(|e| e.to_string())
     }
 
     /// Busca a próxima página do `search` ativo; encerra a busca ao terminar ou cancelar.
@@ -309,9 +292,13 @@ fn run(requests: Receiver<Request>, out: Sender<Response>, wake: impl Fn()) {
         wake();
     };
     let mut state = State::default();
+    // Pedido já tirado da fila ao juntar seleções, ainda por atender.
+    let mut held: Option<Request> = None;
     loop {
         // Pedidos pendentes têm prioridade sobre a busca; sem busca ativa, espera bloqueando.
-        let next = if state.search.is_some() {
+        let next = if held.is_some() {
+            held.take()
+        } else if state.search.is_some() {
             match requests.try_recv() {
                 Ok(r) => Some(r),
                 Err(TryRecvError::Empty) => None,
@@ -324,6 +311,19 @@ fn run(requests: Receiver<Request>, out: Sender<Response>, wake: impl Fn()) {
             }
         };
         match next {
+            Some(request @ Request::SelectText { .. }) => {
+                // Arrastar o mouse gera um pedido por quadro: só o mais novo da fila importa.
+                let mut latest = request;
+                while let Ok(r) = requests.try_recv() {
+                    if matches!(r, Request::SelectText { .. }) {
+                        latest = r;
+                    } else {
+                        held = Some(r);
+                        break;
+                    }
+                }
+                state.handle(latest, &send);
+            }
             Some(request) => state.handle(request, &send),
             None => state.search_step(&send),
         }

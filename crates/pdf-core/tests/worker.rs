@@ -84,28 +84,14 @@ fn search_streams_hits_then_done() {
 }
 
 #[test]
-fn words_save_and_failed_open() {
+fn save_and_failed_open() {
     let (dir, w, _) = opened(1);
     let path = dir.path().join("a.pdf");
-    w.send(Request::Words {
-        tag: 3,
-        page: 0,
-        area: PdfRect::new(0.0, 0.0, 612.0, 792.0),
-    });
-    let rects = match recv(&w) {
-        Response::Words { tag, words, .. } => {
-            assert_eq!(tag, 3);
-            assert_eq!(words.len(), 4);
-            words
-                .iter()
-                .filter(|x| x.text == "Hello")
-                .map(|x| x.rect)
-                .collect::<Vec<_>>()
-        }
-        other => panic!("{other:?}"),
-    };
     w.send(Request::Save {
-        pending: vec![NewAnnot::Highlight { page: 0, rects }],
+        pending: vec![NewAnnot::Highlight {
+            page: 0,
+            rects: vec![PdfRect::new(70.0, 90.0, 200.0, 110.0)],
+        }],
         dest: path,
     });
     match recv(&w) {
@@ -207,4 +193,42 @@ fn export_for_print_through_the_worker() {
         other => panic!("{other:?}"),
     }
     assert!(dest.exists());
+}
+
+#[test]
+fn a_burst_of_selection_requests_is_answered_by_the_latest() {
+    // 50 pedidos chegam enquanto o worker ainda abre o documento: só os últimos importam
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_sample(&dir, "a.pdf", 3, 0);
+    let w = Worker::spawn(|| {});
+    w.send(Request::Open {
+        path,
+        password: None,
+    });
+    for tag in 1..=50 {
+        w.send(Request::SelectText {
+            tag,
+            page: 0,
+            a: (0.0, 0.0),
+            b: (10_000.0, 10_000.0),
+        });
+    }
+    let mut tags = Vec::new();
+    loop {
+        match recv(&w) {
+            Response::Selection { tag, .. } => {
+                tags.push(tag);
+                if tag == 50 {
+                    break;
+                }
+            }
+            Response::Opened(_) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(
+        tags.len() < 50,
+        "pedidos antigos foram juntados: {}",
+        tags.len()
+    );
 }

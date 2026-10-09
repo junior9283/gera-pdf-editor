@@ -9,7 +9,7 @@ use crate::view::DocView;
 use app_state::layout::ViewMode;
 use app_state::nav::{nav_target, NavKey};
 use app_state::prefs::LeftPanel;
-use app_state::print::{lp_args, PrintOptions};
+use app_state::print::{any_oversized, lp_args, PrintOptions};
 use app_state::transform::PageMap;
 use app_state::zoom::{self, Fit};
 use pdf_core::{
@@ -17,7 +17,7 @@ use pdf_core::{
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::TryRecvError;
+use std::sync::mpsc::{Receiver, TryRecvError};
 
 /// Numeração das abas (identidade na interface), única durante a sessão.
 static NEXT_TAB: AtomicU64 = AtomicU64::new(0);
@@ -93,15 +93,15 @@ pub struct DocTab {
     /// Pedido de foco no campo de busca (Ctrl+F ou menu).
     pub(crate) focus_search: bool,
     /// Propriedades do documento e se a janela delas está aberta.
+    /// Propriedades mostradas na janela (aberta enquanto houver).
     properties: Option<DocProperties>,
-    show_properties: bool,
     /// Diálogo "Imprimir" aberto.
     print_dialog: Option<PrintDialog>,
-    /// Opções de uma impressão esperando a cópia temporária ficar pronta.
-    print_pending: Option<PrintOptions>,
+    /// Impressão esperando a cópia temporária ficar pronta: opções e a página atual no clique.
+    print_pending: Option<(PrintOptions, usize)>,
+    /// Lista de impressoras sendo lida do CUPS em segundo plano.
+    printers_rx: Option<Receiver<(Vec<String>, Option<String>)>>,
     print_jobs: PrintJobs,
-    /// Copiar pedido por atalho ou menu (feito no próximo quadro, que tem o `egui::Context`).
-    copy_requested: bool,
     /// Última virada de página pela roda (tempo do egui), para não virar várias de uma vez.
     turned_at: f64,
 }
@@ -129,11 +129,10 @@ impl DocTab {
             password_prompt: None,
             comment_tools: false,
             focus_search: false,
-            copy_requested: false,
             properties: None,
-            show_properties: false,
             print_dialog: None,
             print_pending: None,
+            printers_rx: None,
             print_jobs: PrintJobs::default(),
             turned_at: f64::NEG_INFINITY,
         }
@@ -149,7 +148,7 @@ impl DocTab {
         self.is_dirty() || self.edit.saving
     }
 
-    pub fn run(&mut self, cmd: DocCommand) {
+    pub fn run(&mut self, ctx: &egui::Context, cmd: DocCommand) {
         let page = self.last.current_page;
         let Some(view) = self.view.as_mut() else {
             return;
@@ -163,7 +162,7 @@ impl DocTab {
                 self.edit.redo();
             }
             DocCommand::Find => self.focus_search = true,
-            DocCommand::Copy => self.copy_requested = true,
+            DocCommand::Copy => self.edit.copy(ctx),
             DocCommand::SelectAll => self.edit.select_all(&self.worker),
             DocCommand::ZoomIn | DocCommand::ZoomOut | DocCommand::ZoomReset => {
                 let z = match cmd {
@@ -181,7 +180,7 @@ impl DocTab {
             DocCommand::ToggleCover => {
                 view.cover = !view.cover;
                 let mode = view.mode;
-                self.run(DocCommand::Mode(mode));
+                self.run(ctx, DocCommand::Mode(mode));
             }
             DocCommand::Rotate { clockwise } => {
                 let r = if clockwise {
@@ -350,7 +349,6 @@ impl DocTab {
                     }
                 }
                 Response::SearchDone { id } => self.search.on_done(id),
-                Response::Words { .. } => {} // a interface não pede mais palavras soltas
                 Response::Selection {
                     tag,
                     page,
@@ -376,10 +374,8 @@ impl DocTab {
                     self.save_dest = None;
                     self.status = format!("Não foi possível salvar: {msg}");
                 }
-                // ligados à interface nas próximas tarefas (seleção, propriedades, impressão)
                 Response::Properties(p) => {
                     self.properties = Some(p);
-                    self.show_properties = true;
                 }
                 Response::PropertiesFailed(msg) => {
                     self.status = format!("Não foi possível ler as propriedades: {msg}");
@@ -467,12 +463,11 @@ impl DocTab {
         egui::Panel::bottom("status").show(ui, |ui| ui.label(text));
     }
 
-    /// Páginas, janelas de nota e senha e fim do quadro (depois dos painéis laterais).
-    /// Arquivo → Imprimir: abre o diálogo com as impressoras do CUPS.
-    pub fn open_print_dialog(&mut self) {
+    /// Arquivo → Imprimir: abre o diálogo na hora; as impressoras chegam do CUPS em segundo plano.
+    pub fn open_print_dialog(&mut self, ctx: &egui::Context) {
         if self.view.is_some() && self.print_pending.is_none() {
-            let (printers, default) = print_job::printers();
-            self.print_dialog = Some(PrintDialog::new(printers, default, self.last.current_page));
+            self.print_dialog = Some(PrintDialog::new(self.last.current_page));
+            self.printers_rx = Some(print_job::printers_in_background(ctx));
         }
     }
 
@@ -486,7 +481,7 @@ impl DocTab {
                     with_annots: options.with_annots,
                 });
                 self.status = format!("Preparando a impressão para {}…", options.printer);
-                self.print_pending = Some(options);
+                self.print_pending = Some((options, self.last.current_page));
             }
             Err(e) => self.status = format!("Não foi possível preparar a impressão: {e}"),
         }
@@ -494,19 +489,13 @@ impl DocTab {
 
     /// A cópia temporária ficou pronta: monta os argumentos e entrega ao CUPS.
     fn send_to_printer(&mut self, ctx: &egui::Context, file: PathBuf) {
-        let (Some(options), Some(view)) = (self.print_pending.take(), self.view.as_ref()) else {
+        let (Some((options, page)), Some(view)) = (self.print_pending.take(), self.view.as_ref())
+        else {
             let _ = std::fs::remove_file(&file);
             return;
         };
-        let oversized = print_job::any_oversized(&view.sizes);
-        let total = view.sizes.len();
-        match lp_args(
-            &options,
-            self.last.current_page + 1,
-            total,
-            oversized,
-            &file,
-        ) {
+        let oversized = any_oversized(view.sizes.iter().map(|s| (s.width, s.height)));
+        match lp_args(&options, page + 1, view.sizes.len(), oversized, &file) {
             Ok(args) => {
                 self.status = format!("Enviando para {}…", options.printer);
                 self.print_jobs.start(ctx, options.printer, args, file);
@@ -525,9 +514,20 @@ impl DocTab {
         }
     }
 
+    /// Páginas, janelas (propriedades, imprimir, nota, senha) e fim do quadro, depois dos painéis.
     pub fn show_canvas(&mut self, ui: &mut egui::Ui) {
-        if let Some(p) = self.properties.as_ref().filter(|_| self.show_properties) {
-            crate::shell::properties::window(ui, p, &mut self.show_properties);
+        if let Some(p) = &self.properties {
+            let mut open = true;
+            crate::shell::properties::window(ui, p, &mut open);
+            if !open {
+                self.properties = None;
+            }
+        }
+        if let (Some(rx), Some(dialog)) = (&self.printers_rx, self.print_dialog.as_mut()) {
+            if let Ok((list, default)) = rx.try_recv() {
+                dialog.set_printers(list, default);
+                self.printers_rx = None;
+            }
         }
         let choice = match (self.print_dialog.as_mut(), self.view.as_mut()) {
             (Some(dialog), Some(view)) => dialog.show(ui, view, &self.worker),
@@ -540,9 +540,6 @@ impl DocTab {
             }
             Some(PrintChoice::Cancel) => self.print_dialog = None,
             None => {}
-        }
-        if std::mem::take(&mut self.copy_requested) {
-            self.edit.copy(ui.ctx());
         }
         egui::CentralPanel::default().show(ui, |ui| self.canvas(ui));
         self.edit.note_window(ui);

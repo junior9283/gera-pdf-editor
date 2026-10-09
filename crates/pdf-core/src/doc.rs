@@ -149,7 +149,7 @@ impl PdfDoc {
 }
 
 /// Máximo de áreas numa seleção (linhas longas com muitos pedaços).
-const MAX_SELECTION_QUADS: usize = 4096;
+const MAX_SELECTION_QUADS: usize = 1024;
 
 impl PdfDoc {
     /// Seleção pelo fluxo do texto entre os pontos `a` e `b` (coordenadas da página), como o
@@ -218,23 +218,19 @@ impl PdfDoc {
         with_annots: bool,
     ) -> Result<()> {
         let copy = open_authenticated(&self.path, self.password.as_deref())?;
-        for p in 0..copy.page_count()? {
-            let mut page = copy.load_pdf_page(p)?;
-            if with_annots {
-                for a in pending.iter().filter(|a| a.page() == p) {
-                    add_one(&mut page, a)?;
-                }
-            } else {
+        if with_annots {
+            apply_pending(&copy, pending)?;
+        } else {
+            for p in 0..copy.page_count()? {
+                let mut page = copy.load_pdf_page(p)?;
                 let all: Vec<_> = page.annotations().collect();
                 for a in all {
                     page.delete_annotation(a)?;
                 }
+                page.update()?;
             }
-            page.update()?;
         }
-        let dest = dest
-            .to_str()
-            .ok_or_else(|| PdfError::Engine("caminho não é UTF-8 válido".into()))?;
+        let dest = utf8_path(dest)?;
         // o padrão do MuPDF é manter a criptografia; o CUPS precisa de uma cópia legível
         let mut opts = PdfWriteOptions::default();
         opts.set_encryption(Encryption::None);
@@ -298,6 +294,34 @@ fn add_one(page: &mut PdfPage, a: &NewAnnot) -> Result<()> {
     Ok(())
 }
 
+/// Aplica as anotações pendentes às páginas de `doc` (recusa páginas fora do documento).
+fn apply_pending(doc: &PdfDocument, pending: &[NewAnnot]) -> Result<()> {
+    let count = doc.page_count()?;
+    if let Some(bad) = pending
+        .iter()
+        .map(NewAnnot::page)
+        .find(|p| *p < 0 || *p >= count)
+    {
+        return Err(PdfError::PageOutOfRange(bad));
+    }
+    let mut pages: Vec<i32> = pending.iter().map(NewAnnot::page).collect();
+    pages.sort_unstable();
+    pages.dedup();
+    for p in pages {
+        let mut page = doc.load_pdf_page(p)?;
+        for a in pending.iter().filter(|a| a.page() == p) {
+            add_one(&mut page, a)?;
+        }
+        page.update()?;
+    }
+    Ok(())
+}
+
+fn utf8_path(path: &Path) -> Result<&str> {
+    path.to_str()
+        .ok_or_else(|| PdfError::Engine("caminho não é UTF-8 válido".into()))
+}
+
 fn kind_of(t: PdfAnnotationType) -> Option<AnnotKind> {
     match t {
         PdfAnnotationType::Highlight => Some(AnnotKind::Highlight),
@@ -357,28 +381,9 @@ impl PdfDoc {
     }
 
     fn apply_and_write(&mut self, pending: &[NewAnnot], dest: &Path) -> Result<()> {
-        let count = self.page_count()?;
-        if let Some(bad) = pending
-            .iter()
-            .map(NewAnnot::page)
-            .find(|p| *p < 0 || *p >= count)
-        {
-            return Err(PdfError::PageOutOfRange(bad));
-        }
-        let mut pages: Vec<i32> = pending.iter().map(NewAnnot::page).collect();
-        pages.sort_unstable();
-        pages.dedup();
-        for p in pages {
-            let mut page = self.inner.load_pdf_page(p)?;
-            for a in pending.iter().filter(|a| a.page() == p) {
-                add_one(&mut page, a)?;
-            }
-            page.update()?;
-        }
+        apply_pending(&self.inner, pending)?;
         let tmp = temp_path(dest)?;
-        let tmp_str = tmp
-            .to_str()
-            .ok_or_else(|| PdfError::Engine("caminho não é UTF-8 válido".into()))?;
+        let tmp_str = utf8_path(&tmp)?;
         let mut opts = PdfWriteOptions::default();
         opts.set_encryption(Encryption::Keep);
         let written = self

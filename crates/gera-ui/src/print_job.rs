@@ -1,5 +1,4 @@
 //! Impressão pelo CUPS: impressoras disponíveis, pasta temporária privada e o `lp` numa thread.
-use pdf_core::PageSize;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -45,13 +44,17 @@ pub fn printers() -> (Vec<String>, Option<String>) {
     (parse_list(&run("-e")), parse_default(&run("-d")))
 }
 
-/// Alguma página é maior que uma folha A4 (em qualquer orientação)?
-pub fn any_oversized(sizes: &[PageSize]) -> bool {
-    const A4: (f32, f32) = (595.0, 842.0);
-    sizes.iter().any(|s| {
-        let (short, long) = (s.width.min(s.height), s.width.max(s.height));
-        short > A4.0 + 1.0 || long > A4.1 + 1.0
-    })
+/// Lê as impressoras numa thread (o `lpstat` pode demorar com o CUPS lento ou parado).
+pub fn printers_in_background(ctx: &egui::Context) -> Receiver<(Vec<String>, Option<String>)> {
+    let (tx, rx) = mpsc::channel();
+    let ctx = ctx.clone();
+    let _ = std::thread::Builder::new()
+        .name("impressoras".into())
+        .spawn(move || {
+            let _ = tx.send(printers());
+            ctx.request_repaint();
+        });
+    rx
 }
 
 /// Arquivo temporário novo para imprimir, numa pasta só do usuário (a cópia sai sem senha).
@@ -172,23 +175,5 @@ mod tests {
         assert!(run_lp("false", &[], &file).is_err());
         assert!(!file.exists(), "some também quando o lp falha");
         assert!(run_lp("/nao/existe/lp", &[], &file).is_err());
-    }
-
-    #[test]
-    fn oversized_pages_are_bigger_than_a4_either_way() {
-        let a4 = PageSize {
-            width: 595.0,
-            height: 842.0,
-        };
-        let a3 = PageSize {
-            width: 842.0,
-            height: 1191.0,
-        };
-        let wide = PageSize {
-            width: 842.0,
-            height: 595.0,
-        };
-        assert!(!any_oversized(&[a4, wide]));
-        assert!(any_oversized(&[a4, a3]));
     }
 }

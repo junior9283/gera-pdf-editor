@@ -288,7 +288,7 @@ impl GeraApp {
             Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Command::Doc(c) => {
                 if let Some(doc) = self.active_doc() {
-                    doc.run(c);
+                    doc.run(ctx, c);
                 }
             }
             Command::ToggleDark => self.set_dark(ctx, !self.prefs.dark),
@@ -311,7 +311,7 @@ impl GeraApp {
             Command::About => self.show_about = true,
             Command::Print => {
                 if let Some(doc) = self.active_doc() {
-                    doc.open_print_dialog();
+                    doc.open_print_dialog(ctx);
                 }
             }
             Command::Properties => {

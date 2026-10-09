@@ -173,9 +173,12 @@ pub fn from_keyboard(ctx: &egui::Context) -> Vec<Command> {
             .filter(|(s, _)| i.consume_shortcut(s))
             .map(|(_, c)| c)
             .collect();
-        // o egui entrega Ctrl+C como evento "copiar", não como tecla
-        if !typing && i.events.iter().any(|e| matches!(e, egui::Event::Copy)) {
-            out.push(Command::Doc(DocCommand::Copy));
+        // o egui entrega Ctrl+C como evento "copiar", não como tecla: passa pelo mesmo filtro
+        let copy = Command::Doc(DocCommand::Copy);
+        if i.events.iter().any(|e| matches!(e, egui::Event::Copy))
+            && !(typing && belongs_to_text_fields(&copy))
+        {
+            out.push(copy);
         }
         out
     })

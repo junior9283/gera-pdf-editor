@@ -102,10 +102,15 @@ impl EditState {
         self.finish_tag = None;
     }
 
-    fn request_selection(&mut self, worker: &Worker, page: i32, a: (f32, f32), b: (f32, f32)) {
+    /// Toda pergunta de texto ao worker avança a tag; só a resposta da mais nova vale.
+    fn next_tag(&mut self) -> u64 {
         self.latest_tag += 1;
+        self.latest_tag
+    }
+
+    fn request_selection(&mut self, worker: &Worker, page: i32, a: (f32, f32), b: (f32, f32)) {
         worker.send(Request::SelectText {
-            tag: self.latest_tag,
+            tag: self.next_tag(),
             page,
             a,
             b,
@@ -118,8 +123,7 @@ impl EditState {
         if tag < self.latest_tag {
             return;
         }
-        if let Some((t, markup)) = self.finish_tag.filter(|&(t, _)| t == tag) {
-            let _ = t;
+        if let Some((_, markup)) = self.finish_tag.filter(|&(t, _)| t == tag) {
             self.finish_tag = None;
             self.selection = None;
             if !sel.quads.is_empty() {
@@ -137,9 +141,8 @@ impl EditState {
 
     /// Selecionar tudo: pede o texto do documento inteiro.
     pub fn select_all(&mut self, worker: &Worker) {
-        self.latest_tag += 1;
         worker.send(Request::DocumentText {
-            tag: self.latest_tag,
+            tag: self.next_tag(),
         });
     }
 
