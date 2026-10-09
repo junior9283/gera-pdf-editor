@@ -1,6 +1,7 @@
 mod app;
 mod bench;
 mod canvas;
+mod doc_tab;
 mod edit;
 mod search;
 mod sidebar;
