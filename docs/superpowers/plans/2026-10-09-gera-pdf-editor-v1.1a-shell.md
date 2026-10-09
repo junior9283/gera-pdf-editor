@@ -21,19 +21,20 @@ serde_json.
 
 - Tudo em pt-BR: textos da interface, comentários e mensagens de commit.
 - Toda mensagem de commit termina com o trailer `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` (use um segundo `-m`).
-- **Antes de rodar os testes que devem passar**, rode a skill `simplify` sobre o código criado ou
-  alterado na tarefa e aplique o que ela apontar, salvo o que mudaria o comportamento (registre o
-  que foi pulado). Esta é uma exigência do usuário.
+- **Refatoração só no fim da etapa** (exigência do usuário para este projeto): as tarefas 1–11
+  **não** rodam a skill `simplify`. Ela roda **uma vez**, na tarefa 12, sobre todo o código criado
+  ou alterado na v1.1-A (`git diff main...HEAD`), antes da verificação final. Aplique o que ela
+  apontar, salvo o que mudaria o comportamento (registre o que foi pulado).
 - Ao fim de cada tarefa: `cargo fmt --all`, `cargo clippy --workspace --all-targets -q -- -D warnings` e `cargo test --workspace -q` limpos.
 - Nada de `unwrap()` em caminho de produção que dependa de entrada do usuário ou do disco.
 - Metas que não podem regredir: abertura < 300 ms, memória < 150 MB (agora com **3 abas** de 100
   páginas), binário release < 25 MB e rolagem sem travar.
 - Nenhum código, binário, ícone ou texto da Adobe. Os nomes de função são descritivos e originais.
 - `rfd` só com o backend xdg-portal (as features padrão da 0.17). **Não** ligar `gtk3`.
-- **Desvio consciente do spec:** girar a vista usa `Ctrl+R` (horário) e `Ctrl+Shift+R`
-  (anti-horário), não `Ctrl+Shift++`/`Ctrl+Shift+-`. No teclado ABNT2 o `+` já exige Shift, e
-  como o egui aceita Shift a mais num atalho que não o pede, `Ctrl++` (zoom) e `Ctrl+Shift++`
-  (girar) seriam a mesma tecla.
+- **Atalhos de girar iguais aos do Acrobat:** `Ctrl+Shift++` (horário) e `Ctrl+Shift+-`
+  (anti-horário). Como o egui aceita Shift a mais num atalho que não o pede, os atalhos de girar
+  ficam **antes** dos de zoom na tabela. Ampliar continua em `Ctrl+=` e `Ctrl++` do teclado
+  numérico, e reduzir em `Ctrl+-`, como no Acrobat.
 
 ## Review Focus
 
@@ -327,11 +328,7 @@ impl eframe::App for GeraApp {
 Em `main.rs`, acrescente `mod doc_tab;` à lista de módulos (em ordem alfabética, depois de
 `mod canvas;`).
 
-- [ ] **Passo 3: Rodar a skill `simplify` sobre `doc_tab.rs` e `app.rs`**
-
-Aplique o que ela apontar, salvo mudanças de comportamento.
-
-- [ ] **Passo 4: Compilar, testar e validar rodando o app**
+- [ ] **Passo 3: Compilar, testar e validar rodando o app**
 
 Run: `cargo clippy --workspace --all-targets -q -- -D warnings && cargo test --workspace -q 2>&1 | grep -E "test result|FAILED"`
 Esperado: sem avisos, todos os testes passam (a contagem é igual à de antes da tarefa).
@@ -340,7 +337,7 @@ Run: `cargo run --release -q -p gera-ui -- <cópia de um PDF>`
 Esperado: abre, rola, busca (Ctrl+F), destaca, desfaz (Ctrl+Z), salva (Ctrl+S) e pede confirmação
 ao fechar com anotação pendente. Tudo como antes.
 
-- [ ] **Passo 5: Commit**
+- [ ] **Passo 4: Commit**
 
 ```bash
 git add crates/gera-ui/src
@@ -532,9 +529,7 @@ No `gera-ui`, para compilar sem mudar comportamento ainda:
 - `doc_tab.rs`, `poll`: no braço `Response::Rendered { page, scale, invert, image }`, acrescente
   `..` ao padrão. A rotação passa a ser usada na tarefa 5.
 
-- [ ] **Passo 4: Rodar a skill `simplify` sobre os arquivos alterados**
-
-- [ ] **Passo 5: Rodar os testes**
+- [ ] **Passo 4: Rodar os testes**
 
 Run: `cargo test -p pdf-core -q 2>&1 | grep -E "test result|FAILED"`
 Esperado: todos passam, inclusive `view_rotation_swaps_dimensions_and_moves_content_clockwise`.
@@ -545,7 +540,7 @@ dessa convenção.
 Run: `cargo clippy --workspace --all-targets -q -- -D warnings && cargo test --workspace -q 2>&1 | grep FAILED`
 Esperado: sem saída.
 
-- [ ] **Passo 6: Commit**
+- [ ] **Passo 5: Commit**
 
 ```bash
 git add crates/pdf-core crates/gera-ui/src/view.rs crates/gera-ui/src/doc_tab.rs
@@ -766,14 +761,12 @@ Acrescente `pub mod transform;` a `crates/app-state/src/lib.rs` e, em
 tempfile = "3"
 ```
 
-- [ ] **Passo 4: Rodar a skill `simplify` sobre `transform.rs`**
-
-- [ ] **Passo 5: Rodar os testes**
+- [ ] **Passo 4: Rodar os testes**
 
 Run: `cargo test -p app-state transform -q 2>&1 | grep -E "test result|FAILED"`
 Esperado: 6 testes passam.
 
-- [ ] **Passo 6: Commit**
+- [ ] **Passo 5: Commit**
 
 ```bash
 git add crates/app-state
@@ -1161,9 +1154,7 @@ Atenção ao teste antigo `visible_range_edges_do_not_panic`. Ele espera
 Ajuste **essa** asserção para `assert!(l.visible_range(1.0e9, 100.0).is_empty());`, porque o que
 importa é estar vazio. Os outros testes antigos continuam sem mudança.
 
-- [ ] **Passo 4: Rodar a skill `simplify` sobre `layout.rs`, `zoom.rs` e `nav.rs`**
-
-- [ ] **Passo 5: Rodar os testes**
+- [ ] **Passo 4: Rodar os testes**
 
 Run: `cargo test -p app-state -q 2>&1 | grep -E "test result|FAILED"`
 Esperado: todos passam.
@@ -1171,7 +1162,7 @@ Esperado: todos passam.
 Run: `cargo test --workspace -q 2>&1 | grep FAILED`
 Esperado: sem saída (o `gera-ui` continua usando `Layout::new`).
 
-- [ ] **Passo 6: Commit**
+- [ ] **Passo 5: Commit**
 
 ```bash
 git add crates/app-state
@@ -1836,9 +1827,7 @@ pub enum DocCommand {
 
 Em `bench.rs`, linha 88: `let target = view.go_to(*next as i32, None);`.
 
-- [ ] **Passo 7: Rodar a skill `simplify` sobre `view.rs`, `canvas.rs`, `edit.rs` e `doc_tab.rs`**
-
-- [ ] **Passo 8: Rodar os testes e o app**
+- [ ] **Passo 7: Rodar os testes e o app**
 
 Run: `cargo clippy --workspace --all-targets -q -- -D warnings && cargo test --workspace -q 2>&1 | grep -E "test result|FAILED"`
 Esperado: tudo passa, inclusive os 5 testes novos de `view.rs`.
@@ -1851,7 +1840,7 @@ Esperado:
 - ⟳ gira, e destacar texto com a vista a 90° marca o texto certo. Confira salvando e reabrindo.
 - "Página" ajusta a página inteira, e redimensionar a janela reajusta até mexer no zoom.
 
-- [ ] **Passo 9: Commit**
+- [ ] **Passo 8: Commit**
 
 ```bash
 git add crates/gera-ui
@@ -2095,14 +2084,12 @@ impl TabList {
 (O clippy pode pedir `is_empty`, por causa de `len_without_is_empty`. Nesse caso acrescente
 `pub fn is_empty(&self) -> bool { false }` com o comentário "as abas fixas sempre existem".)
 
-- [ ] **Passo 4: Rodar a skill `simplify` sobre `tabs.rs`**
-
-- [ ] **Passo 5: Rodar os testes**
+- [ ] **Passo 4: Rodar os testes**
 
 Run: `cargo test -p app-state tabs -q 2>&1 | grep -E "test result|FAILED"`
 Esperado: 9 testes passam.
 
-- [ ] **Passo 6: Commit**
+- [ ] **Passo 5: Commit**
 
 ```bash
 git add crates/app-state
@@ -2490,14 +2477,12 @@ impl Prefs {
 }
 ```
 
-- [ ] **Passo 5: Rodar a skill `simplify` sobre `store.rs`, `recents.rs` e `prefs.rs`**
-
-- [ ] **Passo 6: Rodar os testes**
+- [ ] **Passo 5: Rodar os testes**
 
 Run: `cargo test -p app-state -q 2>&1 | grep -E "test result|FAILED"`
 Esperado: todos passam.
 
-- [ ] **Passo 7: Commit**
+- [ ] **Passo 6: Commit**
 
 ```bash
 git add crates/app-state Cargo.lock
@@ -3379,9 +3364,7 @@ Em `main.rs`, troque o laço de argumentos e a criação do app:
 
 E `app::GeraApp::new(cc, paths, bench.then(|| bench::Bench::new(started, scroll)))`.
 
-- [ ] **Passo 8: Rodar a skill `simplify` sobre os arquivos da tarefa**
-
-- [ ] **Passo 9: Rodar os testes e o roteiro manual**
+- [ ] **Passo 8: Rodar os testes e o roteiro manual**
 
 Run: `cargo clippy --workspace --all-targets -q -- -D warnings && cargo test --workspace -q 2>&1 | grep -E "test result|FAILED"`
 Esperado: tudo passa, inclusive os 4 testes do `CloseFlow`.
@@ -3400,7 +3383,7 @@ Roteiro manual (`cargo run --release -q -p gera-ui`, sem argumentos, e depois co
 7. **Portal ausente:** rodar com `env -u DBUS_SESSION_BUS_ADDRESS`. Anote se aparece a mensagem
    de falha ou se o seletor só "cancela". É a limitação conhecida da seção Review Focus.
 
-- [ ] **Passo 10: Commit**
+- [ ] **Passo 9: Commit**
 
 ```bash
 git add crates/gera-ui Cargo.lock
@@ -3559,7 +3542,9 @@ pub fn shortcuts() -> Vec<(KeyboardShortcut, Command)> {
     vec![
         (cmd_shift(Key::S), Command::SaveAs),
         (cmd_shift(Key::Z), doc(DocCommand::Redo)),
-        (cmd_shift(Key::R), doc(DocCommand::Rotate { clockwise: false })),
+        // girar vista: os mesmos do Acrobat; antes do zoom, que usa as mesmas teclas sem Shift
+        (cmd_shift(Key::Plus), doc(DocCommand::Rotate { clockwise: true })),
+        (cmd_shift(Key::Minus), doc(DocCommand::Rotate { clockwise: false })),
         (cmd_shift(Key::Tab), Command::PrevTab),
         (cmd(Key::O), Command::Open),
         (cmd(Key::S), doc(DocCommand::Save)),
@@ -3567,7 +3552,6 @@ pub fn shortcuts() -> Vec<(KeyboardShortcut, Command)> {
         (cmd(Key::Q), Command::Quit),
         (cmd(Key::Z), doc(DocCommand::Undo)),
         (cmd(Key::F), doc(DocCommand::Find)),
-        (cmd(Key::R), doc(DocCommand::Rotate { clockwise: true })),
         (cmd(Key::Tab), Command::NextTab),
         (cmd(Key::Plus), doc(DocCommand::ZoomIn)),
         (cmd(Key::Equals), doc(DocCommand::ZoomIn)),
@@ -4110,9 +4094,7 @@ pub fn about_window(ui: &mut egui::Ui, open: &mut bool) {
 5. No fim do `ui`:
    `help::shortcuts_window(ui, &mut self.show_shortcuts); help::about_window(ui, &mut self.show_about);`.
 
-- [ ] **Passo 9: Rodar a skill `simplify` sobre os arquivos da tarefa**
-
-- [ ] **Passo 10: Rodar os testes e o roteiro manual**
+- [ ] **Passo 9: Rodar os testes e o roteiro manual**
 
 Run: `cargo clippy --workspace --all-targets -q -- -D warnings && cargo test --workspace -q 2>&1 | grep -E "test result|FAILED"`
 Esperado: tudo passa.
@@ -4122,14 +4104,15 @@ Roteiro manual:
    direita dos itens.
 2. `Ctrl+Shift+S` abre "Salvar como". O arquivo novo tem as anotações, e a aba passa a mostrar o
    novo nome.
-3. `Ctrl+R` e `Ctrl+Shift+R` giram, e `Ctrl+0`, `Ctrl+1` e `Ctrl+2` ajustam. `Ctrl+Z` dentro do
+3. `Ctrl+Shift++` e `Ctrl+Shift+-` giram (como no Acrobat), `Ctrl+=` amplia e `Ctrl+-` reduz
+   sem girar, e `Ctrl+0`, `Ctrl+1` e `Ctrl+2` ajustam. `Ctrl+Z` dentro do
    campo de busca desfaz o texto, não a anotação.
 4. `F11` entra em tela cheia, e `Esc` ou `F11` sai.
 5. "✏ Comentar" mostra e esconde a linha de ferramentas.
 6. Editar → Preferências → Modo escuro troca o tema de todas as abas e vale na próxima abertura.
 7. Ajuda → Atalhos lista a tabela, e Sobre mostra versão e licenças.
 
-- [ ] **Passo 11: Commit**
+- [ ] **Passo 10: Commit**
 
 ```bash
 git add crates/gera-ui
@@ -4496,9 +4479,7 @@ Acrescente `pub mod home; pub mod tools_hub;` a `shell/mod.rs`.
    `if std::mem::take(&mut self.comment_after_open) { if let Some(doc) = self.active_doc() { doc.comment_tools = true; } }`.
    No braço `Picked::Cancelled | Picked::Failed`, faça `self.comment_after_open = false;`.
 
-- [ ] **Passo 6: Rodar a skill `simplify` sobre os arquivos da tarefa**
-
-- [ ] **Passo 7: Rodar os testes e o roteiro manual**
+- [ ] **Passo 6: Rodar os testes e o roteiro manual**
 
 Run: `cargo clippy --workspace --all-targets -q -- -D warnings && cargo test --workspace -q 2>&1 | grep -E "test result|FAILED"`
 Esperado: tudo passa.
@@ -4511,7 +4492,7 @@ Roteiro manual:
 3. Clicar em "Comentar" com um documento aberto vai para a aba dele com a linha de comentário
    ligada. Sem documento, abre o seletor e liga a linha no PDF aberto.
 
-- [ ] **Passo 8: Commit**
+- [ ] **Passo 7: Commit**
 
 ```bash
 git add crates/app-state crates/gera-ui
@@ -4757,9 +4738,7 @@ Acrescente `pub mod panels;` a `shell/mod.rs`.
 - Na tela cheia: `doc.begin(); doc.show_status(ui, false); doc.show_canvas(ui);`.
 - `MenuState` recebe `left: self.prefs.left_panel` e `tools_panel: self.prefs.tools_panel`.
 
-- [ ] **Passo 4: Rodar a skill `simplify` sobre os arquivos da tarefa**
-
-- [ ] **Passo 5: Rodar os testes e o roteiro manual**
+- [ ] **Passo 4: Rodar os testes e o roteiro manual**
 
 Run: `cargo clippy --workspace --all-targets -q -- -D warnings && cargo test --workspace -q 2>&1 | grep -E "test result|FAILED"`
 Esperado: tudo passa.
@@ -4773,7 +4752,7 @@ Roteiro manual:
    `~/.config/gera-pdf-editor/preferencias.json`.
 6. Corrompa esse arquivo (escreva `{{{` nele) e abra o app: abre com o padrão, sem erro.
 
-- [ ] **Passo 6: Commit**
+- [ ] **Passo 5: Commit**
 
 ```bash
 git add crates/gera-ui
@@ -4823,14 +4802,30 @@ echo "rss_kb_3_abas=$RSS_TABS (limite $MAX_RSS_KB)"
 check "memória com 3 abas (kB)" "$RSS_TABS" "$MAX_RSS_KB"
 ```
 
-- [ ] **Passo 2: Rodar a medição**
+- [ ] **Passo 2: Refatoração da etapa inteira com a skill `simplify`**
+
+Rode a skill `simplify` **uma vez**, tendo como escopo todo o código criado ou alterado na v1.1-A
+(`git diff main...HEAD -- crates scripts`). Aplique o que ela apontar, salvo o que mudaria o
+comportamento, e anote o que foi pulado e por quê. Depois:
+
+Run: `cargo fmt --all && cargo clippy --workspace --all-targets -q -- -D warnings && cargo test --workspace -q 2>&1 | grep -E "test result|FAILED"`
+Esperado: tudo passa.
+
+```bash
+git add -A crates
+git commit -m "refactor: simplificação da v1.1-A (simplify)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+(Se a skill não apontar nada, não há commit neste passo.)
+
+- [ ] **Passo 3: Rodar a medição**
 
 Run: `scripts/measure.sh`
 Esperado: termina com código 0, e todas as métricas (binário, abertura, memória, memória após
 rolar, memória com 3 abas) ficam dentro dos limites. Se alguma falhar, **pare** e investigue com
 a skill `superpowers:systematic-debugging` antes de mexer em limites.
 
-- [ ] **Passo 3: Verificação final**
+- [ ] **Passo 4: Verificação final**
 
 ```bash
 cargo fmt --all --check
@@ -4849,7 +4844,7 @@ Esperado:
 
 Use a skill `superpowers:verification-before-completion` antes de declarar a v1.1-A concluída.
 
-- [ ] **Passo 4: Commit**
+- [ ] **Passo 5: Commit**
 
 ```bash
 git add scripts/measure.sh
