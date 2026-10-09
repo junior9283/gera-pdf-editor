@@ -59,6 +59,13 @@ pub enum DocEvent {
     Renamed(PathBuf),
 }
 
+/// Impressão esperando a cópia temporária: opções, página atual no clique e o arquivo pedido.
+struct PendingPrint {
+    options: PrintOptions,
+    page: usize,
+    file: PathBuf,
+}
+
 /// Um documento aberto: worker próprio, vista, busca, edição e painel lateral.
 pub struct DocTab {
     pub(crate) worker: Worker,
@@ -92,13 +99,12 @@ pub struct DocTab {
     pub(crate) comment_tools: bool,
     /// Pedido de foco no campo de busca (Ctrl+F ou menu).
     pub(crate) focus_search: bool,
-    /// Propriedades do documento e se a janela delas está aberta.
     /// Propriedades mostradas na janela (aberta enquanto houver).
     properties: Option<DocProperties>,
     /// Diálogo "Imprimir" aberto.
     print_dialog: Option<PrintDialog>,
     /// Impressão esperando a cópia temporária ficar pronta: opções e a página atual no clique.
-    print_pending: Option<(PrintOptions, usize)>,
+    print_pending: Option<PendingPrint>,
     /// Lista de impressoras sendo lida do CUPS em segundo plano.
     printers_rx: Option<Receiver<(Vec<String>, Option<String>)>>,
     print_jobs: PrintJobs,
@@ -477,11 +483,15 @@ impl DocTab {
             Ok(dest) => {
                 self.worker.send(Request::ExportForPrint {
                     pending: self.edit.pending.items().to_vec(),
-                    dest,
+                    dest: dest.clone(),
                     with_annots: options.with_annots,
                 });
                 self.status = format!("Preparando a impressão para {}…", options.printer);
-                self.print_pending = Some((options, self.last.current_page));
+                self.print_pending = Some(PendingPrint {
+                    options,
+                    page: self.last.current_page,
+                    file: dest,
+                });
             }
             Err(e) => self.status = format!("Não foi possível preparar a impressão: {e}"),
         }
@@ -489,7 +499,8 @@ impl DocTab {
 
     /// A cópia temporária ficou pronta: monta os argumentos e entrega ao CUPS.
     fn send_to_printer(&mut self, ctx: &egui::Context, file: PathBuf) {
-        let (Some((options, page)), Some(view)) = (self.print_pending.take(), self.view.as_ref())
+        let (Some(PendingPrint { options, page, .. }), Some(view)) =
+            (self.print_pending.take(), self.view.as_ref())
         else {
             let _ = std::fs::remove_file(&file);
             return;
@@ -708,6 +719,16 @@ fn paint_search_hits(ui: &egui::Ui, search: &SearchState, page: i32, map: &PageM
             egui::Color32::from_rgba_unmultiplied(255, 230, 0, 90)
         };
         ui.painter().rect_filled(screen_rect(r, map), 2.0, color);
+    }
+}
+
+impl Drop for DocTab {
+    /// Aba fechada com a impressão em preparo: a cópia sem senha não pode ficar para trás
+    /// (se o worker ainda a gravar depois disto, a faxina da próxima abertura a remove).
+    fn drop(&mut self) {
+        if let Some(p) = self.print_pending.take() {
+            let _ = std::fs::remove_file(p.file);
+        }
     }
 }
 

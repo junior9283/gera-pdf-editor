@@ -74,3 +74,18 @@ fn export_for_print_writes_a_readable_unencrypted_copy() {
         "abre sem senha (o CUPS precisa ler)"
     );
 }
+
+#[test]
+fn a_failed_export_leaves_no_file_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let doc = PdfDoc::open(&write_sample(&dir, "a.pdf", 1, 0), None).unwrap();
+    let dest = dir.path().join("imprimir.pdf");
+    std::fs::write(&dest, b"restos de uma tentativa anterior").unwrap();
+    let bad = NewAnnot::Note {
+        page: 99,
+        at: (1.0, 1.0),
+        text: "x".into(),
+    };
+    assert!(doc.export_for_print(&[bad], &dest, true).is_err());
+    assert!(!dest.exists(), "a cópia sem senha não pode ficar no disco");
+}

@@ -53,6 +53,7 @@ impl GeraApp {
         paths: Vec<PathBuf>,
         bench: Option<Bench>,
     ) -> Self {
+        crate::print_job::sweep();
         let prefs = store::config_file(PREFS_FILE).map_or_else(Prefs::default, |p| Prefs::load(&p));
         cc.egui_ctx.set_visuals(visuals(prefs.dark));
         let mut app = Self {

@@ -217,6 +217,15 @@ impl PdfDoc {
         dest: &Path,
         with_annots: bool,
     ) -> Result<()> {
+        let written = self.write_print_copy(pending, dest, with_annots);
+        if written.is_err() {
+            // nada de cópia sem senha esquecida no disco (nem pela metade, nem de tentativa antiga)
+            let _ = std::fs::remove_file(dest);
+        }
+        written
+    }
+
+    fn write_print_copy(&self, pending: &[NewAnnot], dest: &Path, with_annots: bool) -> Result<()> {
         let copy = open_authenticated(&self.path, self.password.as_deref())?;
         if with_annots {
             apply_pending(&copy, pending)?;

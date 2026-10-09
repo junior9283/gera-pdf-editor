@@ -228,7 +228,8 @@ impl EditState {
         if response.clicked() {
             self.selection = None;
         }
-        if response.drag_started() {
+        // só o botão esquerdo seleciona: o direito (com um tremido) é para o menu de contexto
+        if response.drag_started_by(egui::PointerButton::Primary) {
             // O arrasto só "começa" depois de o mouse andar alguns pixels: a seleção parte de onde
             // o botão foi apertado, senão a primeira letra sob o mouse ficaria de fora.
             let pressed = response.ctx.input(|i| i.pointer.press_origin());
@@ -243,12 +244,14 @@ impl EditState {
         }
         if let (Some(drag), Some(b)) = (self.select_drag, pointer) {
             let moved = (b.0 - drag.last.0).abs() + (b.1 - drag.last.1).abs() >= 1.0;
-            if drag.page == page && (moved || response.drag_stopped()) {
+            if drag.page == page
+                && (moved || response.drag_stopped_by(egui::PointerButton::Primary))
+            {
                 self.request_selection(worker, page, drag.from, b);
                 self.select_drag = Some(SelectDrag { last: b, ..drag });
             }
         }
-        if response.drag_stopped() {
+        if response.drag_stopped_by(egui::PointerButton::Primary) {
             if let Some(markup) = Markup::for_tool(self.tool) {
                 self.finish_tag = Some((self.latest_tag, markup));
             }
@@ -300,13 +303,13 @@ impl EditState {
         page: i32,
         map: &PageMap,
     ) {
-        if response.drag_started() {
+        if response.drag_started_by(egui::PointerButton::Primary) {
             self.stroke.clear();
         }
-        if response.dragged() {
+        if response.dragged_by(egui::PointerButton::Primary) {
             self.stroke.extend(pointer);
         }
-        if response.drag_stopped() {
+        if response.drag_stopped_by(egui::PointerButton::Primary) {
             let stroke = std::mem::take(&mut self.stroke);
             self.add(NewAnnot::Ink {
                 page,

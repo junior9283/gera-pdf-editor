@@ -1,5 +1,5 @@
 //! Impressão pelo CUPS: impressoras disponíveis, pasta temporária privada e o `lp` numa thread.
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -57,20 +57,71 @@ pub fn printers_in_background(ctx: &egui::Context) -> Receiver<(Vec<String>, Opt
     rx
 }
 
-/// Arquivo temporário novo para imprimir, numa pasta só do usuário (a cópia sai sem senha).
+/// Pasta `base/name` só do usuário (0700), recusando link simbólico ou pasta de outro dono.
+fn private_dir(base: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let dir = base.join(name);
+    let me = std::fs::metadata("/proc/self")?.uid();
+    match std::fs::symlink_metadata(&dir) {
+        Ok(m) if m.file_type().is_symlink() || !m.is_dir() || m.uid() != me => {
+            return Err(std::io::Error::other(format!(
+                "{} não é uma pasta segura para a impressão",
+                dir.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+        }
+        Err(e) => return Err(e),
+    }
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    Ok(dir)
+}
+
+/// Pasta das cópias de impressão (saem sem senha): `$XDG_RUNTIME_DIR/gera-pdf-editor`, ou uma
+/// pasta com o uid no nome dentro do temporário do sistema, que é compartilhado entre usuários.
+fn spool_dir() -> std::io::Result<PathBuf> {
+    match std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
+        Some(runtime) => private_dir(Path::new(&runtime), "gera-pdf-editor"),
+        None => {
+            let uid = std::fs::metadata("/proc/self")?.uid();
+            private_dir(&std::env::temp_dir(), &format!("gera-pdf-editor-{uid}"))
+        }
+    }
+}
+
+/// Arquivo temporário novo para imprimir.
 pub fn temp_file() -> std::io::Result<PathBuf> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let dir = base.join("gera-pdf-editor");
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&dir)?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    Ok(dir.join(format!("imprimir-{}-{n}.pdf", std::process::id())))
+    Ok(spool_dir()?.join(format!("imprimir-{}-{n}.pdf", std::process::id())))
+}
+
+/// Apaga cópias de impressão deixadas por execuções que já terminaram (app fechado no meio).
+fn sweep_stale(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let pid = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("imprimir-"))
+            .and_then(|n| n.split('-').next())
+            .and_then(|p| p.parse::<u32>().ok());
+        if let Some(pid) = pid {
+            if !Path::new("/proc").join(pid.to_string()).exists() {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// Ao abrir o app: limpa sobras de impressões de execuções anteriores.
+pub fn sweep() {
+    if let Ok(dir) = spool_dir() {
+        sweep_stale(&dir);
+    }
 }
 
 /// Roda o `lp` e apaga o temporário em qualquer caso. Devolve a saída ou a mensagem de erro.
@@ -91,10 +142,12 @@ fn run_lp(program: &str, args: &[String], file: &Path) -> Result<String, String>
     }
 }
 
-/// Envios ao CUPS em andamento (cada um numa thread, para não travar a janela).
+/// Envios ao CUPS em andamento (cada um numa thread, para não travar a janela). Ao fechar o
+/// app, espera os envios terminarem: a impressão não se perde e o temporário é apagado.
 #[derive(Default)]
 pub struct PrintJobs {
     running: Vec<(String, Receiver<Result<String, String>>)>,
+    threads: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl PrintJobs {
@@ -105,22 +158,35 @@ impl PrintJobs {
         args: Vec<String>,
         file: PathBuf,
     ) {
-        let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         let lp = program("GERA_LP", "lp");
+        self.spawn(lp, printer, args, file, move || ctx.request_repaint());
+    }
+
+    fn spawn(
+        &mut self,
+        lp: String,
+        printer: String,
+        args: Vec<String>,
+        file: PathBuf,
+        wake: impl Fn() + Send + 'static,
+    ) {
+        let (tx, rx) = mpsc::channel();
         let spawned = std::thread::Builder::new()
             .name("impressao".into())
             .spawn(move || {
                 let _ = tx.send(run_lp(&lp, &args, &file));
-                ctx.request_repaint();
+                wake();
             });
-        if spawned.is_ok() {
+        if let Ok(handle) = spawned {
             self.running.push((printer, rx));
+            self.threads.push(handle);
         }
     }
 
     /// Mensagens dos envios que terminaram ("Enviado para X." ou o erro).
     pub fn poll(&mut self) -> Vec<String> {
+        self.threads.retain(|t| !t.is_finished());
         let mut done = Vec::new();
         self.running.retain(|(printer, rx)| match rx.try_recv() {
             Ok(Ok(_)) => {
@@ -141,9 +207,18 @@ impl PrintJobs {
     }
 }
 
+impl Drop for PrintJobs {
+    fn drop(&mut self) {
+        for t in self.threads.drain(..) {
+            let _ = t.join();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn default_printer_is_read_from_lpstat_output() {
@@ -175,5 +250,63 @@ mod tests {
         assert!(run_lp("false", &[], &file).is_err());
         assert!(!file.exists(), "some também quando o lp falha");
         assert!(run_lp("/nao/existe/lp", &[], &file).is_err());
+    }
+
+    #[test]
+    fn the_spool_folder_is_private_and_refuses_symlinks() {
+        let base = tempfile::tempdir().unwrap();
+        let dir = private_dir(base.path(), "gera-teste").unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        let elsewhere = tempfile::tempdir().unwrap();
+        let link = base.path().join("armadilha");
+        std::os::unix::fs::symlink(elsewhere.path(), &link).unwrap();
+        assert!(
+            private_dir(base.path(), "armadilha").is_err(),
+            "link simbólico é recusado"
+        );
+        let mode = std::fs::metadata(elsewhere.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_ne!(mode, 0o700, "a pasta apontada pelo link não é tocada");
+    }
+
+    #[test]
+    fn stale_copies_from_finished_runs_are_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        let mine = dir
+            .path()
+            .join(format!("imprimir-{}-0.pdf", std::process::id()));
+        let dead = dir.path().join("imprimir-999999999-3.pdf");
+        let other = dir.path().join("anotacoes.txt");
+        for f in [&mine, &dead, &other] {
+            std::fs::write(f, b"x").unwrap();
+        }
+        sweep_stale(dir.path());
+        assert!(mine.exists(), "este processo ainda está vivo");
+        assert!(!dead.exists(), "sobra de execução que já terminou");
+        assert!(other.exists(), "só mexe nas cópias de impressão");
+    }
+
+    #[test]
+    fn dropping_the_jobs_waits_for_lp_to_finish() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("x.pdf");
+        std::fs::write(&file, b"%PDF").unwrap();
+        let mut jobs = PrintJobs::default();
+        jobs.spawn(
+            "sleep".into(),
+            "HP".into(),
+            vec!["0.3".into()],
+            file.clone(),
+            || {},
+        );
+        drop(jobs); // o app fechando logo depois de clicar Imprimir
+        assert!(
+            !file.exists(),
+            "o envio terminou e apagou o temporário antes de sair"
+        );
     }
 }
