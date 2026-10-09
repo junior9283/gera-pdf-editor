@@ -1,8 +1,10 @@
 use crate::canvas::{self, CanvasFrame};
+use crate::edit::{screen_rect, EditState};
 use crate::search::SearchState;
 use crate::view::DocView;
+use app_state::tools::Tool;
 use app_state::zoom;
-use pdf_core::{DocSummary, Request, Response, Worker};
+use pdf_core::{AnnotInfo, DocSummary, Request, Response, Worker};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -17,6 +19,11 @@ pub struct GeraApp {
     pub(crate) last: CanvasFrame,
     pub(crate) jump_to: Option<f32>,
     pub(crate) search: SearchState,
+    pub(crate) edit: EditState,
+    /// Anotações já gravadas no PDF aberto.
+    pub(crate) saved_annots: Vec<AnnotInfo>,
+    /// Janela "descartar alterações?" aberta (o usuário tentou fechar com anotações pendentes).
+    confirm_close: bool,
     /// Modo de medição (`--bench-open`): instante de início do processo.
     bench: Option<Instant>,
 }
@@ -36,6 +43,9 @@ impl GeraApp {
             last: CanvasFrame::default(),
             jump_to: None,
             search: SearchState::default(),
+            edit: EditState::default(),
+            saved_annots: Vec::new(),
+            confirm_close: false,
             bench,
         };
         if let Some(path) = path {
@@ -53,6 +63,8 @@ impl GeraApp {
     }
 
     fn on_opened(&mut self, summary: DocSummary) {
+        self.saved_annots = summary.annots;
+        self.edit.reset();
         self.status = format!(
             "{} — {} páginas",
             summary.path.display(),
@@ -102,7 +114,19 @@ impl GeraApp {
                     }
                 }
                 Response::SearchDone { id } => self.search.on_done(id),
-                _ => {}
+                Response::Words { tag, page, words } => self.edit.on_words(ctx, tag, page, words),
+                Response::Saved { annots } => {
+                    self.edit.reset();
+                    self.saved_annots = annots;
+                    if let Some(view) = self.view.as_mut() {
+                        view.clear_cache(); // as páginas precisam ser renderizadas de novo, agora com as anotações
+                    }
+                    self.status = "Salvo.".into();
+                }
+                Response::SaveFailed(msg) => {
+                    self.edit.saving = false;
+                    self.status = format!("Não foi possível salvar: {msg}");
+                }
             }
         }
     }
@@ -143,6 +167,31 @@ impl GeraApp {
             let Some(view) = self.view.as_mut() else {
                 return;
             };
+            for tool in Tool::ALL {
+                ui.selectable_value(&mut self.edit.tool, tool, tool.label());
+            }
+            ui.separator();
+            if ui
+                .add_enabled(self.edit.pending.is_dirty(), egui::Button::new("↶"))
+                .clicked()
+            {
+                self.edit.pending.undo();
+            }
+            if ui.button("↷").clicked() {
+                self.edit.pending.redo();
+            }
+            let save_label = if self.edit.pending.is_dirty() {
+                "Salvar •"
+            } else {
+                "Salvar"
+            };
+            if ui
+                .add_enabled(!self.edit.saving, egui::Button::new(save_label))
+                .clicked()
+            {
+                self.edit.save(&self.worker, view.path.clone());
+            }
+            ui.separator();
             let mut new_zoom = None;
             if ui.button("−").clicked() {
                 new_zoom = Some(zoom::zoom_out(view.zoom));
@@ -189,6 +238,31 @@ impl GeraApp {
         });
     }
 
+    /// Confirmação de saída com anotações não salvas.
+    fn confirm_close_window(&mut self, ui: &mut egui::Ui) {
+        if !self.confirm_close {
+            return;
+        }
+        let ctx = ui.ctx().clone();
+        egui::Window::new("Alterações não salvas")
+            .collapsible(false)
+            .show(ui, |ui| {
+                ui.label(format!(
+                    "Há {} anotação(ões) que ainda não foram salvas no PDF.",
+                    self.edit.pending.items().len()
+                ));
+                ui.horizontal(|ui| {
+                    if ui.button("Sair sem salvar").clicked() {
+                        self.edit.reset(); // sem pendentes, o fechamento não pede confirmação de novo
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    if ui.button("Voltar").clicked() {
+                        self.confirm_close = false;
+                    }
+                });
+            });
+    }
+
     fn canvas(&mut self, ui: &mut egui::Ui) {
         let Some(view) = self.view.as_mut() else {
             ui.centered_and_justified(|ui| {
@@ -202,13 +276,16 @@ impl GeraApp {
             self.jump_to = Some(self.last.scroll_y * ratio);
         }
         let zoom = view.zoom;
-        let search = &self.search;
+        let (worker, edit, search) = (&self.worker, &mut self.edit, &self.search);
         self.last = canvas::show_pages(
             ui,
             view,
-            &self.worker,
+            worker,
             self.jump_to.take(),
-            &mut |ui, page, page_rect| paint_search_hits(ui, search, page as i32, page_rect, zoom),
+            &mut |ui, page, page_rect| {
+                paint_search_hits(ui, search, page as i32, page_rect, zoom);
+                edit.on_page(ui, worker, page as i32, page_rect, zoom);
+            },
         );
     }
 }
@@ -217,6 +294,30 @@ impl eframe::App for GeraApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
         self.handle_drops(ctx);
+        // Fechar com anotações pendentes pede confirmação, em vez de perdê-las em silêncio.
+        if ctx.input(|i| i.viewport().close_requested()) && self.edit.pending.is_dirty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.confirm_close = true;
+        }
+        // refazer (Ctrl+Shift+Z) antes de desfazer (Ctrl+Z), para um atalho não consumir o outro
+        let (redo, undo, save) = ctx.input_mut(|i| {
+            (
+                i.consume_key(
+                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                    egui::Key::Z,
+                ),
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z),
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::S),
+            )
+        });
+        if redo {
+            self.edit.pending.redo();
+        } else if undo {
+            self.edit.pending.undo();
+        }
+        if let (true, Some(view)) = (save, self.view.as_ref()) {
+            self.edit.save(&self.worker, view.path.clone());
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -225,9 +326,16 @@ impl eframe::App for GeraApp {
         }
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
         egui::Panel::bottom("status").show(ui, |ui| {
-            ui.label(&self.status);
+            let unsaved = self.edit.pending.items().len();
+            let text = match unsaved {
+                0 => self.status.clone(),
+                n => format!("{} — {n} alterações não salvas", self.status),
+            };
+            ui.label(text);
         });
         egui::CentralPanel::default().show(ui, |ui| self.canvas(ui));
+        self.edit.note_window(ui);
+        self.confirm_close_window(ui);
         if let Some(view) = self.view.as_mut() {
             view.end_frame();
         }
@@ -243,14 +351,12 @@ fn paint_search_hits(
     zoom: f32,
 ) {
     for (n, r) in search.hits_on(page) {
-        let a = egui::pos2(page_rect.min.x + r.x0 * zoom, page_rect.min.y + r.y0 * zoom);
-        let b = egui::pos2(page_rect.min.x + r.x1 * zoom, page_rect.min.y + r.y1 * zoom);
         let color = if n == search.current_index() {
             egui::Color32::from_rgba_unmultiplied(255, 140, 0, 110)
         } else {
             egui::Color32::from_rgba_unmultiplied(255, 230, 0, 90)
         };
         ui.painter()
-            .rect_filled(egui::Rect::from_two_pos(a, b), 2.0, color);
+            .rect_filled(screen_rect(r, page_rect.min, zoom), 2.0, color);
     }
 }

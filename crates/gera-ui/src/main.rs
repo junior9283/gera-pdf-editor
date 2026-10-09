@@ -1,5 +1,6 @@
 mod app;
 mod canvas;
+mod edit;
 mod search;
 mod view;
 
