@@ -1,88 +1,374 @@
 use crate::bench::Bench;
 use crate::doc_tab::DocTab;
+use crate::open_dialog::{FileDialogs, Picked};
+use crate::shell::close::{self, CloseFlow, Step};
+use crate::shell::tabs::{self as tab_bar, TabAction, TabLabel};
+use app_state::prefs::Prefs;
+use app_state::recents::{now_secs, RecentFiles};
+use app_state::store;
+use app_state::tabs::{canonical, tab_title, TabList, FIXED, HOME, TOOLS};
 use std::path::PathBuf;
 
+const RECENTS_FILE: &str = "recentes.json";
+const PREFS_FILE: &str = "preferencias.json";
+
 pub struct GeraApp {
-    doc: DocTab,
-    /// Janela "descartar alterações?" aberta (o usuário tentou fechar com anotações pendentes).
-    confirm_close: bool,
-    /// Modo de medição (`--bench-open` / `--bench-scroll`).
+    tabs: TabList,
+    /// Um por aba de documento, na mesma ordem de `tabs.docs()`.
+    docs: Vec<DocTab>,
+    dialogs: FileDialogs,
+    recents: RecentFiles,
+    prefs: Prefs,
+    /// Mensagem da casca (falhas do seletor ou de abertura), mostrada no Início.
+    status: String,
+    closing: Option<CloseFlow>,
+    /// Saída já confirmada: não interceptar o fechamento da janela de novo.
+    allow_close: bool,
     bench: Option<Bench>,
 }
 
 impl GeraApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
-        path: Option<PathBuf>,
+        paths: Vec<PathBuf>,
         bench: Option<Bench>,
     ) -> Self {
-        let mut doc = DocTab::new(&cc.egui_ctx);
-        if let Some(path) = path {
-            doc.open(path);
-        }
-        Self {
-            doc,
-            confirm_close: false,
+        let prefs = store::config_file(PREFS_FILE).map_or_else(Prefs::default, |p| Prefs::load(&p));
+        cc.egui_ctx.set_visuals(if prefs.dark {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        });
+        let mut app = Self {
+            tabs: TabList::default(),
+            docs: Vec::new(),
+            dialogs: FileDialogs::default(),
+            recents: store::config_file(RECENTS_FILE)
+                .map(|p| RecentFiles::load(&p))
+                .unwrap_or_default(),
+            prefs,
+            status: String::new(),
+            closing: None,
+            allow_close: false,
             bench,
+        };
+        for path in paths {
+            app.open_path(&cc.egui_ctx, path);
+        }
+        app
+    }
+
+    pub(crate) fn open_path(&mut self, ctx: &egui::Context, path: PathBuf) {
+        let path = canonical(&path);
+        let before = self.tabs.active();
+        let (tab, created) = self.tabs.open(path.clone());
+        if created {
+            let mut doc = DocTab::new(ctx, path.clone(), self.prefs.dark);
+            doc.open(path);
+            self.docs.push(doc);
+        }
+        self.tabs.activate(before); // `activate` abaixo suspende a aba que estava na frente
+        self.activate(tab);
+    }
+
+    fn activate(&mut self, tab: usize) {
+        let old = self.tabs.active();
+        self.tabs.activate(tab);
+        if old != self.tabs.active() {
+            if let Some(doc) = self.doc_at(old) {
+                doc.suspend();
+            }
+        }
+    }
+
+    fn doc_at(&mut self, tab: usize) -> Option<&mut DocTab> {
+        let i = self.tabs.doc_index(tab)?;
+        self.docs.get_mut(i)
+    }
+
+    fn active_doc(&mut self) -> Option<&mut DocTab> {
+        self.doc_at(self.tabs.active())
+    }
+
+    fn close_tab(&mut self, tab: usize) {
+        if let Some(i) = self.tabs.close(tab) {
+            self.docs.remove(i); // o Worker cai junto e a thread termina
+        }
+    }
+
+    /// Fecha as abas de `paths`, perguntando antes pelas que têm alterações pendentes.
+    fn request_close(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>, quit: bool) {
+        let mut dirty = Vec::new();
+        for path in paths {
+            let Some(tab) = self.tabs.find(&path) else {
+                continue;
+            };
+            if self
+                .doc_at(tab)
+                .is_some_and(|d| d.is_dirty() || d.edit.saving)
+            {
+                dirty.push(path);
+            } else {
+                self.close_tab(tab);
+            }
+        }
+        if !dirty.is_empty() {
+            self.closing = Some(CloseFlow::new(dirty, quit));
+        } else if quit {
+            self.allow_close = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    fn remember(&mut self, path: PathBuf) {
+        self.recents.add(path, now_secs());
+        if let Some(file) = store::config_file(RECENTS_FILE) {
+            if let Err(e) = self.recents.save(&file) {
+                self.status = format!("Não foi possível gravar os recentes: {e}");
+            }
+        }
+    }
+
+    /// Respostas dos workers e do seletor de arquivos.
+    fn poll(&mut self, ctx: &egui::Context) {
+        let active = self.tabs.active();
+        for tab in (FIXED..self.tabs.len()).rev() {
+            let Some(i) = self.tabs.doc_index(tab) else {
+                continue;
+            };
+            let bench = if tab == active {
+                self.bench.as_mut()
+            } else {
+                None
+            };
+            let doc = &mut self.docs[i];
+            doc.poll(ctx, bench);
+            let (opened, failure, renamed) =
+                (doc.take_opened(), doc.take_failure(), doc.take_renamed());
+            let path = doc.path.clone();
+            if opened {
+                self.remember(path);
+            }
+            if let Some(dest) = renamed {
+                let dest = canonical(&dest);
+                self.tabs.rename(tab, dest.clone());
+                self.docs[i].path = dest.clone();
+                self.remember(dest);
+            }
+            if let Some(msg) = failure {
+                self.status = msg;
+                self.close_tab(tab);
+            }
+        }
+        if let Some(picked) = self.dialogs.poll() {
+            match picked {
+                Picked::Open(files) => {
+                    for f in files {
+                        self.open_path(ctx, f);
+                    }
+                }
+                Picked::SaveAs { doc, dest } => self.save_as(doc, dest),
+                Picked::Cancelled => {}
+                Picked::Failed => {
+                    self.status = "Não foi possível abrir o seletor de arquivos.".into()
+                }
+            }
+        }
+    }
+
+    fn save_as(&mut self, doc: PathBuf, dest: PathBuf) {
+        let dest_id = canonical(&dest);
+        let current = self.tabs.find(&doc);
+        if self.tabs.find(&dest_id).is_some_and(|t| Some(t) != current) {
+            self.status = "Esse arquivo já está aberto em outra aba.".into();
+            return;
+        }
+        if let Some(d) = current.and_then(|t| self.doc_at(t)) {
+            d.save_as(dest);
         }
     }
 
     fn handle_drops(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         for file in dropped.iter().map(|f| f.path().to_path_buf()) {
-            if self.doc.view.is_none() {
-                self.doc.open(file);
-            } else if let Ok(exe) = std::env::current_exe() {
-                let _ = std::process::Command::new(exe).arg(file).spawn(); // uma janela por documento
-            }
+            self.open_path(ctx, file);
         }
     }
 
-    /// Confirmação de saída com anotações não salvas.
-    fn confirm_close_window(&mut self, ui: &mut egui::Ui) {
-        if !self.confirm_close {
+    fn shell_keys(&mut self, ctx: &egui::Context) {
+        let (open, close_tab, prev, next) = ctx.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::O),
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::W),
+                i.consume_key(
+                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                    egui::Key::Tab,
+                ),
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Tab),
+            )
+        });
+        if open {
+            self.dialogs.open(ctx);
+        }
+        if close_tab {
+            if let Some(i) = self.tabs.doc_index(self.tabs.active()) {
+                let path = self.tabs.docs()[i].clone();
+                self.request_close(ctx, vec![path], false);
+            }
+        }
+        if prev || next {
+            let old = self.tabs.active();
+            if prev {
+                self.tabs.prev();
+            } else {
+                self.tabs.next();
+            }
+            let new = self.tabs.active();
+            self.tabs.activate(old);
+            self.activate(new);
+        }
+    }
+
+    /// Avança o fechamento em andamento: pergunta, espera o salvamento ou fecha.
+    fn drive_close(&mut self, ui: &mut egui::Ui) {
+        let Some(flow) = self.closing.as_ref() else {
+            return;
+        };
+        if flow.is_done() {
+            let quit = flow.quit();
+            self.closing = None;
+            if quit {
+                self.allow_close = true;
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
             return;
         }
-        let ctx = ui.ctx().clone();
-        egui::Window::new("Alterações não salvas")
-            .collapsible(false)
-            .show(ui, |ui| {
-                ui.label(format!(
-                    "Há {} anotação(ões) que ainda não foram salvas no PDF.",
-                    self.doc.edit.pending.items().len()
-                ));
-                ui.horizontal(|ui| {
-                    if ui.button("Sair sem salvar").clicked() {
-                        self.doc.edit.reset(); // sem pendentes, o fechamento não pede confirmação de novo
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                    if ui.button("Voltar").clicked() {
-                        self.confirm_close = false;
-                    }
-                });
-            });
+        let Some(path) = flow.current().cloned() else {
+            return;
+        };
+        let saving = flow.is_saving();
+        let tab = self.tabs.find(&path);
+        let step = if saving {
+            let ok = match tab.and_then(|t| self.doc_at(t)) {
+                Some(doc) if doc.edit.saving => return, // esperando o worker
+                Some(doc) => !doc.is_dirty(),
+                None => true,
+            };
+            self.closing.as_mut().map(|f| f.saved(ok))
+        } else {
+            if let Some(t) = tab.filter(|&t| t != self.tabs.active()) {
+                self.activate(t); // mostra o documento sobre o qual se pergunta
+            }
+            match close::ask(ui, &tab_title(&path, 60)) {
+                Some(answer) => self.closing.as_mut().map(|f| f.answer(answer)),
+                None => return,
+            }
+        };
+        match step {
+            Some(Step::Save(p)) => {
+                if let Some(doc) = self.tabs.find(&p).and_then(|t| self.doc_at(t)) {
+                    doc.save();
+                }
+            }
+            Some(Step::Close(p)) => {
+                if let Some(t) = self.tabs.find(&p) {
+                    self.close_tab(t);
+                }
+            }
+            Some(Step::Abort) | None => self.closing = None,
+        }
+    }
+
+    fn tab_labels(&self) -> Vec<TabLabel> {
+        self.docs
+            .iter()
+            .map(|d| TabLabel {
+                title: d.title(),
+                tooltip: d.path.display().to_string(),
+                dirty: d.is_dirty(),
+            })
+            .collect()
+    }
+
+    fn home(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(40.0);
+            ui.heading("Gera PDF Editor");
+            ui.add_space(16.0);
+            let open = egui::Button::new("📂  Abrir arquivo…").min_size(egui::vec2(220.0, 40.0));
+            if ui.add(open).clicked() {
+                self.dialogs.open(ui.ctx());
+            }
+            if !self.status.is_empty() {
+                ui.add_space(12.0);
+                ui.label(&self.status);
+            }
+        });
     }
 }
 
 impl eframe::App for GeraApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.doc.poll(ctx, self.bench.as_mut());
+        self.poll(ctx);
         self.handle_drops(ctx);
-        if let (Some(bench), Some(view)) = (self.bench.as_mut(), self.doc.view.as_mut()) {
-            if let Some(y) = bench.scroll_step(ctx, view) {
-                self.doc.jump_to = Some(y);
+        if let Some(i) = self.tabs.doc_index(self.tabs.active()) {
+            let doc = &mut self.docs[i];
+            if let (Some(bench), Some(view)) = (self.bench.as_mut(), doc.view.as_mut()) {
+                if let Some(y) = bench.scroll_step(ctx, view) {
+                    doc.jump_to = Some(y);
+                }
             }
         }
-        // Fechar com anotações pendentes pede confirmação, em vez de perdê-las em silêncio.
-        if ctx.input(|i| i.viewport().close_requested()) && self.doc.is_dirty() {
+        // Fechar a janela com alterações pendentes (em qualquer aba) pergunta antes.
+        if ctx.input(|i| i.viewport().close_requested())
+            && !self.allow_close
+            && self.docs.iter().any(|d| d.is_dirty() || d.edit.saving)
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.confirm_close = true;
+            if self.closing.is_none() {
+                let all = self.tabs.docs().to_vec();
+                self.request_close(ctx, all, true);
+            }
         }
-        self.doc.handle_input(ctx);
+        if self.closing.is_none() {
+            self.shell_keys(ctx);
+            if let Some(doc) = self.active_doc() {
+                doc.handle_input(ctx);
+            }
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.doc.show(ui);
-        self.confirm_close_window(ui);
+        let labels = self.tab_labels();
+        let action = egui::Panel::top("abas")
+            .show(ui, |ui| tab_bar::show(ui, self.tabs.active(), &labels))
+            .inner;
+        match action {
+            Some(TabAction::Activate(t)) => self.activate(t),
+            Some(TabAction::Close(t)) => {
+                if let Some(i) = self.tabs.doc_index(t) {
+                    let path = self.tabs.docs()[i].clone();
+                    self.request_close(ui.ctx(), vec![path], false);
+                }
+            }
+            Some(TabAction::New) => self.dialogs.open(ui.ctx()),
+            None => {}
+        }
+        match self.tabs.active() {
+            HOME => {
+                egui::CentralPanel::default().show(ui, |ui| self.home(ui));
+            }
+            TOOLS => {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    ui.heading("Ferramentas");
+                });
+            }
+            _ => {
+                if let Some(doc) = self.active_doc() {
+                    doc.show(ui);
+                }
+            }
+        }
+        self.drive_close(ui);
     }
 }

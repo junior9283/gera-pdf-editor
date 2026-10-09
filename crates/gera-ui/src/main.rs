@@ -3,7 +3,9 @@ mod bench;
 mod canvas;
 mod doc_tab;
 mod edit;
+mod open_dialog;
 mod search;
+mod shell;
 mod sidebar;
 mod view;
 
@@ -12,13 +14,13 @@ use std::time::Instant;
 
 fn main() -> eframe::Result {
     let started = Instant::now();
-    let mut path = None;
+    let mut paths = Vec::new();
     let (mut bench, mut scroll) = (false, false);
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "--bench-open" => bench = true,
             "--bench-scroll" => (bench, scroll) = (true, true),
-            _ => path = Some(PathBuf::from(arg)),
+            _ => paths.push(PathBuf::from(arg)),
         }
     }
     let options = eframe::NativeOptions {
@@ -35,7 +37,7 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             Ok(Box::new(app::GeraApp::new(
                 cc,
-                path,
+                paths,
                 bench.then(|| bench::Bench::new(started, scroll)),
             )))
         }),

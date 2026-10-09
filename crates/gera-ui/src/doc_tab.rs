@@ -40,6 +40,18 @@ pub enum DocCommand {
 /// Um documento aberto: worker próprio, vista, busca, edição e painel lateral.
 pub struct DocTab {
     pub(crate) worker: Worker,
+    /// Identidade da aba (caminho canônico).
+    pub(crate) path: PathBuf,
+    /// Tema escuro herdado da casca.
+    dark: bool,
+    /// Abriu com sucesso desde a última consulta.
+    opened: bool,
+    /// Falha ao abrir (a aba deve ser fechada).
+    failure: Option<String>,
+    /// "Salvar como" em andamento: novo caminho.
+    save_dest: Option<PathBuf>,
+    /// "Salvar como" concluído: a casca atualiza a aba.
+    renamed: Option<PathBuf>,
     pub(crate) view: Option<DocView>,
     pub(crate) status: String,
     /// Último quadro do canvas (rolagem e página atual).
@@ -64,12 +76,18 @@ pub struct DocTab {
 }
 
 impl DocTab {
-    pub fn new(ctx: &egui::Context) -> Self {
+    pub fn new(ctx: &egui::Context, path: PathBuf, dark: bool) -> Self {
         let ctx = ctx.clone();
         Self {
             worker: Worker::spawn(move || ctx.request_repaint()),
+            path,
+            dark,
+            opened: false,
+            failure: None,
+            save_dest: None,
+            renamed: None,
             view: None,
-            status: "Arraste um PDF para cá ou execute: gera-pdf-editor arquivo.pdf".into(),
+            status: String::new(),
             last: CanvasFrame::default(),
             jump_to: None,
             search: SearchState::default(),
@@ -150,6 +168,46 @@ impl DocTab {
         }
     }
 
+    /// A aba saiu da frente: libera texturas e renders pendentes (só tamanhos, zoom, posição e
+    /// anotações ficam). Ao voltar, as páginas visíveis são pedidas de novo.
+    pub fn suspend(&mut self) {
+        if let Some(view) = self.view.as_mut() {
+            view.clear_cache();
+        }
+    }
+
+    #[allow(dead_code)] // usado pelo menu Preferências (tarefa 9)
+    pub fn set_dark(&mut self, dark: bool) {
+        self.dark = dark;
+        if let Some(view) = self.view.as_mut() {
+            view.dark = dark;
+            view.clear_cache();
+        }
+    }
+
+    pub fn save_as(&mut self, dest: PathBuf) {
+        if self.view.is_some() && !self.edit.saving {
+            self.save_dest = Some(dest.clone());
+            self.edit.save_as(&self.worker, dest);
+        }
+    }
+
+    pub fn take_opened(&mut self) -> bool {
+        std::mem::take(&mut self.opened)
+    }
+
+    pub fn take_failure(&mut self) -> Option<String> {
+        self.failure.take()
+    }
+
+    pub fn take_renamed(&mut self) -> Option<PathBuf> {
+        self.renamed.take()
+    }
+
+    pub fn title(&self) -> String {
+        app_state::tabs::tab_title(&self.path, 28)
+    }
+
     pub fn open(&mut self, path: PathBuf) {
         self.open_with(path, None);
     }
@@ -170,7 +228,7 @@ impl DocTab {
             summary.path.display(),
             summary.sizes.len()
         );
-        let dark = self.view.as_ref().is_some_and(|v| v.dark); // o tema escuro vale para a sessão
+        let dark = self.dark;
         let mut view = DocView::new(summary.path, summary.sizes);
         view.dark = dark;
         self.view = Some(view);
@@ -178,6 +236,7 @@ impl DocTab {
         self.search.start(&self.worker);
         self.last = CanvasFrame::default();
         self.jump_to = Some(0.0);
+        self.opened = true;
     }
 
     pub fn poll(&mut self, ctx: &egui::Context, mut bench: Option<&mut Bench>) {
@@ -205,7 +264,15 @@ impl DocTab {
                     self.status = e.to_string();
                     self.password_prompt = self.opening.clone().map(|p| (p, String::new()));
                 }
-                Response::OpenFailed(e) => self.status = format!("Erro: {e}"),
+                Response::OpenFailed(e) => {
+                    self.status = format!("Erro: {e}");
+                    if self.view.is_none() {
+                        self.failure = Some(format!(
+                            "Não foi possível abrir {}: {e}",
+                            self.path.display()
+                        ));
+                    }
+                }
                 Response::Rendered {
                     page,
                     scale,
@@ -253,9 +320,16 @@ impl DocTab {
                         view.clear_cache(); // as páginas precisam ser renderizadas de novo, agora com as anotações
                     }
                     self.status = "Salvo.".into();
+                    if let Some(dest) = self.save_dest.take() {
+                        if let Some(view) = self.view.as_mut() {
+                            view.path = dest.clone();
+                        }
+                        self.renamed = Some(dest);
+                    }
                 }
                 Response::SaveFailed(msg) => {
                     self.edit.saving = false;
+                    self.save_dest = None;
                     self.status = format!("Não foi possível salvar: {msg}");
                 }
             }
@@ -400,18 +474,6 @@ impl DocTab {
                 commands.push(DocCommand::Save);
             }
             ui.separator();
-            if ui
-                .button(if view.dark { "Claro" } else { "Escuro" })
-                .clicked()
-            {
-                view.dark = !view.dark;
-                view.clear_cache();
-                ui.ctx().set_visuals(if view.dark {
-                    egui::Visuals::dark()
-                } else {
-                    egui::Visuals::light()
-                });
-            }
             if ui.button("−").clicked() {
                 commands.push(DocCommand::ZoomOut);
             }

@@ -258,7 +258,14 @@ impl EditState {
 
     /// Pede ao worker para gravar as pendentes; ignora se não há nada ou já está salvando.
     pub fn save(&mut self, worker: &Worker, dest: PathBuf) {
-        if self.saving || !self.pending.is_dirty() {
+        if self.pending.is_dirty() {
+            self.save_as(worker, dest);
+        }
+    }
+
+    /// Grava o documento em `dest` com as pendentes (mesmo sem nenhuma: "Salvar como").
+    pub fn save_as(&mut self, worker: &Worker, dest: PathBuf) {
+        if self.saving {
             return;
         }
         self.saving = true;
