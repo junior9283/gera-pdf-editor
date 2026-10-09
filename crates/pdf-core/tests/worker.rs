@@ -47,6 +47,11 @@ fn cancelled_render_is_skipped_and_order_is_kept() {
         Response::Rendered { page, .. } => assert_eq!(page, 1),
         other => panic!("esperava Rendered da página 1, veio {other:?}"),
     }
+    // o worker chama wake() depois de enviar a resposta: espera o contador com prazo
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while wakes.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
     assert!(wakes.load(Ordering::SeqCst) >= 2);
 }
 
