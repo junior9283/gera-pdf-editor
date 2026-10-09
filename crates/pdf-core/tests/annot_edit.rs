@@ -316,3 +316,42 @@ fn deleted_annotations_leave_no_trace_in_the_saved_file() {
         "o texto da nota apagada não pode ficar no arquivo"
     );
 }
+
+fn restyle_and_undo(color: Option<mupdf::color::AnnotationColor>) -> std::path::PathBuf {
+    let (dir, path, mut d) = doc();
+    d.save_with(&[note()], &path).unwrap();
+    common::set_raw_colors(&path, color);
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let a = only(&d);
+    d.apply(AnnotOp::Style {
+        page: 0,
+        id: a.id,
+        color: Some([0.1, 0.45, 0.95]),
+        opacity: a.opacity,
+        width: a.width,
+    })
+    .unwrap();
+    d.undo().unwrap();
+    assert!(!d.is_dirty());
+    let out = dir.keep().join("b.pdf");
+    d.save(&out).unwrap();
+    out
+}
+
+#[test]
+fn undoing_a_color_change_on_an_annotation_without_color_removes_it_again() {
+    let out = restyle_and_undo(None);
+    assert_eq!(common::raw_color(&out), None);
+}
+
+#[test]
+fn undoing_a_color_change_keeps_the_original_color_space() {
+    let cmyk = mupdf::color::AnnotationColor::Cmyk {
+        cyan: 0.1,
+        magenta: 0.2,
+        yellow: 0.3,
+        key: 0.0,
+    };
+    let out = restyle_and_undo(Some(cmyk));
+    assert_eq!(common::raw_color(&out), Some(cmyk));
+}

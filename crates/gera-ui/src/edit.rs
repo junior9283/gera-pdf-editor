@@ -202,6 +202,14 @@ impl EditState {
         self.props = None;
     }
 
+    /// Arrasto de anotação cujo soltar não foi visto (a página saiu da tela, a ferramenta mudou):
+    /// é descartado em vez de virar um movimento fora de hora. Chamar depois das páginas.
+    pub fn drop_stale_drag(&mut self, any_button_down: bool) {
+        if !any_button_down {
+            self.annot_drag = None;
+        }
+    }
+
     /// Apaga a anotação selecionada (tecla Delete ou menu).
     pub fn delete_selected(&mut self) {
         if let Some((page, id)) = self.selected.take() {
@@ -899,5 +907,20 @@ mod tests {
         assert_eq!(e.selected, Some((0, 3)));
         e.keep_valid_selection(&[info(1, 3)]);
         assert!(e.selected.is_none(), "mesmo id em outra página não conta");
+    }
+
+    #[test]
+    fn a_drag_whose_release_was_missed_is_dropped_without_an_edit() {
+        let mut e = EditState {
+            annot_drag: Some(drag(Grab::Move, (200.0, 200.0))),
+            ..Default::default()
+        };
+        e.drop_stale_drag(true);
+        assert!(
+            e.annot_drag.is_some(),
+            "botão ainda apertado: segue arrastando"
+        );
+        e.drop_stale_drag(false);
+        assert!(e.annot_drag.is_none() && e.take_ops().is_empty());
     }
 }

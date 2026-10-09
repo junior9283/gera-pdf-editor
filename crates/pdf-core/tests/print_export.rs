@@ -88,3 +88,24 @@ fn a_failed_export_leaves_no_file_behind() {
     assert!(doc.export_for_print(&dest, true).is_err());
     assert!(!dest.exists(), "a cópia sem senha não pode ficar no disco");
 }
+
+#[test]
+fn printing_a_protected_file_does_not_unprotect_or_damage_the_next_save() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = common::encrypted_sample(&dir);
+    let mut doc = PdfDoc::open(&path, Some("segredo")).unwrap();
+    doc.apply(AnnotOp::Create(note())).unwrap();
+    doc.export_for_print(&dir.path().join("imprimir.pdf"), true)
+        .unwrap();
+    doc.save(&path).unwrap();
+    assert!(
+        matches!(
+            PdfDoc::open(&path, None),
+            Err(pdf_core::PdfError::PasswordRequired)
+        ),
+        "o arquivo continua protegido"
+    );
+    let again = PdfDoc::open(&path, Some("segredo")).unwrap();
+    assert_eq!(again.annotations(0).unwrap()[0].contents, "pendente");
+    assert!(!again.document_text().unwrap().trim().is_empty());
+}

@@ -3,7 +3,7 @@
 //! Cada mudança é uma [`Edit`] reversível: aplicá-la devolve a inversa. Apagar (e desfazer uma
 //! criação) só **esconde** a anotação (flag Hidden) — assim desfazer a traz de volta idêntica,
 //! mesmo que venha de outro programa. Ao salvar, as escondidas por nós saem de verdade.
-use crate::doc::{annot_id, rgb_of};
+use crate::doc::annot_id;
 use crate::error::{PdfError, Result};
 use crate::types::PdfRect;
 use mupdf::color::AnnotationColor;
@@ -13,6 +13,16 @@ use std::collections::HashSet;
 
 /// Traços de um desenho (pontos da página).
 pub(crate) type Strokes = Vec<Vec<(f32, f32)>>;
+
+/// O que uma `Style` faz com a cor (/C).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ColorEdit {
+    Keep,
+    /// A cor exata (inclusive cinza ou CMYK de outros programas, ao desfazer).
+    Set(AnnotationColor),
+    /// Sem cor (a anotação original não tinha /C).
+    Clear,
+}
 
 /// Mudança elementar e reversível numa anotação.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,7 +43,7 @@ pub(crate) enum Edit {
     Style {
         page: i32,
         id: i32,
-        color: Option<[f32; 3]>,
+        color: ColorEdit,
         opacity: f32,
         width: Option<f32>,
     },
@@ -209,25 +219,28 @@ pub(crate) fn apply_edit(
             width,
             ..
         } => {
-            let old = Edit::Style {
+            let old_width = if is_ink(&a)? {
+                Some(a.border_width()?)
+            } else {
+                None
+            };
+            let old_color = match a.color()? {
+                Some(c) => ColorEdit::Set(c),
+                None => ColorEdit::Clear,
+            };
+            let old_opacity = a.opacity()?;
+            if let Err(e) = set_style(&mut a, color, opacity, width) {
+                // nada pela metade: volta ao estilo de antes
+                let _ = set_style(&mut a, old_color, old_opacity, old_width);
+                return Err(e);
+            }
+            Edit::Style {
                 page,
                 id,
-                color: a.color()?.map(rgb_of),
-                opacity: a.opacity()?,
-                width: if is_ink(&a)? {
-                    Some(a.border_width()?)
-                } else {
-                    None
-                },
-            };
-            if let Some([red, green, blue]) = color {
-                a.set_color(AnnotationColor::Rgb { red, green, blue })?;
+                color: old_color,
+                opacity: old_opacity,
+                width: old_width,
             }
-            a.set_opacity(opacity.clamp(0.0, 1.0))?;
-            if let Some(w) = width {
-                a.set_border_width(w.max(0.0))?;
-            }
-            old
         }
         Edit::Contents { text, .. } => {
             let old = a.contents()?.unwrap_or_default().to_owned();
@@ -242,6 +255,24 @@ pub(crate) fn apply_edit(
     a.update()?;
     page_ref.update()?;
     Ok(inverse)
+}
+
+fn set_style(
+    a: &mut PdfAnnotation,
+    color: ColorEdit,
+    opacity: f32,
+    width: Option<f32>,
+) -> Result<()> {
+    match color {
+        ColorEdit::Keep => {}
+        ColorEdit::Set(c) => a.set_color(c)?,
+        ColorEdit::Clear => a.object().dict_delete("C")?,
+    }
+    a.set_opacity(opacity.clamp(0.0, 1.0))?;
+    if let Some(w) = width {
+        a.set_border_width(w.max(0.0))?;
+    }
+    Ok(())
 }
 
 /// Desloca o retângulo e os traços.

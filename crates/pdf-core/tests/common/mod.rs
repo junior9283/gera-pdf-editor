@@ -47,3 +47,31 @@ pub fn count_raw_annotations(path: &std::path::Path) -> usize {
         .map(|p| doc.load_pdf_page(p).unwrap().annotations().count())
         .sum()
 }
+
+/// Troca a cor (/C) de todas as anotações: `None` remove a chave (anotação "sem cor").
+#[allow(dead_code)]
+pub fn set_raw_colors(path: &std::path::Path, color: Option<mupdf::color::AnnotationColor>) {
+    let doc = PdfDocument::open(path.to_str().unwrap()).unwrap();
+    for p in 0..doc.page_count().unwrap() {
+        let mut page = doc.load_pdf_page(p).unwrap();
+        let all: Vec<_> = page.annotations().collect();
+        for mut a in all {
+            match color {
+                Some(c) => a.set_color(c).unwrap(),
+                None => a.object().dict_delete("C").unwrap(),
+            }
+            a.update().unwrap();
+        }
+        page.update().unwrap();
+    }
+    doc.save(path.to_str().unwrap()).unwrap();
+}
+
+/// A cor (/C) crua da primeira anotação da página 0.
+#[allow(dead_code)]
+pub fn raw_color(path: &std::path::Path) -> Option<mupdf::color::AnnotationColor> {
+    let doc = PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let page = doc.load_pdf_page(0).unwrap();
+    let a = page.annotations().next().unwrap();
+    a.color().unwrap()
+}

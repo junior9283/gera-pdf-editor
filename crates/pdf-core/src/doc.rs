@@ -1,4 +1,4 @@
-use crate::annot_edit::{self, Edit, History};
+use crate::annot_edit::{self, ColorEdit, Edit, History};
 use crate::error::{PdfError, Result};
 use crate::types::{
     AnnotInfo, AnnotKind, AnnotOp, DocProperties, DocSummary, HistoryState, NewAnnot, OutlineItem,
@@ -233,20 +233,29 @@ impl PdfDoc {
     }
 
     fn write_print_copy(&self, dest: &Path, with_annots: bool) -> Result<()> {
-        let without_annots;
+        // A cópia é sempre um documento à parte: gravar o documento aberto sem criptografia faria o
+        // MuPDF tirar o /Encrypt dele, e o próximo Salvar estragaria o arquivo protegido.
         let copy = if with_annots {
-            &self.inner
+            let mut bytes = Vec::new();
+            let mut keep = PdfWriteOptions::default();
+            keep.set_encryption(Encryption::Keep);
+            self.inner.write_to_with_options(&mut bytes, keep)?;
+            let mut copy = PdfDocument::from_bytes(&bytes)?;
+            if let Some(p) = self.password.as_deref() {
+                copy.authenticate(p)?;
+            }
+            copy
         } else {
-            without_annots = open_authenticated(&self.path, self.password.as_deref())?;
-            for p in 0..without_annots.page_count()? {
-                let mut page = without_annots.load_pdf_page(p)?;
+            let copy = open_authenticated(&self.path, self.password.as_deref())?;
+            for p in 0..copy.page_count()? {
+                let mut page = copy.load_pdf_page(p)?;
                 let all: Vec<_> = page.annotations().collect();
                 for a in all {
                     page.delete_annotation(a)?;
                 }
                 page.update()?;
             }
-            &without_annots
+            copy
         };
         let dest = utf8_path(dest)?;
         // o padrão do MuPDF é manter a criptografia; o CUPS precisa de uma cópia legível
@@ -501,7 +510,9 @@ impl PdfDoc {
             } => Edit::Style {
                 page,
                 id,
-                color,
+                color: color.map_or(ColorEdit::Keep, |[red, green, blue]| {
+                    ColorEdit::Set(AnnotationColor::Rgb { red, green, blue })
+                }),
                 opacity,
                 width,
             },

@@ -579,6 +579,8 @@ impl DocTab {
             None => {}
         }
         egui::CentralPanel::default().show(ui, |ui| self.canvas(ui));
+        let down = ui.input(|i| i.pointer.any_down());
+        self.edit.drop_stale_drag(down);
         self.edit.note_window(ui);
         self.edit.props_window(ui, &self.annots);
         self.send_edits();
