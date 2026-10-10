@@ -188,6 +188,14 @@ impl RedactTool {
                     );
                     ui.color_edit_button_srgb(&mut look.overlay_color);
                 });
+                ui.checkbox(
+                    &mut look.keep_touched_drawings,
+                    "Preservar desenhos que só tocam a marca (bordas de tabela)",
+                )
+                .on_hover_text(
+                    "Desligado (o padrão), todo desenho que passa sob a marca sai inteiro: \
+                     texto convertido em curvas ou assinaturas não ficam recuperáveis.",
+                );
                 Ok(look.clone())
             });
             if let Some(o) = out {

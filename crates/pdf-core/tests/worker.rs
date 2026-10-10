@@ -542,6 +542,7 @@ fn redaction_through_the_worker() {
         fill: [0, 0, 0],
         overlay: String::new(),
         overlay_color: [255, 255, 255],
+        keep_touched_drawings: false,
     }));
     // resposta própria: o "Aplicar e salvar" da interface só grava com ela
     assert!(matches!(
