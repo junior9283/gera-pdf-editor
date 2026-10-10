@@ -310,7 +310,12 @@ fn a_broken_field_does_not_block_new_ones() {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut d = PdfDoc::open(&path, None).unwrap();
-        let r = d.add_field(0, PdfRect::new(300.0, 50.0, 450.0, 72.0), NewFieldKind::Text, "Novo");
+        let r = d.add_field(
+            0,
+            PdfRect::new(300.0, 50.0, 450.0, 72.0),
+            NewFieldKind::Text,
+            "Novo",
+        );
         tx.send(r.is_ok()).unwrap();
     });
     let ok = rx

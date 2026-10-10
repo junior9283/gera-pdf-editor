@@ -9,6 +9,7 @@ pub mod nav;
 pub mod organize;
 pub mod pdf_date;
 pub mod prefs;
+pub mod prepare;
 pub mod print;
 pub mod recents;
 pub mod review;

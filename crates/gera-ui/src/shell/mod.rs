@@ -3,6 +3,7 @@ pub mod annot_props;
 pub mod close;
 pub mod combine;
 pub mod commands;
+pub mod field_props;
 pub mod help;
 pub mod home;
 pub mod identity;

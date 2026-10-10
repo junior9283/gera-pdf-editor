@@ -9,6 +9,7 @@ mod fields;
 mod fill_sign;
 mod open_dialog;
 mod organize;
+mod prepare;
 mod print_job;
 mod search;
 mod shell;

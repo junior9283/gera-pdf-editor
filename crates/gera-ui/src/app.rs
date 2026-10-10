@@ -414,6 +414,12 @@ impl GeraApp {
                 .inner
                 .or(cmd);
         }
+        if doc.prepare_tools {
+            cmd = egui::Panel::top("preparar-formulario")
+                .show(ui, |ui| toolbar::prepare_row(ui, doc))
+                .inner
+                .or(cmd);
+        }
         if doc.fill_tools {
             cmd = egui::Panel::top("preencher-assinar")
                 .show(ui, |ui| toolbar::fill_row(ui, doc))
@@ -590,6 +596,7 @@ impl GeraApp {
         let row = match id {
             tools_catalog::COMMENT => tools_catalog::COMMENT,
             tools_catalog::FILL_SIGN => tools_catalog::FILL_SIGN,
+            tools_catalog::PREPARE_FORM => tools_catalog::PREPARE_FORM,
             _ => return,
         };
         match self.last_doc.clone().and_then(|p| self.tabs.find(&p)) {
