@@ -129,6 +129,9 @@ pub struct DocTab {
     pub(crate) security: pdf_core::SecurityInfo,
     /// Linha Proteger PDF aberta.
     pub(crate) protect_tools: bool,
+    /// Ferramenta Redigir aberta e o estado dela.
+    pub(crate) redact_tools: bool,
+    pub(crate) redact: crate::redact_tool::RedactTool,
     pub(crate) protect: Option<crate::shell::protect_dialog::ProtectDialog>,
     /// Pedido da senha de permissões (Desbloquear).
     pub(crate) unlock: Option<String>,
@@ -237,6 +240,8 @@ impl DocTab {
             cert: Default::default(),
             security: Default::default(),
             protect_tools: false,
+            redact_tools: false,
+            redact: Default::default(),
             protect: None,
             unlock: None,
             compress: None,
@@ -784,6 +789,11 @@ impl DocTab {
                     self.status = format!("Não foi possível fazer a alteração: {msg}");
                 }
                 Response::PageImages { page, images } => self.edit_pdf.on_images(page, images),
+                Response::RedactHits(hits) => {
+                    if let Some(find) = self.redact.find.as_mut() {
+                        find.on_hits(hits);
+                    }
+                }
                 Response::PaginationState {
                     kind,
                     present,
@@ -1290,6 +1300,7 @@ impl DocTab {
             tc::EDIT_PDF => (!p.modify).then_some("editar o PDF"),
             tc::WATERMARK | tc::HEADER_FOOTER => (!p.modify).then_some("alterar as páginas"),
             tc::CERTIFICATES => (!p.forms).then_some("assinar"),
+            tc::REDACT => (!p.modify).then_some("redigir"),
             _ => None,
         };
         if let Some(what) = denied {
@@ -1297,6 +1308,16 @@ impl DocTab {
             return;
         }
         self.protect_tools = id == tc::PROTECT;
+        // Redigir: abre marcando texto; ao sair, as ferramentas de marcar voltam a Selecionar
+        self.redact_tools = id == tc::REDACT;
+        if self.redact_tools {
+            self.edit.tool = app_state::tools::Tool::RedactText;
+        } else if matches!(
+            self.edit.tool,
+            app_state::tools::Tool::RedactText | app_state::tools::Tool::RedactArea
+        ) {
+            self.edit.tool = app_state::tools::Tool::Select;
+        }
         self.comment_tools = id == app_state::tools_catalog::COMMENT;
         self.fill_tools = id == app_state::tools_catalog::FILL_SIGN;
         self.prepare_tools = id == app_state::tools_catalog::PREPARE_FORM;
@@ -1510,6 +1531,7 @@ impl DocTab {
         self.field_props_window(ui.ctx());
         self.protect_windows(ui.ctx());
         self.pagination_windows(ui.ctx());
+        self.redact_windows(ui.ctx());
         self.compress_window(ui.ctx());
         self.export_window(ui.ctx());
         self.ocr_window(ui.ctx());

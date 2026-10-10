@@ -14,6 +14,7 @@ mod organize;
 mod pagination_tool;
 mod prepare;
 mod print_job;
+mod redact_tool;
 mod search;
 mod shell;
 mod sidebar;

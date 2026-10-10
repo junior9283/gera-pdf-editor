@@ -139,6 +139,8 @@ pub enum Markup {
     Highlight,
     Underline,
     StrikeOut,
+    /// Marca de redação sobre o texto (Redigir).
+    Redact,
 }
 
 impl Markup {
@@ -147,6 +149,7 @@ impl Markup {
         match tool {
             Tool::Highlight => Some(Self::Highlight),
             Tool::Underline => Some(Self::Underline),
+            Tool::RedactText => Some(Self::Redact),
             _ => None,
         }
     }
@@ -156,6 +159,7 @@ impl Markup {
             Self::Highlight => NewAnnot::Highlight { page, rects },
             Self::Underline => NewAnnot::Underline { page, rects },
             Self::StrikeOut => NewAnnot::StrikeOut { page, rects },
+            Self::Redact => NewAnnot::Redact { page, rects },
         }
     }
 }
@@ -447,7 +451,7 @@ impl EditState {
             .interact_pointer_pos()
             .map(|p| map.to_page(p.into()));
         match self.tool {
-            Tool::Select | Tool::Highlight | Tool::Underline => {
+            Tool::Select | Tool::Highlight | Tool::Underline | Tool::RedactText => {
                 let grabbed = self.tool == Tool::Select
                     && self.annot_gestures(&response, pointer, annots, page, map);
                 if !grabbed {
@@ -466,7 +470,13 @@ impl EditState {
             }
             Tool::Ink => self.draw_ink(ui, &response, pointer, page, map),
             Tool::Fill => self.fill_gestures(ui, &response, pointer, page, map),
-            Tool::TextBox | Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Arrow | Tool::Stamp => {
+            Tool::TextBox
+            | Tool::Rect
+            | Tool::Ellipse
+            | Tool::Line
+            | Tool::Arrow
+            | Tool::Stamp
+            | Tool::RedactArea => {
                 if let Some(at) = self.create_gestures(ui, &response, pointer, page, map) {
                     let author = self.author.clone();
                     if !self.place_stamp(page, at, author.as_deref(), crate::create::local_now()) {

@@ -52,6 +52,7 @@ pub(crate) fn kind_label(kind: AnnotKind) -> &'static str {
         AnnotKind::Ellipse => "Elipse",
         AnnotKind::Line => "Linha",
         AnnotKind::Stamp => "Carimbo",
+        AnnotKind::Redact => "Marca de redação",
         AnnotKind::Other => "Anotação",
     }
 }
