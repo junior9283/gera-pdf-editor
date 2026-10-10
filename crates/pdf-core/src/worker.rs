@@ -1,7 +1,7 @@
 use crate::error::PdfError;
 use crate::types::{
-    AnnotInfo, AnnotOp, DocProperties, DocSummary, HistoryState, PdfRect, RenderedPage, Rotation,
-    TextSelection,
+    AnnotInfo, AnnotOp, Changed, DocProperties, DocSummary, HistoryState, PageOp, PdfRect,
+    RenderedPage, Rotation, TextSelection,
 };
 use crate::PdfDoc;
 use std::path::PathBuf;
@@ -52,6 +52,14 @@ pub enum Request {
     Redo,
     /// Autor gravado nas anotações criadas (vale também para documentos abertos depois).
     SetAuthor(Option<String>),
+    /// Organizar páginas (girar, excluir, mover, inserir, substituir, recortar).
+    Pages(PageOp),
+    /// Grava as páginas em outro(s) arquivo(s); o documento não muda.
+    Extract {
+        pages: Vec<i32>,
+        dest: PathBuf,
+        separate: bool,
+    },
     /// Seleção pelo fluxo do texto entre `a` e `b` (pontos da página).
     SelectText {
         tag: u64,
@@ -126,6 +134,14 @@ pub enum Response {
         history: HistoryState,
     },
     AnnotFailed(String),
+    /// As páginas mudaram (organizar, ou desfazer/refazer de uma operação de página): o resumo
+    /// novo do documento inteiro.
+    PagesChanged {
+        summary: DocSummary,
+        history: HistoryState,
+    },
+    PagesFailed(String),
+    Extracted(Vec<PathBuf>),
 }
 
 const NO_DOC: &str = "nenhum documento aberto";
@@ -246,7 +262,20 @@ impl State {
                     },
                 });
             }
-            Request::Annot(op) => self.edit(send, |d| d.apply(op)),
+            Request::Annot(op) => self.edit(send, |d| d.apply(op).map(Changed::Pages)),
+            Request::Pages(op) => {
+                self.edit(send, |d| d.apply_pages(op).map(|()| Changed::Document))
+            }
+            Request::Extract {
+                pages,
+                dest,
+                separate,
+            } => send(
+                match self.with_doc(|d| d.extract(&pages, &dest, separate)) {
+                    Ok(files) => Response::Extracted(files),
+                    Err(e) => Response::PagesFailed(e),
+                },
+            ),
             Request::Undo => self.edit(send, PdfDoc::undo),
             Request::SetAuthor(author) => {
                 if let Some(d) = self.doc.as_mut() {
@@ -292,14 +321,21 @@ impl State {
     fn edit(
         &mut self,
         send: &dyn Fn(Response),
-        f: impl FnOnce(&mut PdfDoc) -> crate::Result<Vec<i32>>,
+        f: impl FnOnce(&mut PdfDoc) -> crate::Result<Changed>,
     ) {
         let Some(d) = self.doc.as_mut() else {
             send(Response::AnnotFailed(NO_DOC.into()));
             return;
         };
         match f(d) {
-            Ok(pages) => send(Response::AnnotsChanged {
+            Ok(Changed::Document) => send(match d.summary() {
+                Ok(summary) => Response::PagesChanged {
+                    summary,
+                    history: d.history_state(),
+                },
+                Err(e) => Response::PagesFailed(e.to_string()),
+            }),
+            Ok(Changed::Pages(pages)) => send(Response::AnnotsChanged {
                 annots: pages
                     .iter()
                     .flat_map(|&p| d.annotations(p).unwrap_or_default())

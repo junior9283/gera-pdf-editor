@@ -5,6 +5,7 @@ pub mod close;
 pub mod comments;
 pub mod layout;
 pub mod nav;
+pub mod organize;
 pub mod pdf_date;
 pub mod prefs;
 pub mod print;

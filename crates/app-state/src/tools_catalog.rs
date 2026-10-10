@@ -42,6 +42,10 @@ pub struct ToolEntry {
 }
 
 pub const COMMENT: &str = "comentar";
+/// Ferramentas que abrem o Organizar páginas.
+pub const ORGANIZE: &str = "organizar";
+pub const INSERT: &str = "inserir";
+pub const CROP: &str = "recortar";
 
 const fn tool(
     id: &'static str,
@@ -76,12 +80,12 @@ pub const CATALOG: &[ToolEntry] = &[
     tool("redigir", "Redigir", "⬛", Protect, Planned("v5"), "Apagar informações sensíveis de vez"),
     tool("comprimir", "Comprimir PDF", "⛃", Protect, Planned("v5"), "Reduzir o tamanho do arquivo"),
     tool("formulario", "Preparar formulário", "🗋", Protect, Planned("v3"), "Criar campos de formulário"),
-    tool("organizar", "Organizar páginas", "🗁", Organize, Planned("v2"), "Reordenar, girar e excluir páginas"),
+    tool("organizar", "Organizar páginas", "🗁", Organize, Ready, "Reordenar, girar e excluir páginas"),
     tool("dividir", "Dividir PDF", "✂", Organize, Planned("v2"), "Separar em vários arquivos"),
-    tool("inserir", "Inserir páginas", "➕", Organize, Planned("v2"), "Trazer páginas de outro arquivo"),
+    tool("inserir", "Inserir páginas", "➕", Organize, Ready, "Trazer páginas de outro arquivo"),
     tool("marca-dagua", "Marca d'água", "💧", Organize, Planned("v2"), "Texto ou imagem em todas as páginas"),
     tool("cabecalho", "Cabeçalho e rodapé", "📑", Organize, Planned("v2"), "Numeração e textos nas margens"),
-    tool("recortar", "Recortar páginas", "⛶", Organize, Planned("v2"), "Ajustar as margens das páginas"),
+    tool("recortar", "Recortar páginas", "⛶", Organize, Ready, "Ajustar as margens das páginas"),
 ];
 
 pub fn find(id: &str) -> Option<&'static ToolEntry> {
@@ -125,18 +129,15 @@ mod tests {
     }
 
     #[test]
-    fn only_comment_is_ready_in_this_phase() {
+    fn tools_of_the_finished_phases_are_ready() {
         let ready: Vec<_> = CATALOG
             .iter()
             .filter(|t| t.status == Status::Ready)
             .map(|t| t.id)
             .collect();
-        assert_eq!(ready, [COMMENT]);
+        assert_eq!(ready, [COMMENT, "organizar", "inserir", "recortar"]);
         assert_eq!(find(COMMENT).map(badge).as_deref(), Some(""));
-        assert_eq!(
-            find("organizar").map(badge).as_deref(),
-            Some("Em breve · v2")
-        );
+        assert_eq!(find("dividir").map(badge).as_deref(), Some("Em breve · v2"));
         assert!(find("inexistente").is_none());
         assert!(CATALOG.iter().all(|t| t.status == Status::Ready
             || matches!(t.status, Status::Planned(p) if p.starts_with('v'))));

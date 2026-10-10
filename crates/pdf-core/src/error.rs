@@ -14,6 +14,8 @@ pub enum PdfError {
     InvalidScale(f32),
     #[error("anotação inválida: {0}")]
     InvalidAnnotation(String),
+    #[error("operação de página inválida: {0}")]
+    InvalidPages(String),
     #[error("erro do motor PDF: {0}")]
     Engine(String),
     #[error("erro de arquivo: {0}")]
