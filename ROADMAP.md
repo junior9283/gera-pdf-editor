@@ -20,10 +20,20 @@ A meta da versão **1.0.0**: todas as ferramentas do Adobe Acrobat Pro, com qual
 
 ## Em andamento
 
-- Avaliação para a 1.0.0: todas as ferramentas do catálogo do Acrobat Pro estão prontas.
+- Avaliação para a 1.0.0 concluída: 32 lacunas P1 e 71 P2 em relação ao Acrobat Pro
+  ([análise](docs/superpowers/specs/2026-10-10-gera-pdf-editor-avaliacao-1.0.md)).
+- [ ] v6a — navegar e exibir: links, Ir para página, Vista anterior/seguinte, modo leitura, níveis de zoom
 
 ## Planejado
 
+- [ ] v6b — ferramentas Mão e Zoom, Preferências (Ctrl+K), Recortar/Colar, busca com opções, menu de contexto
+- [ ] v6c — painéis laterais: miniaturas e marcadores editáveis, Anexos, Camadas, rótulos de página
+- [ ] v6d — comentários completos: inserir/substituir texto, nuvem, polígono, texto explicativo, FDF/XFDF
+- [ ] v6e — formulários avançados: detecção de campos, Botão e Data, Formatar/Validar/Calcular
+- [ ] v6f — editar PDF: painel Formatar, ferramenta Link, plano de fundo
+- [ ] v6g — converter: criar de Office, exportar Excel/PowerPoint/HTML
+- [ ] v6h a v6n — impressão de livreto/pôster e Otimizador, ortografia e digitalização, Medir e réguas,
+  certificados avançados, acessibilidade, PDF/A-X-UA e Preflight, pesquisa em vários arquivos
 - [ ] Comparar arquivos: visão "só antigo / só novo", filtros de cabeçalho/rodapé, fundo e
   anotações, bandas ligando os dois lados
 - [ ] Melhorias pendentes:
