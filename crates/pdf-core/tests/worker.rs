@@ -345,3 +345,28 @@ fn field_properties_come_from_the_worker() {
         other => panic!("esperava FieldProps, veio {other:?}"),
     }
 }
+
+#[test]
+fn signing_through_the_worker_reports_the_new_signature() {
+    let (dir, w, _) = opened(1);
+    let id = pdf_core::DigitalId::create_self_signed("Bia", "", "", "x", &dir.path().join("b.pfx"))
+        .unwrap();
+    w.send(Request::SignDigitally {
+        place: pdf_core::SignPlace::New {
+            page: 0,
+            rect: PdfRect::new(100.0, 100.0, 300.0, 150.0),
+        },
+        id: Box::new(id),
+        reason: "Ok".into(),
+        location: String::new(),
+    });
+    assert!(matches!(recv(&w), Response::Signed { .. }));
+    w.send(Request::Signatures);
+    match recv(&w) {
+        Response::Signatures(s) => {
+            assert_eq!(s.len(), 1);
+            assert_eq!(s[0].integrity, pdf_core::Integrity::Intact);
+        }
+        other => panic!("esperava Signatures, veio {other:?}"),
+    }
+}
