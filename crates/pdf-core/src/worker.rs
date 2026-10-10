@@ -83,6 +83,12 @@ pub enum Request {
     Compress {
         level: crate::CompressLevel,
     },
+    /// Reconhecer texto (OCR) nas páginas; o progresso chega a cada página.
+    RecognizeText {
+        pages: Vec<i32>,
+        lang: crate::OcrLanguage,
+        cancel: CancelToken,
+    },
     /// Exportar PDF (Word, texto, imagens) ao lado do original.
     Export {
         format: crate::ExportFormat,
@@ -213,6 +219,16 @@ pub enum Response {
         report: crate::CompressReport,
     },
     CompressFailed(String),
+    /// Reconhecer texto: começando a página `done` de `total`.
+    OcrProgress {
+        done: usize,
+        total: usize,
+    },
+    OcrDone {
+        report: crate::OcrReport,
+        history: HistoryState,
+    },
+    OcrFailed(String),
     /// Arquivos criados pelo Exportar PDF.
     ExportedTo(Vec<PathBuf>),
     ExportToFailed(String),
@@ -364,6 +380,24 @@ impl State {
             Request::SetProtection(p) => self.security(send, |d| d.set_protection(p)),
             Request::Unlock { password } => self.security(send, |d| d.unlock(&password)),
             Request::Security => self.security(send, |_| Ok(())),
+            Request::RecognizeText {
+                pages,
+                lang,
+                cancel,
+            } => {
+                let total = pages.len();
+                let result = self.with_doc_mut(|d| {
+                    let report = d.recognize_text(&pages, lang, |done, _| {
+                        send(Response::OcrProgress { done, total });
+                        !cancel.is_cancelled()
+                    })?;
+                    Ok((report, d.history_state()))
+                });
+                send(match result {
+                    Ok((report, history)) => Response::OcrDone { report, history },
+                    Err(e) => Response::OcrFailed(e),
+                });
+            }
             Request::Export { format } => send(match self.with_doc(|d| d.export(format)) {
                 Ok(files) => Response::ExportedTo(files),
                 Err(e) => Response::ExportToFailed(e),

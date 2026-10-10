@@ -19,6 +19,14 @@ rm -rf "$APPDIR" && mkdir -p "$APPDIR/usr/bin" "$DOCDIR" dist
 cp target/release/gera-pdf-editor "$APPDIR/usr/bin/"
 cp packaging/gera-pdf-editor.desktop packaging/gera-pdf-editor.svg "$APPDIR/"
 cp LICENSE THIRD_PARTY_NOTICES.md "$DOCDIR/" # AGPL-3.0: a licença e os avisos acompanham o binário
+cp crates/pdf-core/fonts/OFL.txt "$DOCDIR/OFL-GreatVibes.txt"
+# dados de idioma do OCR (português e inglês): o app os procura em $APPDIR/usr/share/tessdata
+mkdir -p "$APPDIR/usr/share/tessdata"
+for lang in por eng; do
+  for dir in /usr/share/tesseract/tessdata /usr/share/tessdata /usr/share/tesseract-ocr/5/tessdata; do
+    if [ -f "$dir/$lang.traineddata" ]; then cp "$dir/$lang.traineddata" "$APPDIR/usr/share/tessdata/"; break; fi
+  done
+done
 ln -s usr/bin/gera-pdf-editor "$APPDIR/AppRun"
 
 if [ ! -x "$TOOL" ]; then

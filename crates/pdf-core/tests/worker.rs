@@ -419,3 +419,30 @@ fn compressing_through_the_worker_refuses_a_file_that_would_not_shrink() {
         other => panic!("esperava CompressFailed, veio {other:?}"),
     }
 }
+
+#[test]
+fn recognizing_text_reports_progress_and_the_result() {
+    // páginas com texto: puladas, mas o progresso e o resultado chegam
+    let (_dir, w, _) = opened(2);
+    w.send(Request::RecognizeText {
+        pages: vec![0, 1],
+        lang: pdf_core::OcrLanguage::English,
+        cancel: CancelToken::new(),
+    });
+    let mut progress = 0;
+    loop {
+        match recv(&w) {
+            Response::OcrProgress { done, total } => {
+                assert_eq!(total, 2);
+                assert!(done < 2);
+                progress += 1;
+            }
+            Response::OcrDone { report, .. } => {
+                assert_eq!((report.recognized, report.skipped), (0, 2));
+                break;
+            }
+            other => panic!("inesperado: {other:?}"),
+        }
+    }
+    assert_eq!(progress, 2);
+}
