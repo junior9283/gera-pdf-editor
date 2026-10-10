@@ -6,7 +6,29 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 ## [Não lançado]
 
-- Comparar arquivos (rumo à 1.0.0).
+- Avaliação para a 1.0.0.
+
+## [0.12.0] — 2026-10-10 · Comparar arquivos (v5f)
+
+### Adicionado
+- **Comparar arquivos**: escolhe o arquivo antigo (o da aba ativa entra sozinho) e o novo, as
+  páginas de cada um, trocar os dois, "Comparar somente texto" e "Incluir formatação"; roda em
+  segundo plano com progresso e Cancelar.
+- O resultado é um PDF, como o relatório do Acrobat:
+  - resumo com a contagem por tipo, a legenda e o link para a primeira alteração;
+  - páginas lado a lado, com o antigo à esquerda e o novo à direita;
+  - cada alteração marcada na cor do tipo: Substituído, Inserido, Excluído, Formatação e Imagem;
+  - páginas inseridas ou excluídas aparecem sozinhas, com o aviso;
+  - marcadores por par de páginas.
+- As alterações são comentários travados: aparecem no painel Comentários.
+- A linha **Comparação** traz "Alteração i de N", **Anterior** (`Ctrl+,`) e **Próxima** (`Ctrl+.`).
+- As páginas formam par pelo texto que as distingue; o cabeçalho e o rodapé repetidos não
+  embaralham os pares.
+
+### Segurança
+- Arquivo protegido contra cópia é recusado.
+- O resultado não grava por cima dos arquivos comparados.
+- Há tetos de palavras, letras, imagens decodificadas e conteúdo copiado, contra PDFs maliciosos.
 
 ## [0.11.2] — 2026-10-10 · Redação de desenhos
 

@@ -62,6 +62,7 @@ e já traz os dados de OCR em português e inglês.
 | **Digitalizar e OCR** | Reconhece o texto de páginas escaneadas (Tesseract) e o torna pesquisável e selecionável |
 | **Redigir** | Marcar texto e áreas, localizar por frase ou padrões (CPF, CNPJ, telefone, e-mail, cartão, CEP, data), aplicar de forma permanente (texto, imagens, desenhos, campos, comentários e texto alternativo) e limpar o documento (metadados, anexos, scripts) |
 | **Marca d'água, cabeçalho e rodapé** | Marca de texto, imagem ou página de PDF (rotação, opacidade, escala, atrás/na frente); cabeçalho e rodapé com número da página, data e numeração Bates; Atualizar e Remover (também as do Acrobat) |
+| **Comparar arquivos** | Diferenças de texto (substituído, inserido, excluído), de formatação e de imagens entre duas versões; relatório PDF lado a lado com resumo, legenda e as alterações no painel Comentários; Próxima/Anterior alteração (`Ctrl+.`/`Ctrl+,`) |
 | **Editar PDF** | Texto: editar no lugar com a fonte, o tamanho e a cor originais, parágrafos que refluem, adicionar texto. Imagens: mover, redimensionar mantendo a proporção, girar, substituir, adicionar e excluir. Tudo com desfazer |
 
 Atalhos do Acrobat: `Ctrl+O`, `Ctrl+S`, `Ctrl+Shift+S`, `Ctrl+P`, `Ctrl+F`, `Ctrl+Z`/`Ctrl+Shift+Z`,
@@ -86,7 +87,8 @@ interface) e revisão de código independente antes de entrar na `main`.
 | v4b | Editar PDF: texto | ✅ 0.9.0 |
 | v2c | Marca d'água, cabeçalho e rodapé, Bates | ✅ 0.10.0 |
 | v5e | Redigir e limpar documento | ✅ 0.11.2 |
-| — | Comparar arquivos | 🚧 próxima (rumo à 1.0.0) |
+| v5f | Comparar arquivos | ✅ 0.12.0 |
+| — | Avaliação para a 1.0.0 | 🚧 próxima |
 
 O histórico de cada versão está no [CHANGELOG](CHANGELOG.md) e o plano detalhado no [ROADMAP](ROADMAP.md).
 As especificações e os planos de cada etapa ficam em [`docs/superpowers`](docs/superpowers).

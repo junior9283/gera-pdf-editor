@@ -16,14 +16,16 @@ A meta da versão **1.0.0**: todas as ferramentas do Adobe Acrobat Pro, com qual
 - [x] v4b — editar texto (0.9.0)
 - [x] v2c — marca d'água, cabeçalho e rodapé, Bates (0.10.0)
 - [x] v5e — redigir e limpar documento (0.11.0)
+- [x] v5f — comparar arquivos (0.12.0)
 
 ## Em andamento
 
-- Ferramentas restantes do Acrobat Pro, abaixo.
+- Avaliação para a 1.0.0: todas as ferramentas do catálogo do Acrobat Pro estão prontas.
 
 ## Planejado
 
-- [ ] Comparar arquivos (diferenças de texto e imagem entre duas versões)
+- [ ] Comparar arquivos: visão "só antigo / só novo", filtros de cabeçalho/rodapé, fundo e
+  anotações, bandas ligando os dois lados
 - [ ] Melhorias pendentes:
   - progresso do Exportar;
   - object streams no Comprimir;
