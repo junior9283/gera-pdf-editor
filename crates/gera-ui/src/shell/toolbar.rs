@@ -162,6 +162,65 @@ pub fn prepare_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     out
 }
 
+/// Linha do Editar PDF: acrescentar, girar, substituir e excluir imagens, desfazer/refazer e
+/// Fechar.
+pub fn edit_pdf_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
+    let mut out = None;
+    ui.horizontal(|ui| {
+        let placing = doc.edit_pdf.placing.is_some();
+        if ui
+            .add(egui::Button::selectable(placing, "🖼 Adicionar imagem"))
+            .on_hover_text("Escolha a imagem e clique na página para colocá-la")
+            .clicked()
+        {
+            if placing {
+                doc.edit_pdf.placing = None;
+            } else {
+                doc.pick_image(ui.ctx(), false);
+            }
+        }
+        ui.separator();
+        let selected = doc.edit_pdf.selected.is_some();
+        ui.add_enabled_ui(selected, |ui| {
+            if ui
+                .button("⟲")
+                .on_hover_text("Girar no sentido anti-horário")
+                .clicked()
+            {
+                doc.rotate_image(false);
+            }
+            if ui
+                .button("⟳")
+                .on_hover_text("Girar no sentido horário")
+                .clicked()
+            {
+                doc.rotate_image(true);
+            }
+            if ui.button("Substituir imagem…").clicked() {
+                doc.pick_image(ui.ctx(), true);
+            }
+        });
+        button(
+            ui,
+            &mut out,
+            "🗑",
+            Command::Doc(DocCommand::Delete),
+            selected,
+        );
+        ui.separator();
+        let can_edit = !doc.edit.saving;
+        let can_undo = can_edit && doc.is_dirty();
+        button(ui, &mut out, "⮪", Command::Doc(DocCommand::Undo), can_undo);
+        button(ui, &mut out, "⮫", Command::Doc(DocCommand::Redo), can_edit);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Fechar").clicked() {
+                doc.show_row("");
+            }
+        });
+    });
+    out
+}
+
 /// Linha do Preencher e assinar: texto, tamanho, marcas, assinatura e iniciais (como no Acrobat).
 pub fn fill_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     let mut out = None;

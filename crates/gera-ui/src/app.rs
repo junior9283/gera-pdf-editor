@@ -514,6 +514,12 @@ impl GeraApp {
                 .inner
                 .or(cmd);
         }
+        if doc.edit_pdf_tools {
+            cmd = egui::Panel::top("editar-pdf")
+                .show(ui, |ui| toolbar::edit_pdf_row(ui, doc))
+                .inner
+                .or(cmd);
+        }
         if doc.prepare_tools {
             cmd = egui::Panel::top("preparar-formulario")
                 .show(ui, |ui| toolbar::prepare_row(ui, doc))
@@ -738,6 +744,7 @@ impl GeraApp {
             tools_catalog::COMMENT => tools_catalog::COMMENT,
             tools_catalog::FILL_SIGN => tools_catalog::FILL_SIGN,
             tools_catalog::PREPARE_FORM => tools_catalog::PREPARE_FORM,
+            tools_catalog::EDIT_PDF => tools_catalog::EDIT_PDF,
             tools_catalog::CERTIFICATES => tools_catalog::CERTIFICATES,
             tools_catalog::PROTECT => tools_catalog::PROTECT,
             _ => return,

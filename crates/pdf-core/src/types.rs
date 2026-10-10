@@ -31,6 +31,11 @@ impl PdfRect {
         PdfRect::new(self.x0 + dx, self.y0 + dy, self.x1 + dx, self.y1 + dy)
     }
 
+    /// O ponto está dentro (bordas incluídas).
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        (self.x0..=self.x1).contains(&x) && (self.y0..=self.y1).contains(&y)
+    }
+
     pub fn intersects(&self, o: &PdfRect) -> bool {
         self.x0 < o.x1 && o.x0 < self.x1 && self.y0 < o.y1 && o.y0 < self.y1
     }
