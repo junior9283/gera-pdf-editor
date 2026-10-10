@@ -6,6 +6,7 @@ mod digital_id;
 mod doc;
 mod error;
 mod forms;
+mod owner_password;
 mod pages;
 mod prepare;
 mod security;

@@ -191,6 +191,9 @@ pub struct EditState {
     pub author: Option<String>,
     /// Preencher e assinar: ferramenta, tamanhos e janela de assinatura.
     pub fill: crate::fill_sign::FillState,
+    /// Permissões do documento protegido (a aba atualiza a cada quadro).
+    pub can_copy: bool,
+    pub can_annotate: bool,
     /// Carimbo dinâmico esperando a Identidade: (página, ponto).
     pub identity_for: Option<(i32, (f32, f32))>,
 }
@@ -391,6 +394,9 @@ impl EditState {
 
     /// Copia o texto selecionado (Ctrl+C); sem seleção, a área de transferência não muda.
     pub fn copy(&self, ctx: &egui::Context) {
+        if !self.can_copy {
+            return;
+        }
         if let Some(s) = self.selection.as_ref().filter(|s| !s.text.is_empty()) {
             ctx.copy_text(s.text.clone());
         }
@@ -606,8 +612,14 @@ impl EditState {
         if !on_annot && !on_text {
             return;
         }
+        let (can_copy, can_annotate) = (self.can_copy, self.can_annotate);
         response.context_menu(|ui| {
             if on_annot {
+                // documento protegido contra comentários: o menu não oferece alterar
+                if !can_annotate {
+                    ui.label("O documento não permite alterar comentários.");
+                    return;
+                }
                 if ui.button("Propriedades…").clicked() {
                     self.props = self
                         .selected
@@ -619,8 +631,14 @@ impl EditState {
                 }
                 return;
             }
-            if ui.button("Copiar").clicked() {
+            if ui
+                .add_enabled(can_copy, egui::Button::new("Copiar"))
+                .clicked()
+            {
                 self.copy(ui.ctx());
+            }
+            if !can_annotate {
+                return;
             }
             ui.separator();
             for (label, markup) in [

@@ -89,6 +89,13 @@ pub struct SecurityInfo {
     pub unlocked: bool,
 }
 
+impl SecurityInfo {
+    /// Protegido com restrições e sem a senha de permissões informada.
+    pub fn locked(&self) -> bool {
+        self.encrypted && !self.unlocked && self.permissions != Permissions::ALL
+    }
+}
+
 impl Default for SecurityInfo {
     /// Documento sem proteção: tudo permitido.
     fn default() -> Self {
@@ -109,9 +116,36 @@ impl PdfDoc {
     fn is_encrypted(&self) -> Result<bool> {
         Ok(self.inner.trailer()?.get_dict("Encrypt")?.is_some())
     }
+}
 
-    /// Permissões gravadas no arquivo (o `permissions()` do binding dá "todas" quando os bits
-    /// reservados estão ligados, como a especificação manda).
+/// O arquivo de outro programa pode ter as páginas copiadas (Combinar, Inserir)? Sem restrição de
+/// montar e copiar, ou com a senha de permissões.
+pub(crate) fn pages_can_be_copied(
+    doc: &mupdf::pdf::PdfDocument,
+    password: Option<&str>,
+) -> Result<bool> {
+    let Some(e) = crate::owner_password::encrypt_dict(doc)? else {
+        return Ok(true);
+    };
+    if password.is_some_and(|p| !p.is_empty() && crate::owner_password::is_owner_password(&e, p)) {
+        return Ok(true);
+    }
+    let p = Permissions::from_p(e.p);
+    Ok(p.copy && p.assemble)
+}
+
+/// Erro de quem tenta copiar páginas de um arquivo restrito.
+pub(crate) fn restricted_source(path: &std::path::Path) -> PdfError {
+    err(&format!(
+        "o arquivo {} está protegido contra cópia de páginas: informe a senha de permissões",
+        path.file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+    ))
+}
+
+impl PdfDoc {
+    /// Permissões gravadas no arquivo (o `permissions()` do binding cai em "todas" quando o /P tem
+    /// os bits reservados ligados: o `from_bits` dele falha com bits desconhecidos).
     fn file_permissions(&self) -> Result<Permissions> {
         let p = self
             .inner
@@ -138,23 +172,15 @@ impl PdfDoc {
         })
     }
 
-    /// Informa a senha de permissões: libera tudo. Sem senha de abrir, a senha aceita só pode ser
-    /// a de permissões; com senha de abrir, a de permissões tem de ser outra (o MuPDF não diz qual
-    /// das duas conferiu).
+    /// Informa a senha de permissões: libera tudo. Conferida pelos algoritmos da especificação
+    /// (a senha de abrir, ou uma variante dela que o MuPDF aceite, não serve).
     pub fn unlock(&mut self, owner_password: &str) -> Result<()> {
-        if !self.is_encrypted()? {
+        let Some(e) = crate::owner_password::encrypt_dict(&self.inner)? else {
             return Ok(());
-        }
-        let needs_user = self.inner.needs_password()?;
-        if needs_user && self.password.as_deref() == Some(owner_password) {
-            return Err(PdfError::WrongPassword);
-        }
-        let mut probe = mupdf::pdf::PdfDocument::open(
-            self.path
-                .to_str()
-                .ok_or_else(|| err("caminho não é UTF-8 válido"))?,
-        )?;
-        if owner_password.is_empty() || !probe.authenticate(owner_password)? {
+        };
+        if owner_password.is_empty()
+            || !crate::owner_password::is_owner_password(&e, owner_password)
+        {
             return Err(PdfError::WrongPassword);
         }
         self.owner_unlocked = true;

@@ -86,6 +86,10 @@ impl PdfDoc {
             pending_protection: None,
         };
         doc.signed_on_disk = doc.has_signatures().unwrap_or(false);
+        // abrir digitando a senha de permissões libera tudo (como no Acrobat)
+        if let Some(p) = password.filter(|p| !p.is_empty()) {
+            doc.owner_unlocked = doc.unlock(p).is_ok();
+        }
         Ok(doc)
     }
 

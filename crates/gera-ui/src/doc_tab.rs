@@ -340,7 +340,14 @@ impl DocTab {
 
     /// Manda ao worker as edições geradas neste quadro.
     fn send_edits(&mut self) {
-        for op in self.edit.take_ops() {
+        let ops = self.edit.take_ops();
+        // documento protegido contra comentários: nenhuma alteração de anotação sai daqui
+        // (menu de contexto, Delete, arrastos, painel Comentários)
+        if !ops.is_empty() && !self.security.permissions.annotate {
+            self.deny("alterar comentários");
+            return;
+        }
+        for op in ops {
             self.worker.send(Request::Annot(op));
         }
     }
@@ -777,10 +784,20 @@ impl DocTab {
                     .find(|f| f.page == page && f.id == id)
                     .map(|f| f.rect.translated(dx, dy))
             });
-            self.worker.send(match rect {
-                Some(rect) => Request::Prepare(pdf_core::PrepareOp::Move { page, id, rect }),
-                None => Request::Annot(pdf_core::AnnotOp::Move { page, id, dx, dy }),
-            });
+            match rect {
+                Some(rect) => self
+                    .worker
+                    .send(Request::Prepare(pdf_core::PrepareOp::Move {
+                        page,
+                        id,
+                        rect,
+                    })),
+                None if !self.security.permissions.annotate => self.deny("mover comentários"),
+                None => {
+                    self.worker
+                        .send(Request::Annot(pdf_core::AnnotOp::Move { page, id, dx, dy }))
+                }
+            }
         }
     }
 
@@ -912,7 +929,6 @@ impl DocTab {
         self.edit.set_fill_tool(None);
     }
 
-    /// Início do quadro: tem que vir antes de qualquer pedido de render (painel ou canvas).
     /// Permissão negada pela proteção do documento: explica na barra de status.
     pub(crate) fn deny(&mut self, what: &str) {
         self.status = format!(
@@ -920,7 +936,10 @@ impl DocTab {
         );
     }
 
+    /// Início do quadro: tem que vir antes de qualquer pedido de render (painel ou canvas).
     pub fn begin(&mut self) {
+        self.edit.can_copy = self.security.permissions.copy;
+        self.edit.can_annotate = self.security.permissions.annotate;
         self.edit.fill.active = self.fill_tools;
         if let Some(view) = self.view.as_mut() {
             view.begin_frame();
@@ -1035,7 +1054,9 @@ impl DocTab {
                 .frame(egui::Frame::NONE)
                 .show(ui, |ui| crate::fields::bar(ui, &mut self.form))
                 .inner;
-            if reset {
+            if reset && !self.security.permissions.forms {
+                self.deny("limpar o formulário");
+            } else if reset {
                 self.worker.send(Request::ResetForm);
             }
         }

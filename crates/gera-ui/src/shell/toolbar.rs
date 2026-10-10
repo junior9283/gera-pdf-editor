@@ -59,7 +59,7 @@ pub fn show(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
 /// Linha Proteger PDF: Proteger usando senha, Remover segurança, Desbloquear e Fechar.
 pub fn protect_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     let sec = doc.security;
-    let locked = sec.encrypted && !sec.unlocked && sec.permissions != pdf_core::Permissions::ALL;
+    let locked = sec.locked();
     ui.horizontal(|ui| {
         if ui
             .add_enabled(!locked, egui::Button::new("🔒 Proteger usando senha…"))

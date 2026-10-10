@@ -292,6 +292,9 @@ impl PdfDoc {
                     return Err(PdfError::PageOutOfRange(at));
                 }
                 let src = open_authenticated(&path, password.as_deref())?;
+                if !crate::security::pages_can_be_copied(&src, password.as_deref())? {
+                    return Err(crate::security::restricted_source(&path));
+                }
                 let src_count = src.page_count()?;
                 let wanted: Vec<i32> = match range {
                     None => (0..src_count).collect(),
@@ -309,6 +312,9 @@ impl PdfDoc {
                 // marcadores que levam a ela) continua a mesma
                 let pages = checked(&pages, count)?;
                 let src = open_authenticated(&path, password.as_deref())?;
+                if !crate::security::pages_can_be_copied(&src, password.as_deref())? {
+                    return Err(crate::security::restricted_source(&path));
+                }
                 let wanted: Vec<i32> = (from..from + pages.len() as i32).collect();
                 checked(&wanted, src.page_count()?)?;
                 let mut map = self.inner.new_graft_map()?;

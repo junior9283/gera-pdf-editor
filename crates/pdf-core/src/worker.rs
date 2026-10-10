@@ -455,7 +455,6 @@ impl State {
         }
     }
 
-    /// Roda `f` no documento aberto; erros (e a falta de documento) viram texto para a UI.
     /// Muda a segurança e conta a situação nova à interface.
     fn security(
         &mut self,
@@ -477,6 +476,7 @@ impl State {
         )
     }
 
+    /// Roda `f` no documento aberto; erros (e a falta de documento) viram texto para a UI.
     fn with_doc_mut<T>(
         &mut self,
         f: impl FnOnce(&mut PdfDoc) -> crate::Result<T>,
