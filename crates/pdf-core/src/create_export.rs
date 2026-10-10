@@ -96,9 +96,47 @@ fn tiff_orientation(t: &[u8]) -> Option<u16> {
         .filter(|o| (1..=8).contains(o))
 }
 
+/// Imagem de um arquivo com o tamanho em pé, em pontos (pela resolução dela; sem resolução, 72
+/// ppp, como o Acrobat).
+pub(crate) struct UprightImage {
+    pub img: Image,
+    /// Orientação EXIF (1 a 8).
+    pub orientation: u16,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl UprightImage {
+    pub fn open(path: &Path) -> Result<Self> {
+        let img = open_image(path)?;
+        // fotos de celular: a orientação EXIF diz como a imagem fica em pé (como o Acrobat faz)
+        let orientation = std::fs::File::open(path)
+            .and_then(|f| {
+                use std::io::Read;
+                let mut head = Vec::new();
+                f.take(256 * 1024).read_to_end(&mut head)?;
+                Ok(exif_orientation(&head))
+            })
+            .unwrap_or(1);
+        let (xr, yr) = img.resolution();
+        let dpi = |r: i32| if r > 0 { r as f32 } else { 72.0 };
+        let mut width = img.width() as f32 * 72.0 / dpi(xr);
+        let mut height = img.height() as f32 * 72.0 / dpi(yr);
+        if (5..=8).contains(&orientation) {
+            std::mem::swap(&mut width, &mut height);
+        }
+        Ok(Self {
+            img,
+            orientation,
+            width,
+            height,
+        })
+    }
+}
+
 /// Matriz (a b c d e f) que desenha a imagem crua (quadrado unitário) numa página `w`×`h` já em
 /// pé, para cada orientação EXIF.
-fn oriented(o: u16, w: f32, h: f32) -> [f32; 6] {
+pub(crate) fn oriented(o: u16, w: f32, h: f32) -> [f32; 6] {
     match o {
         2 => [-w, 0.0, 0.0, h, w, 0.0],
         3 => [-w, 0.0, 0.0, -h, w, h],
@@ -119,27 +157,15 @@ pub fn create_pdf_from_images(images: &[PathBuf], dest: &Path) -> Result<()> {
     }
     let mut doc = PdfDocument::new();
     for path in images {
-        let img = open_image(path)?;
-        // fotos de celular: a orientação EXIF diz como a imagem fica em pé (como o Acrobat faz)
-        let orientation = std::fs::File::open(path)
-            .and_then(|f| {
-                use std::io::Read;
-                let mut head = Vec::new();
-                f.take(256 * 1024).read_to_end(&mut head)?;
-                Ok(exif_orientation(&head))
-            })
-            .unwrap_or(1);
-        let (xr, yr) = img.resolution();
-        let dpi = |r: i32| if r > 0 { r as f32 } else { 72.0 };
-        let mut w = img.width() as f32 * 72.0 / dpi(xr);
-        let mut h = img.height() as f32 * 72.0 / dpi(yr);
+        let UprightImage {
+            img,
+            orientation,
+            width,
+            height,
+        } = UprightImage::open(path)?;
         // o PDF não aceita páginas maiores que 200 pol: reduz mantendo a proporção
-        let fit = (MAX_PAGE_PT / w.max(h)).min(1.0);
-        w *= fit;
-        h *= fit;
-        if (5..=8).contains(&orientation) {
-            std::mem::swap(&mut w, &mut h);
-        }
+        let fit = (MAX_PAGE_PT / width.max(height)).min(1.0);
+        let (w, h) = (width * fit, height * fit);
         let image = doc.add_image(&img)?;
         let page = doc.new_page(Size {
             width: w,

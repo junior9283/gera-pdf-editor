@@ -109,6 +109,22 @@ impl PdfDoc {
         Ok(())
     }
 
+    /// Recusa alterar o conteúdo de um documento assinado (`action` invalidaria as assinaturas)
+    /// ou que não permite alterações.
+    pub(crate) fn require_modifiable(&self, action: &str) -> Result<()> {
+        if self.signed_on_disk || self.has_signatures()? {
+            return Err(PdfError::Refused(format!(
+                "o documento está assinado: {action} alteraria as assinaturas"
+            )));
+        }
+        if !self.security()?.permissions.modify {
+            return Err(PdfError::Refused(
+                "o documento não permite alterações".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn load(&self, page: i32) -> Result<mupdf::Page> {
         self.check_page(page)?;
         Ok(self.inner.load_page(page)?)

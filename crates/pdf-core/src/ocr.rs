@@ -198,14 +198,7 @@ impl PdfDoc {
         lang: OcrLanguage,
         mut progress: impl FnMut(usize, usize) -> bool,
     ) -> Result<OcrReport> {
-        if self.signed_on_disk || self.has_signatures()? {
-            return Err(refused(
-                "o documento está assinado: reconhecer texto alteraria as assinaturas",
-            ));
-        }
-        if !self.security()?.permissions.modify {
-            return Err(refused("o documento não permite alterações"));
-        }
+        self.require_modifiable("reconhecer texto")?;
         let data = tessdata_dir(lang).ok_or_else(|| {
             refused("faltam os dados de idioma do OCR (tesseract-langpack-por e -eng)")
         })?;
