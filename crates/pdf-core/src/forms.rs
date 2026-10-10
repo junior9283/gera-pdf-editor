@@ -106,9 +106,14 @@ fn on_state(obj: &PdfObject) -> Result<String> {
 }
 
 /// Nó do campo (com /T) de um widget: os botões de opção são filhos sem nome do grupo.
+/// A subida é limitada: um /Parent em ciclo (PDF malicioso) não pode travar o app.
 fn field_head(obj: &PdfObject) -> Result<PdfObject> {
+    const MAX_DEPTH: usize = 32;
     let mut node = obj.try_clone()?;
-    while node.get_dict("T")?.is_none() {
+    for _ in 0..MAX_DEPTH {
+        if node.get_dict("T")?.is_some() {
+            break;
+        }
         match node.get_dict("Parent")? {
             Some(parent) => node = parent,
             None => break,
@@ -216,8 +221,11 @@ impl PdfDoc {
         let page_ref = self.inner.load_pdf_page(page)?;
         let mut out = Vec::new();
         for w in page_ref.widgets() {
+            // campo defeituoso (ex.: ciclo de /Parent) fica de fora; os outros continuam
             if !hidden(&w.annotation().object())? {
-                out.push(info(&w, page)?);
+                if let Ok(f) = info(&w, page) {
+                    out.push(f);
+                }
             }
         }
         Ok(out)

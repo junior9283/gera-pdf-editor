@@ -264,3 +264,31 @@ fn forms_with_xfa_or_calculation_scripts_are_flagged() {
     let notes = PdfDoc::open(&path, None).unwrap().form_notes().unwrap();
     assert!(notes.xfa && notes.scripts);
 }
+
+#[test]
+fn a_parent_cycle_does_not_hang() {
+    // /Parent apontando para si mesmo, sem /T: PDF malicioso não pode travar o app
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ciclo.pdf");
+    let s = String::from_utf8(pdf_core::sample::form_pdf())
+        .unwrap()
+        .replace("/T (plano) /V /Off", "/Parent 6 0 R /V /Off");
+    std::fs::write(&path, s).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut d = PdfDoc::open(&path, None).unwrap();
+        let _ = d.form_notes();
+        let radio = d
+            .fields(0)
+            .unwrap()
+            .into_iter()
+            .find(|f| matches!(f.kind, FieldKind::Radio { .. }));
+        if let Some(r) = radio {
+            let _ = d.set_field(0, r.id, "basico");
+        }
+        let _ = d.reset_form();
+        tx.send(()).unwrap();
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .expect("travou num ciclo de /Parent");
+}
