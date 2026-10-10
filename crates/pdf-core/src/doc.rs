@@ -15,6 +15,7 @@ use mupdf::pdf::{
 use mupdf::{
     Colorspace, Matrix, MetadataName, Point, Quad, Rect, TextExtractOptions, TextPageFlags,
 };
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Limite de pixels por imagem renderizada (evita estourar a memória).
@@ -535,6 +536,55 @@ pub(crate) fn annot_info(annot: &PdfAnnotation, page: i32) -> Result<AnnotInfo> 
     })
 }
 
+/// Apaga de `doc` as anotações (página, id) de `hidden`.
+pub(crate) fn purge(doc: &PdfDocument, hidden: &HashSet<(i32, i32)>) -> Result<()> {
+    for &(page, id) in hidden {
+        if let Ok((mut page_ref, a)) = annot_edit::find(doc, page, id) {
+            page_ref.delete_annotation(a)?;
+            page_ref.update()?;
+        }
+    }
+    Ok(())
+}
+
+/// Documento a partir de bytes em memória, autenticado com a senha (se tiver).
+pub(crate) fn reopen(bytes: &[u8], password: Option<&str>) -> Result<PdfDocument> {
+    let mut doc = PdfDocument::from_bytes(bytes)?;
+    if let Some(p) = password {
+        if doc.needs_password()? && !doc.authenticate(p)? {
+            return Err(PdfError::WrongPassword);
+        }
+    }
+    Ok(doc)
+}
+
+/// Grava `doc` em `dest` com segurança: arquivo temporário ao lado, fsync e rename. Os objetos
+/// sem uso saem (garbage nível 1, sem renumerar). Em erro, nada fica pela metade.
+pub(crate) fn write_atomic(
+    doc: &PdfDocument,
+    dest: &Path,
+    mut opts: PdfWriteOptions,
+) -> Result<()> {
+    let tmp = temp_path(dest)?;
+    let tmp_str = utf8_path(&tmp)?;
+    opts.set_garbage_level(1);
+    let written = doc
+        .save_with_options(tmp_str, opts)
+        .map_err(PdfError::from)
+        // os dados precisam estar no disco antes do rename: numa queda de energia o original
+        // nunca pode ser trocado por um arquivo truncado
+        .and_then(|()| {
+            std::fs::File::open(&tmp)?
+                .sync_all()
+                .map_err(PdfError::from)
+        })
+        .and_then(|()| std::fs::rename(&tmp, dest).map_err(PdfError::from));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
 fn temp_path(dest: &Path) -> Result<PathBuf> {
     let name = dest
         .file_name()
@@ -609,38 +659,13 @@ impl PdfDoc {
     }
 
     pub(crate) fn purge_hidden(&mut self) -> Result<()> {
-        for &(page, id) in &self.history.hidden {
-            if let Ok((mut page_ref, a)) = annot_edit::find(&self.inner, page, id) {
-                page_ref.delete_annotation(a)?;
-                page_ref.update()?;
-            }
-        }
-        Ok(())
+        purge(&self.inner, &self.history.hidden)
     }
 
     fn write(&mut self, dest: &Path) -> Result<()> {
-        let tmp = temp_path(dest)?;
-        let tmp_str = utf8_path(&tmp)?;
         let mut opts = PdfWriteOptions::default();
         opts.set_encryption(Encryption::Keep);
-        // tira do arquivo os objetos sem uso (o conteúdo das anotações apagadas), sem renumerar
-        opts.set_garbage_level(1);
-        let written = self
-            .inner
-            .save_with_options(tmp_str, opts)
-            .map_err(PdfError::from)
-            // os dados precisam estar no disco antes do rename: numa queda de energia o original
-            // nunca pode ser trocado por um arquivo truncado
-            .and_then(|()| {
-                std::fs::File::open(&tmp)?
-                    .sync_all()
-                    .map_err(PdfError::from)
-            })
-            .and_then(|()| std::fs::rename(&tmp, dest).map_err(PdfError::from));
-        if written.is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
-        written?;
+        write_atomic(&self.inner, dest, opts)?;
         self.path = dest.to_path_buf();
         Ok(())
     }
@@ -862,13 +887,7 @@ impl PdfDoc {
 
     /// Volta o documento ao instantâneo (com a mesma senha).
     pub(crate) fn restore(&mut self, snap: &Snapshot) -> Result<()> {
-        let mut inner = PdfDocument::from_bytes(&snap.bytes)?;
-        if let Some(p) = self.password.as_deref() {
-            if inner.needs_password()? {
-                inner.authenticate(p)?;
-            }
-        }
-        self.inner = inner;
+        self.inner = reopen(&snap.bytes, self.password.as_deref())?;
         self.history.hidden = snap.hidden.clone();
         Ok(())
     }
@@ -945,6 +964,11 @@ impl PdfDoc {
         Ok(vec![page])
     }
 
+    /// Há o que salvar mesmo sem passos para desfazer (ex.: o desfazer não alcança mais o salvo).
+    pub(crate) fn mark_unsaved(&mut self) {
+        self.unsaved = true;
+    }
+
     /// Autor das anotações criadas daqui em diante (`None`: sem /T).
     pub fn set_author(&mut self, author: Option<String>) {
         self.author = author.filter(|a| !a.trim().is_empty());
@@ -988,7 +1012,12 @@ fn flatten(items: &[mupdf::Outline], depth: usize, out: &mut Vec<OutlineItem>) {
     for it in items {
         out.push(OutlineItem {
             title: it.title.clone(),
-            page: it.dest.as_ref().map(|d| d.loc.page_number as i32),
+            // destino que não resolve para página (ex.: página excluída): sem página
+            page: it
+                .dest
+                .as_ref()
+                .map(|d| d.loc.page_number as i32)
+                .filter(|p| (0..i32::MAX).contains(p)),
             depth,
         });
         flatten(&it.down, depth + 1, out);

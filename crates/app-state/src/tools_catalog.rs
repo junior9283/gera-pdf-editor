@@ -42,6 +42,10 @@ pub struct ToolEntry {
 }
 
 pub const COMMENT: &str = "comentar";
+/// Ferramentas que abrem o Organizar páginas.
+pub const ORGANIZE: &str = "organizar";
+pub const INSERT: &str = "inserir";
+pub const CROP: &str = "recortar";
 
 const fn tool(
     id: &'static str,

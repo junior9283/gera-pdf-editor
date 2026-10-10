@@ -112,6 +112,17 @@ impl PageSet {
     }
 }
 
+/// Onde inserir páginas: antes da primeira selecionada ou depois da última. Sem seleção:
+/// "antes" vai para o começo e "depois" para o fim.
+pub fn insert_at(selected: &[i32], after: bool, total: usize) -> i32 {
+    match (after, selected.first(), selected.last()) {
+        (false, Some(&first), _) => first,
+        (true, _, Some(&last)) => last + 1,
+        (false, None, _) => 0,
+        (true, _, None) => total as i32,
+    }
+}
+
 /// Excluir é permitido? O documento precisa ficar com ao menos uma página.
 pub fn can_delete(selected: usize, total: usize) -> bool {
     selected > 0 && selected < total
@@ -185,6 +196,14 @@ mod tests {
         s.ctrl_click(2);
         s.after_move(5);
         assert_eq!(s.to_vec(), [3, 4], "duas páginas para o fim de 5");
+    }
+
+    #[test]
+    fn insertion_point_follows_the_selection() {
+        assert_eq!(insert_at(&[2, 4], false, 9), 2);
+        assert_eq!(insert_at(&[2, 4], true, 9), 5);
+        assert_eq!(insert_at(&[], true, 9), 9, "sem seleção, depois: no fim");
+        assert_eq!(insert_at(&[], false, 9), 0, "sem seleção, antes: no começo");
     }
 
     #[test]

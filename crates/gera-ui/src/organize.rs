@@ -2,7 +2,7 @@
 //! reordenar, girar, excluir, extrair, inserir, substituir e recortar. Desenha e devolve ações;
 //! quem aplica é a aba.
 use crate::view::DocView;
-use app_state::organize::{can_delete, PageSet, Picker};
+use app_state::organize::{can_delete, insert_at, PageSet, Picker};
 use pdf_core::{PageOp, Worker};
 use std::path::PathBuf;
 
@@ -185,9 +185,7 @@ fn toolbar(
         ui.menu_button("Selecionar", |ui| {
             for picker in Picker::ALL {
                 if ui.button(picker.label()).clicked() {
-                    let sizes: Vec<(f32, f32)> =
-                        view.sizes.iter().map(|s| (s.width, s.height)).collect();
-                    st.sel.pick(picker, &sizes);
+                    st.sel.pick(picker, &view.page_dims());
                 }
             }
         });
@@ -390,9 +388,8 @@ pub fn show(
             }
         });
     if let Some((start, _)) = st.drag {
-        if drop_at.is_some() {
-            st.drag = Some((start, drop_at));
-        }
+        // fora de uma miniatura (barra, vão, fora da janela) o arrasto não cai em lugar nenhum
+        st.drag = Some((start, drop_at));
         if released {
             if let Some((_, Some(to))) = st.drag {
                 let pages = st.sel.to_vec();
@@ -457,7 +454,7 @@ fn dialogs(ui: &mut egui::Ui, st: &mut OrganizeState, view: &DocView, out: &mut 
                     ui.radio_value(after, false, "Antes da seleção");
                     ui.radio_value(after, true, "Depois da seleção");
                     if ui.button("Inserir").clicked() {
-                        let at = st_insert_at(&pages, *after, total);
+                        let at = insert_at(&pages, *after, total);
                         let reference = pages.first().copied().unwrap_or(0).min(total as i32 - 1);
                         let s = view.sizes.get(reference.max(0) as usize);
                         let size = match (size, s) {
@@ -496,7 +493,7 @@ fn dialogs(ui: &mut egui::Ui, st: &mut OrganizeState, view: &DocView, out: &mut 
                     });
                     if ui.button("Inserir").clicked() {
                         action = Some(OrgAction::Op(PageOp::InsertFrom {
-                            at: st_insert_at(&pages, *after, total),
+                            at: insert_at(&pages, *after, total),
                             path: path.clone(),
                             password: (!password.is_empty()).then(|| password.clone()),
                             range: (!*all).then_some((*from - 1, *to - 1)),
@@ -583,15 +580,6 @@ fn dialogs(ui: &mut egui::Ui, st: &mut OrganizeState, view: &DocView, out: &mut 
     }
 }
 
-/// Posição de inserção a partir da seleção (função livre: o diálogo empresta o estado).
-fn st_insert_at(pages: &[i32], after: bool, total: usize) -> i32 {
-    match (after, pages.first(), pages.last()) {
-        (false, Some(&first), _) => first,
-        (true, _, Some(&last)) => last + 1,
-        _ => total as i32,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -600,13 +588,6 @@ mod tests {
     fn delete_label_counts_pages() {
         assert_eq!(delete_label(1), "Excluir");
         assert_eq!(delete_label(3), "Excluir (3)");
-    }
-
-    #[test]
-    fn insertion_point_follows_the_selection() {
-        assert_eq!(st_insert_at(&[2, 4], false, 9), 2);
-        assert_eq!(st_insert_at(&[2, 4], true, 9), 5);
-        assert_eq!(st_insert_at(&[], true, 9), 9, "sem seleção: no fim");
     }
 
     #[test]

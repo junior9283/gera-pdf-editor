@@ -262,3 +262,121 @@ fn page_op_is_saved() {
     assert_eq!(order(&PdfDoc::open(&path, None).unwrap()), [1, 3]);
     assert!(!d.is_dirty());
 }
+
+#[test]
+fn crop_on_a_rotated_page_cuts_what_is_seen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_sample(&dir, "r.pdf", 1, 90);
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let before = d.page_size(0).unwrap();
+    d.apply_pages(PageOp::Crop {
+        pages: vec![0],
+        margins: [100.0, 0.0, 0.0, 0.0],
+    })
+    .unwrap();
+    let after = d.page_size(0).unwrap();
+    assert!(
+        (after.width - before.width).abs() < 0.5,
+        "{before:?} → {after:?}"
+    );
+    assert!(
+        (after.height - (before.height - 100.0)).abs() < 0.5,
+        "{before:?} → {after:?}"
+    );
+}
+
+#[test]
+fn deleted_pages_leave_the_file_and_their_bookmarks_point_nowhere() {
+    let (_d, path, mut d) = doc(3);
+    d.apply_pages(PageOp::Delete { pages: vec![0] }).unwrap();
+    let outline = d.outline().unwrap();
+    assert_eq!(
+        outline[0].page, None,
+        "o marcador da página excluída não leva a outra"
+    );
+    assert_eq!(outline[1].page, Some(0));
+    d.save(&path).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(
+        !bytes.windows(12).any(|w| w == b"Page 1 Hello"),
+        "o conteúdo da página excluída não pode ficar no arquivo"
+    );
+}
+
+/// Quantas fontes (objetos /BaseFont) o arquivo tem.
+fn fonts_in(path: &std::path::Path) -> usize {
+    let bytes = std::fs::read(path).unwrap();
+    bytes.windows(9).filter(|w| w == b"/BaseFont").count()
+}
+
+#[test]
+fn inserting_pages_shares_their_resources() {
+    let (dir, path, mut d) = doc(1);
+    let other = write_sample(&dir, "b.pdf", 6, 0);
+    let mut o = PdfDoc::open(&other, None).unwrap();
+    o.apply_pages(PageOp::Rotate {
+        pages: vec![0],
+        quarter_turns: 0,
+    })
+    .ok();
+    d.apply_pages(PageOp::InsertFrom {
+        at: 1,
+        path: other,
+        password: None,
+        range: None,
+    })
+    .unwrap();
+    d.save(&path).unwrap();
+    assert!(
+        fonts_in(&path) <= 2,
+        "a fonte compartilhada não pode ser copiada por página: {}",
+        fonts_in(&path)
+    );
+}
+
+#[test]
+fn replace_keeps_the_comments_of_the_original_page() {
+    let (dir, _p, mut d) = doc(2);
+    d.apply(AnnotOp::Create(NewAnnot::Note {
+        page: 0,
+        at: (50.0, 50.0),
+        text: "meu".into(),
+    }))
+    .unwrap();
+    let other = write_sample(&dir, "b.pdf", 3, 0);
+    d.apply_pages(PageOp::Replace {
+        pages: vec![0],
+        path: other,
+        password: None,
+        from: 2,
+    })
+    .unwrap();
+    assert_eq!(order(&d), [3, 2]);
+    assert_eq!(
+        d.annotations(0).unwrap()[0].contents,
+        "meu",
+        "comentário do usuário fica"
+    );
+    assert_eq!(
+        d.outline().unwrap()[0].page,
+        Some(0),
+        "o marcador continua levando à página"
+    );
+}
+
+#[test]
+fn extract_never_overwrites_the_open_file_or_existing_parts() {
+    let (dir, path, d) = doc(3);
+    assert!(
+        d.extract(&[0], &path, false).is_err(),
+        "não grava por cima do documento aberto"
+    );
+    let base = dir.path().join("x.pdf");
+    std::fs::write(dir.path().join("x_1.pdf"), b"meu arquivo").unwrap();
+    let files = d.extract(&[0], &base, true).unwrap();
+    assert_eq!(
+        std::fs::read(dir.path().join("x_1.pdf")).unwrap(),
+        b"meu arquivo"
+    );
+    assert_ne!(files[0], dir.path().join("x_1.pdf"));
+}

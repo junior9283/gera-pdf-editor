@@ -552,7 +552,10 @@ impl GeraApp {
 
     /// Cartão ou item de ferramenta clicado. Só "Comentar" existe nesta fase.
     fn run_tool(&mut self, ctx: &egui::Context, id: &str) {
-        if matches!(id, "organizar" | "inserir" | "recortar") {
+        if matches!(
+            id,
+            tools_catalog::ORGANIZE | tools_catalog::INSERT | tools_catalog::CROP
+        ) {
             match self.last_doc.clone().and_then(|p| self.tabs.find(&p)) {
                 Some(tab) => {
                     self.activate(tab);

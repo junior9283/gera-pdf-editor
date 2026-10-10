@@ -124,13 +124,15 @@ impl History {
     }
 
     /// Uma operação de página nova: guarda o documento de antes, dentro do orçamento de memória.
-    pub(crate) fn record_snapshot(&mut self, before: Snapshot, budget: usize) {
+    /// Devolve se passos antigos saíram (o desfazer não alcança mais o arquivo salvo).
+    pub(crate) fn record_snapshot(&mut self, before: Snapshot, budget: usize) -> bool {
         self.undo.push(Step::Snapshot(before));
         self.redo.clear();
         let size = |s: &Step| match s {
             Step::Snapshot(snap) => snap.bytes.len(),
             Step::Annot(_) => 0,
         };
+        let mut dropped = false;
         while self.undo.iter().map(size).sum::<usize>() > budget {
             // o passo mais antigo que pesa sai, com tudo o que vem antes dele
             match self
@@ -140,10 +142,12 @@ impl History {
             {
                 Some(oldest) if oldest + 1 < self.undo.len() => {
                     self.undo.drain(..=oldest);
+                    dropped = true;
                 }
                 _ => break,
             }
         }
+        dropped
     }
 
     pub(crate) fn can_undo(&self) -> bool {
@@ -506,14 +510,17 @@ mod tests {
             id: 1,
             hidden: false,
         });
-        h.record_snapshot(snap(60), 100);
-        h.record_snapshot(snap(60), 100);
+        assert!(!h.record_snapshot(snap(60), 100));
+        assert!(
+            h.record_snapshot(snap(60), 100),
+            "avisa que o salvo ficou fora de alcance"
+        );
         assert_eq!(
             h.undo.len(),
             1,
             "o passo mais antigo (e o que vinha antes) saiu"
         );
-        h.record_snapshot(snap(500), 100);
+        assert!(h.record_snapshot(snap(500), 100));
         assert_eq!(h.undo.len(), 1, "o mais novo fica mesmo acima do limite");
     }
 }

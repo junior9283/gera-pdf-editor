@@ -126,6 +126,8 @@ pub struct DocTab {
     /// Seletor de arquivos do modo Organizar e para que serve a escolha em andamento.
     files: crate::open_dialog::FileDialogs,
     picking: Option<PickFor>,
+    /// "Excluir páginas após extrair": esperando a extração terminar.
+    delete_after_extract: Option<Vec<i32>>,
 }
 
 /// O que fazer com o arquivo escolhido no seletor (modo Organizar).
@@ -173,6 +175,7 @@ impl DocTab {
             organize: None,
             files: Default::default(),
             picking: None,
+            delete_after_extract: None,
         }
     }
 
@@ -201,9 +204,8 @@ impl DocTab {
                     return;
                 }
                 DocCommand::SelectAll => {
-                    let sizes: Vec<(f32, f32)> =
-                        view.sizes.iter().map(|s| (s.width, s.height)).collect();
-                    org.sel.pick(app_state::organize::Picker::All, &sizes);
+                    org.sel
+                        .pick(app_state::organize::Picker::All, &view.page_dims());
                     return;
                 }
                 _ => {}
@@ -347,6 +349,11 @@ impl DocTab {
             .last
             .current_page
             .min(summary.sizes.len().saturating_sub(1));
+        // com páginas a mais ou a menos, a seleção antiga marcaria outras páginas
+        let same_count = self.view.as_ref().map(|v| v.sizes.len()) == Some(summary.sizes.len());
+        if let Some(org) = self.organize.as_mut().filter(|_| !same_count) {
+            org.sel = Default::default();
+        }
         if let Some(view) = self.view.as_mut() {
             view.set_pages(summary.sizes);
             self.jump_to = view.go_to(page as i32, None);
@@ -481,9 +488,14 @@ impl DocTab {
                     self.on_pages_changed(summary, history)
                 }
                 Response::PagesFailed(msg) => {
+                    self.delete_after_extract = None;
                     self.status = format!("Não foi possível organizar as páginas: {msg}");
                 }
                 Response::Extracted(files) => {
+                    if let Some(pages) = self.delete_after_extract.take() {
+                        self.worker
+                            .send(Request::Pages(pdf_core::PageOp::Delete { pages }));
+                    }
                     self.status = match files.as_slice() {
                         [one] => format!("Páginas extraídas para {}", one.display()),
                         many => format!("{} arquivos extraídos", many.len()),
@@ -759,11 +771,13 @@ impl DocTab {
     pub fn open_organize(&mut self, ctx: &egui::Context, tool: &str) {
         let org = self.organize.get_or_insert_with(Default::default);
         match tool {
-            "inserir" => {
+            app_state::tools_catalog::INSERT => {
                 self.picking = Some(PickFor::File(crate::organize::Purpose::Insert));
                 self.files.open(ctx);
             }
-            "recortar" => org.dialog = Some(crate::organize::Dialog::Crop { mm: [0.0; 4] }),
+            app_state::tools_catalog::CROP => {
+                org.dialog = Some(crate::organize::Dialog::Crop { mm: [0.0; 4] })
+            }
             _ => {}
         }
     }
@@ -849,10 +863,8 @@ impl DocTab {
                     dest,
                     separate,
                 });
-                if delete_after {
-                    self.worker
-                        .send(Request::Pages(pdf_core::PageOp::Delete { pages }));
-                }
+                // só exclui depois que a extração deu certo (resposta Extracted)
+                self.delete_after_extract = delete_after.then_some(pages);
             }
             (_, Picked::Failed) => {
                 self.status = "Não foi possível abrir o seletor de arquivos.".into()
