@@ -1,5 +1,6 @@
 //! Barra de ferramentas do documento e a linha de ferramentas de comentário.
 use crate::doc_tab::{DocCommand, DocTab};
+use crate::shell::annot_props::color32;
 use crate::shell::commands::{hover, Command};
 use app_state::stamps::StampKind;
 use app_state::tools::Tool;
@@ -95,9 +96,7 @@ fn stamp_menu(ui: &mut egui::Ui, doc: &mut DocTab) {
             }
             ui.label(egui::RichText::new(group).small().strong());
             for &kind in kinds {
-                let [r, g, b] = kind.color().map(|c| (c * 255.0) as u8);
-                let text =
-                    egui::RichText::new(kind.title()).color(egui::Color32::from_rgb(r, g, b));
+                let text = egui::RichText::new(kind.title()).color(color32(kind.color()));
                 if ui.button(text).clicked() {
                     doc.edit.stamp = kind;
                     doc.edit.tool = Tool::Stamp;

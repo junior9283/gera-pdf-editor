@@ -680,11 +680,13 @@ impl DocTab {
         self.view.as_ref().map(|v| v.zoom * 100.0)
     }
 
-    /// Pedido de senha para abrir um PDF protegido (a senha não é registrada em lugar nenhum).
     /// Nome do usuário: vai para os carimbos dinâmicos e, no worker, como autor das anotações.
+    /// Repetir o mesmo nome não manda nada (a Identidade já o aplica antes de avisar a casca).
     pub fn set_author(&mut self, author: Option<String>) {
-        self.edit.author = author.clone();
-        self.worker.send(Request::SetAuthor(author));
+        if self.edit.author != author {
+            self.edit.author = author.clone();
+            self.worker.send(Request::SetAuthor(author));
+        }
     }
 
     /// Diálogo Identidade, aberto por um carimbo dinâmico sem nome; o OK põe o carimbo.
@@ -706,6 +708,7 @@ impl DocTab {
         }
     }
 
+    /// Pedido de senha para abrir um PDF protegido (a senha não é registrada em lugar nenhum).
     fn password_window(&mut self, ui: &mut egui::Ui) {
         let Some((path, mut password)) = self.password_prompt.take() else {
             return;

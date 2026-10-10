@@ -70,7 +70,7 @@ pub fn rect_from_drag(a: (f32, f32), b: (f32, f32), square: bool) -> PdfRect {
     } else {
         b
     };
-    PdfRect::new(a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1))
+    PdfRect::from_corners(a, b)
 }
 
 /// Ponto final de uma linha presa a múltiplos de 45° (Shift), com o mesmo comprimento.

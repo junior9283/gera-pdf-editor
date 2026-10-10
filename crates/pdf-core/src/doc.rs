@@ -3,7 +3,7 @@ use crate::error::{PdfError, Result};
 use crate::stamp;
 use crate::types::{
     AnnotInfo, AnnotKind, AnnotOp, DocProperties, DocSummary, HistoryState, LineEnd, NewAnnot,
-    OutlineItem, PageSize, PdfRect, RenderedPage, Rotation, TextSelection, Word,
+    OutlineItem, PageSize, PdfRect, RenderedPage, Rotation, TextSelection, Word, COMMENT_RED,
 };
 use mupdf::color::AnnotationColor;
 use mupdf::pdf::{
@@ -300,7 +300,7 @@ fn quads(rects: &[PdfRect]) -> Result<Vec<Quad>> {
     Ok(rects.iter().map(|r| Rect::from(*r).quad()).collect())
 }
 
-fn add_one(page: &mut PdfPage, a: &NewAnnot) -> Result<PdfAnnotation> {
+fn add_one(doc: &mut PdfDocument, page: &mut PdfPage, a: &NewAnnot) -> Result<PdfAnnotation> {
     Ok(match a {
         NewAnnot::Highlight { rects, .. } => page.add_highlight_annotation(quads(rects)?)?,
         NewAnnot::Underline { rects, .. } => page.add_underline_annotation(quads(rects)?)?,
@@ -315,17 +315,12 @@ fn add_one(page: &mut PdfPage, a: &NewAnnot) -> Result<PdfAnnotation> {
             rect,
             text,
             size,
-            color: [red, green, blue],
+            color,
             ..
         } => {
             let mut a = page.add_free_text_annotation(Rect::from(*rect), text)?;
-            let color = AnnotationColor::Rgb {
-                red: *red,
-                green: *green,
-                blue: *blue,
-            };
             // na caixa de texto o MuPDF desenha a borda com a cor do texto; /C é o fundo
-            a.set_default_appearance("Helv", *size, Some(color))?;
+            a.set_default_appearance("Helv", *size, Some(rgb(*color)))?;
             a.set_border_width(1.0)?;
             a
         }
@@ -344,10 +339,15 @@ fn add_one(page: &mut PdfPage, a: &NewAnnot) -> Result<PdfAnnotation> {
             }
             a
         }
-        NewAnnot::Stamp { .. } => {
-            return Err(PdfError::InvalidAnnotation(
-                "carimbo é criado por add_stamp".into(),
-            ))
+        NewAnnot::Stamp {
+            rect,
+            title,
+            subtitle,
+            color,
+            ..
+        } => {
+            let img = stamp::image(title, subtitle.as_deref(), *color)?;
+            add_stamp(doc, page, *rect, title, &img)?
         }
     })
 }
@@ -379,20 +379,19 @@ fn add_stamp(
     Ok(annot)
 }
 
-/// Cor RGB pedida pela interface como edição; `None` vira `absent`.
-fn rgb_edit(color: Option<[f32; 3]>, absent: ColorEdit) -> ColorEdit {
-    color.map_or(absent, |[red, green, blue]| {
-        ColorEdit::Set(AnnotationColor::Rgb { red, green, blue })
-    })
+/// Cor RGB da interface no formato do MuPDF (o inverso de `rgb_of`).
+pub(crate) fn rgb([red, green, blue]: [f32; 3]) -> AnnotationColor {
+    AnnotationColor::Rgb { red, green, blue }
 }
 
-/// Contorno padrão das formas, linhas e caixa de texto: vermelho, 1 pt (como no Acrobat).
+/// Cor RGB pedida pela interface como edição; `None` vira `absent`.
+fn rgb_edit(color: Option<[f32; 3]>, absent: ColorEdit) -> ColorEdit {
+    color.map_or(absent, |c| ColorEdit::Set(rgb(c)))
+}
+
+/// Contorno padrão das formas e linhas: vermelho, 1 pt (como no Acrobat).
 fn outlined(mut a: PdfAnnotation) -> Result<PdfAnnotation> {
-    a.set_color(AnnotationColor::Rgb {
-        red: 1.0,
-        green: 0.0,
-        blue: 0.0,
-    })?;
+    a.set_color(rgb(COMMENT_RED))?;
     a.set_border_width(1.0)?;
     Ok(a)
 }
@@ -452,21 +451,13 @@ pub(crate) fn annot_info(annot: &PdfAnnotation, page: i32) -> Result<AnnotInfo> 
             _ => own_color,
         },
         opacity: annot.opacity()?,
-        width: matches!(
-            kind,
-            AnnotKind::Ink
-                | AnnotKind::TextBox
-                | AnnotKind::Rect
-                | AnnotKind::Ellipse
-                | AnnotKind::Line
-        )
-        .then(|| annot.border_width())
-        .transpose()?,
+        width: kind
+            .has_border()
+            .then(|| annot.border_width())
+            .transpose()?,
         fill: match kind {
             AnnotKind::TextBox => own_color,
-            AnnotKind::Rect | AnnotKind::Ellipse | AnnotKind::Line => {
-                annot.interior_color()?.map(rgb_of)
-            }
+            k if k.has_fill() => annot.interior_color()?.map(rgb_of),
             _ => None,
         },
         line: (kind == AnnotKind::Line)
@@ -588,19 +579,7 @@ impl PdfDoc {
                     return Err(PdfError::InvalidAnnotation("anotação vazia".into()));
                 }
                 let mut page_ref = self.inner.load_pdf_page(page)?;
-                let mut annot = match &a {
-                    NewAnnot::Stamp {
-                        rect,
-                        title,
-                        subtitle,
-                        color,
-                        ..
-                    } => {
-                        let img = stamp::image(title, subtitle.as_deref(), *color)?;
-                        add_stamp(&mut self.inner, &mut page_ref, *rect, title, &img)?
-                    }
-                    _ => add_one(&mut page_ref, &a)?,
-                };
+                let mut annot = add_one(&mut self.inner, &mut page_ref, &a)?;
                 if let Some(name) = &self.author {
                     annot.set_author(name)?;
                 }
@@ -712,7 +691,6 @@ impl PdfDoc {
         self.history.can_redo()
     }
 
-    /// Há edições desde a última gravação?
     /// Autor das anotações criadas daqui em diante (`None`: sem /T).
     pub fn set_author(&mut self, author: Option<String>) {
         self.author = author.filter(|a| !a.trim().is_empty());
@@ -726,6 +704,7 @@ impl PdfDoc {
         }
     }
 
+    /// Há edições desde a última gravação?
     pub fn is_dirty(&self) -> bool {
         self.unsaved || self.history.can_undo()
     }

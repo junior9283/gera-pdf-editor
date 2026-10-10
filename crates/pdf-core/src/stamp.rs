@@ -5,7 +5,8 @@
 use crate::error::Result;
 use mupdf::{Colorspace, Document, Font, Image, Matrix};
 
-/// Tamanho do desenho do carimbo, em pontos (a proporção padrão do carimbo na página).
+/// Tamanho do desenho do carimbo, em pontos: também o tamanho padrão do carimbo na página
+/// (exportado como `STAMP_WIDTH`/`STAMP_HEIGHT`).
 pub const WIDTH: f32 = 190.0;
 pub const HEIGHT: f32 = 60.0;
 /// Margem lateral do texto dentro da moldura.

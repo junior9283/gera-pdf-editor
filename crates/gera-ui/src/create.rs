@@ -1,13 +1,12 @@
 //! Criação de caixa de texto, formas, linhas e carimbos (gestos com pré-visualização).
 use crate::edit::{screen_rect, EditState, TextDraft, TextTarget};
+use crate::shell::annot_props::color32;
 use app_state::annot_geom::{rect_from_drag, snap_45};
 use app_state::stamps::{subtitle, STAMP_HEIGHT, STAMP_WIDTH};
 use app_state::tools::Tool;
 use app_state::transform::PageMap;
-use pdf_core::{NewAnnot, PdfRect};
+use pdf_core::{NewAnnot, PdfRect, COMMENT_RED};
 
-/// Cor dos comentários novos (contorno das formas, linhas e texto da caixa), como no Acrobat.
-pub(crate) const COMMENT_RED: [f32; 3] = [1.0, 0.0, 0.0];
 /// Tamanho da caixa de texto criada com um clique (sem arrastar), em pontos.
 const TEXT_BOX: (f32, f32) = (200.0, 24.0);
 /// Tamanho do texto da caixa nova.
@@ -27,10 +26,6 @@ pub(crate) fn local_now() -> (i32, u32, u32, u32, u32) {
     use chrono::{Datelike, Timelike};
     let t = chrono::Local::now();
     (t.year(), t.month(), t.day(), t.hour(), t.minute())
-}
-
-fn red() -> egui::Color32 {
-    egui::Color32::from_rgb(230, 30, 30)
 }
 
 impl EditState {
@@ -114,8 +109,7 @@ impl EditState {
             return None;
         }
         if response.drag_started_by(egui::PointerButton::Primary) {
-            let pressed = ui.input(|i| i.pointer.press_origin());
-            if let Some(p) = pressed.map(|p| map.to_page(p.into())).or(pointer) {
+            if let Some(p) = crate::edit::press_point(response, map, pointer) {
                 self.shape_drag = Some(ShapeDrag {
                     page,
                     from: p,
@@ -184,8 +178,7 @@ impl EditState {
             d.rect.y1 = d.rect.y0 + needed;
         }
         let r = screen_rect(&d.rect, map);
-        let [cr, cg, cb] = d.color.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
-        let color = egui::Color32::from_rgb(cr, cg, cb);
+        let color = color32(d.color);
         ui.painter().rect_filled(r, 0.0, egui::Color32::WHITE);
         ui.painter().rect_stroke(
             r,
@@ -241,7 +234,7 @@ impl EditState {
         let Some(d) = self.shape_drag.filter(|d| d.page == page) else {
             return;
         };
-        let stroke = egui::Stroke::new(1.5, red());
+        let stroke = egui::Stroke::new(1.5, color32(COMMENT_RED));
         match self.tool {
             Tool::Rect | Tool::TextBox => {
                 let r = screen_rect(

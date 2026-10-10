@@ -88,11 +88,29 @@ pub enum AnnotKind {
 /// Início e fim de uma linha (pontos da página).
 pub type Segment = ((f32, f32), (f32, f32));
 
+/// Cor dos comentários novos (contorno das formas e linhas, texto da caixa), como no Acrobat.
+pub const COMMENT_RED: [f32; 3] = [1.0, 0.0, 0.0];
+
 /// Ponta de uma linha ou seta.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineEnd {
     Start,
     End,
+}
+
+impl AnnotKind {
+    /// Tem traço/borda com espessura editável.
+    pub fn has_border(self) -> bool {
+        matches!(
+            self,
+            Self::Ink | Self::TextBox | Self::Rect | Self::Ellipse | Self::Line
+        )
+    }
+
+    /// Tem preenchimento (formas) ou fundo (caixa de texto).
+    pub fn has_fill(self) -> bool {
+        matches!(self, Self::Rect | Self::Ellipse | Self::TextBox)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

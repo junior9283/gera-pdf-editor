@@ -13,6 +13,12 @@ pub const PALETTE: [(&str, [f32; 3]); 8] = [
     ("Cinza", [0.5, 0.5, 0.5]),
 ];
 
+/// Cor RGB (0–1) para o egui.
+pub fn color32(c: [f32; 3]) -> egui::Color32 {
+    let [r, g, b] = c.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+    egui::Color32::from_rgb(r, g, b)
+}
+
 /// Opacidade (0–1) em porcentagem inteira.
 pub fn percent(opacity: f32) -> f32 {
     (opacity.clamp(0.0, 1.0) * 100.0).round()
@@ -45,8 +51,8 @@ pub fn sections(kind: AnnotKind) -> Sections {
     use AnnotKind::*;
     Sections {
         color: !matches!(kind, TextBox | Stamp),
-        fill: matches!(kind, Rect | Ellipse | TextBox),
-        width: matches!(kind, Ink | Rect | Ellipse | Line | TextBox),
+        fill: kind.has_fill(),
+        width: kind.has_border(),
         font: kind == TextBox,
     }
 }
@@ -142,10 +148,8 @@ fn swatches(ui: &mut egui::Ui, current: Option<[f32; 3]>, none: bool) -> Option<
             picked = Some(None);
         }
         for (name, rgb) in PALETTE {
-            let [r, g, b] = rgb.map(|c| (c * 255.0).round() as u8);
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click());
-            ui.painter()
-                .rect_filled(rect, 3.0, egui::Color32::from_rgb(r, g, b));
+            ui.painter().rect_filled(rect, 3.0, color32(rgb));
             if current.is_some_and(|c| same(c, rgb)) {
                 ui.painter().rect_stroke(
                     rect.expand(2.0),

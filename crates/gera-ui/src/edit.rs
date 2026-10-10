@@ -204,6 +204,18 @@ pub(crate) struct TextDraft {
     pub(crate) focused: bool,
 }
 
+/// Onde o arrasto começou, na página. O arrasto só "começa" depois de o mouse andar alguns pixels:
+/// o gesto parte de onde o botão foi apertado (senão a primeira letra ou o primeiro canto ficaria
+/// deslocado); sem essa informação, vale o ponteiro atual.
+pub(crate) fn press_point(
+    response: &egui::Response,
+    map: &PageMap,
+    pointer: Option<(f32, f32)>,
+) -> Option<(f32, f32)> {
+    let pressed = response.ctx.input(|i| i.pointer.press_origin());
+    pressed.map(|p| map.to_page(p.into())).or(pointer)
+}
+
 /// Folga do clique sobre uma anotação, em pixels da tela.
 const HIT_TOL: f32 = 3.0;
 
@@ -463,8 +475,7 @@ impl EditState {
             }
         }
         if response.drag_started_by(egui::PointerButton::Primary) {
-            let pressed = response.ctx.input(|i| i.pointer.press_origin());
-            let Some(p) = pressed.map(|p| map.to_page(p.into())).or(pointer) else {
+            let Some(p) = press_point(response, map, pointer) else {
                 return false;
             };
             let size = 5.0 / map.zoom;
@@ -688,10 +699,7 @@ impl EditState {
         }
         // só o botão esquerdo seleciona: o direito (com um tremido) é para o menu de contexto
         if response.drag_started_by(egui::PointerButton::Primary) {
-            // O arrasto só "começa" depois de o mouse andar alguns pixels: a seleção parte de onde
-            // o botão foi apertado, senão a primeira letra sob o mouse ficaria de fora.
-            let pressed = response.ctx.input(|i| i.pointer.press_origin());
-            if let Some(p) = pressed.map(|p| map.to_page(p.into())).or(pointer) {
+            if let Some(p) = press_point(response, map, pointer) {
                 self.select_drag = Some(SelectDrag {
                     page,
                     from: p,

@@ -3,7 +3,7 @@
 //! Cada mudança é uma [`Edit`] reversível: aplicá-la devolve a inversa. Apagar (e desfazer uma
 //! criação) só **esconde** a anotação (flag Hidden) — assim desfazer a traz de volta idêntica,
 //! mesmo que venha de outro programa. Ao salvar, as escondidas por nós saem de verdade.
-use crate::doc::{annot_id, rgb_of};
+use crate::doc::{annot_id, rgb, rgb_of};
 use crate::error::{PdfError, Result};
 use crate::types::{PdfRect, Segment};
 use mupdf::color::AnnotationColor;
@@ -306,17 +306,12 @@ pub(crate) fn apply_edit(
                 color: old,
             }
         }
-        Edit::Font {
-            size,
-            color: [red, green, blue],
-            ..
-        } => {
+        Edit::Font { size, color, .. } => {
             let da = a
                 .default_appearance()?
                 .ok_or_else(|| PdfError::InvalidAnnotation("anotação sem fonte".into()))?;
             let old = da.color.map(rgb_of).unwrap_or([0.0; 3]);
-            let color = AnnotationColor::Rgb { red, green, blue };
-            a.set_default_appearance(&da.font_name, size, Some(color))?;
+            a.set_default_appearance(&da.font_name, size, Some(rgb(color)))?;
             Edit::Font {
                 page,
                 id,

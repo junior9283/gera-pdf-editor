@@ -1,8 +1,7 @@
 //! Catálogo de carimbos, como no Acrobat: dinâmicos (com nome, data e hora) e padrão comercial.
 
-/// Largura e altura padrão de um carimbo na página, em pontos.
-pub const STAMP_WIDTH: f32 = 190.0;
-pub const STAMP_HEIGHT: f32 = 60.0;
+/// Largura e altura padrão de um carimbo na página (as da imagem desenhada), em pontos.
+pub use pdf_core::{STAMP_HEIGHT, STAMP_WIDTH};
 
 const GREEN: [f32; 3] = [0.13, 0.55, 0.13];
 const RED: [f32; 3] = [0.8, 0.1, 0.1];
