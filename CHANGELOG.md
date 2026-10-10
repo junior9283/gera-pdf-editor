@@ -6,7 +6,22 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 ## [Não lançado]
 
-- Editar PDF: texto (etapa v4b).
+- Comparar arquivos, redigir, marca d'água, cabeçalho e rodapé (rumo à 1.0.0).
+
+## [0.9.0] — 2026-10-10 · Editar PDF: texto (v4b)
+
+### Adicionado
+- **Editar PDF** mostra o contorno dos blocos de texto; clicar abre a edição no lugar (Esc ou clicar
+  fora confirmam, Ctrl+Z desfaz).
+- O texto novo sai na mesma posição, tamanho, cor e direção (também em páginas giradas). A fonte
+  original é reaproveitada quando tem todas as letras; senão, a padrão equivalente (Helvetica, Times
+  ou Courier, com negrito e itálico).
+- Parágrafos refluem na própria largura, com o recuo da primeira linha; linha solta (título) cresce
+  até a margem.
+- **Adicionar texto** cria um bloco novo onde se clica.
+- Só as letras do bloco saem: linhas vizinhas, imagens, desenhos, links e comentários ficam; texto
+  invisível de OCR continua invisível. Texto que não dá para trocar com segurança (formulário, fonte
+  especial) é recusado sem mexer no documento.
 
 ## [0.8.0] — 2026-10-10 · Editar PDF: imagens (v4a)
 
@@ -64,7 +79,8 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 ### Adicionado
 - Visualizador leve: abrir, rolar, zoom, miniaturas, busca, destaque, sublinhado, notas e desenho.
 
-[Não lançado]: https://github.com/junior9283/gera-pdf-editor/compare/v0.8.0...HEAD
+[Não lançado]: https://github.com/junior9283/gera-pdf-editor/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/junior9283/gera-pdf-editor/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/junior9283/gera-pdf-editor/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/junior9283/gera-pdf-editor/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/junior9283/gera-pdf-editor/compare/v0.5.0...v0.6.0

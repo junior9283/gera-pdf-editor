@@ -60,7 +60,7 @@ e já traz os dados de OCR em português e inglês.
 | **Comprimir** | Níveis baixa, média e alta: une objetos repetidos, remove os não usados e reduz a resolução das imagens |
 | **Criar e exportar** | Criar PDF a partir de imagens; exportar para Word (.docx), texto ou imagens (PNG/JPEG) |
 | **Digitalizar e OCR** | Reconhece o texto de páginas escaneadas (Tesseract) e o torna pesquisável e selecionável |
-| **Editar PDF** | Imagens: mover, redimensionar mantendo a proporção, girar, substituir, adicionar e excluir, com desfazer |
+| **Editar PDF** | Texto: editar no lugar com a fonte, o tamanho e a cor originais, parágrafos que refluem, adicionar texto. Imagens: mover, redimensionar mantendo a proporção, girar, substituir, adicionar e excluir. Tudo com desfazer |
 
 Atalhos do Acrobat: `Ctrl+O`, `Ctrl+S`, `Ctrl+Shift+S`, `Ctrl+P`, `Ctrl+F`, `Ctrl+Z`/`Ctrl+Shift+Z`,
 `Ctrl+=`/`Ctrl+-`, `Ctrl+0`/`Ctrl+1`/`Ctrl+2`, `Ctrl+D`, `F11`, `Ctrl+Tab` e outros. A lista completa está em
@@ -81,8 +81,8 @@ interface) e revisão de código independente antes de entrar na `main`.
 | v3 | Formulários, preencher e assinar, certificados | ✅ 0.6.0 |
 | v5 | Proteger, comprimir, criar/exportar, OCR | ✅ 0.7.0 |
 | v4a | Editar PDF: imagens | ✅ 0.8.0 |
-| v4b | Editar PDF: texto | 🚧 próxima (0.9.0) |
-| — | Comparar arquivos, redigir, marca d'água, cabeçalho e rodapé | 📋 planejado (rumo à 1.0.0) |
+| v4b | Editar PDF: texto | ✅ 0.9.0 |
+| — | Comparar arquivos, redigir, marca d'água, cabeçalho e rodapé | 🚧 próximas (rumo à 1.0.0) |
 
 O histórico de cada versão está no [CHANGELOG](CHANGELOG.md) e o plano detalhado no [ROADMAP](ROADMAP.md).
 As especificações e os planos de cada etapa ficam em [`docs/superpowers`](docs/superpowers).
