@@ -52,6 +52,10 @@ pub struct PdfDoc {
     /// O arquivo do disco tem assinaturas: gravar e tirar instantâneos só de forma incremental
     /// (a memória pode ter perdido o /V ou a página assinada, o arquivo não).
     pub(crate) signed_on_disk: bool,
+    /// A senha de permissões foi informada (todas as permissões liberadas).
+    pub(crate) owner_unlocked: bool,
+    /// Proteção a aplicar no próximo Salvar (`Some(None)`: remover a segurança).
+    pub(crate) pending_protection: Option<Option<crate::security::Protection>>,
 }
 
 /// Abre o arquivo e, se for protegido, autentica com `password`.
@@ -78,8 +82,14 @@ impl PdfDoc {
             unsaved: false,
             author: None,
             signed_on_disk: false,
+            owner_unlocked: false,
+            pending_protection: None,
         };
         doc.signed_on_disk = doc.has_signatures().unwrap_or(false);
+        // abrir digitando a senha de permissões libera tudo (como no Acrobat)
+        if let Some(p) = password.filter(|p| !p.is_empty()) {
+            doc.owner_unlocked = doc.unlock(p).is_ok();
+        }
         Ok(doc)
     }
 
@@ -725,7 +735,9 @@ impl PdfDoc {
         let result = self.purge_hidden().and_then(|()| self.write(dest));
         self.unsaved = result.is_err() && (self.unsaved || self.history.can_undo());
         self.history = History::default();
-        result
+        result?;
+        // proteção nova: reabre com a senha nova (a gravação seguinte mantém a do arquivo)
+        self.after_protection_saved()
     }
 
     /// Volta ao arquivo do disco (com a mesma senha), sem as edições em memória.
@@ -743,7 +755,7 @@ impl PdfDoc {
 
     fn write(&mut self, dest: &Path) -> Result<()> {
         let mut opts = PdfWriteOptions::default();
-        opts.set_encryption(Encryption::Keep);
+        self.encryption_options(&mut opts);
         if self.signed_on_disk || self.has_signatures()? {
             // documento assinado: só gravação incremental (como o Acrobat), senão a reescrita
             // mudaria os bytes assinados e quebraria as assinaturas
@@ -1125,6 +1137,7 @@ impl PdfDoc {
             annots: self.all_annotations().unwrap_or_default(),
             fields: self.all_fields().unwrap_or_default(),
             form_notes: self.form_notes().unwrap_or_default(),
+            security: self.security()?,
         })
     }
 }

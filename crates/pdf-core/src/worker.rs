@@ -71,6 +71,14 @@ pub enum Request {
     },
     /// Assinaturas do documento, validadas.
     Signatures,
+    /// Proteção a aplicar ao Salvar (`None`: remover a segurança).
+    SetProtection(Option<crate::Protection>),
+    /// Senha de permissões: libera tudo.
+    Unlock {
+        password: String,
+    },
+    /// Situação de segurança (depois de Salvar).
+    Security,
     /// Propriedades do campo, para a janela Propriedades.
     FieldProps {
         page: i32,
@@ -185,6 +193,13 @@ pub enum Response {
     },
     SignFailed(String),
     Signatures(Vec<crate::SignatureInfo>),
+    SecurityChanged {
+        security: crate::SecurityInfo,
+        /// Há proteção esperando o Salvar.
+        pending: bool,
+        history: HistoryState,
+    },
+    SecurityFailed(String),
     /// Propriedades de um campo (Preparar formulário).
     FieldProps {
         page: i32,
@@ -330,6 +345,9 @@ impl State {
                     Err(e) => Response::SignFailed(e),
                 },
             ),
+            Request::SetProtection(p) => self.security(send, |d| d.set_protection(p)),
+            Request::Unlock { password } => self.security(send, |d| d.unlock(&password)),
+            Request::Security => self.security(send, |_| Ok(())),
             Request::Signatures => send(Response::Signatures(
                 self.with_doc(|d| d.signatures()).unwrap_or_default(),
             )),
@@ -435,6 +453,27 @@ impl State {
             }),
             Err(e) => send(Response::AnnotFailed(e.to_string())),
         }
+    }
+
+    /// Muda a segurança e conta a situação nova à interface.
+    fn security(
+        &mut self,
+        send: &dyn Fn(Response),
+        f: impl FnOnce(&mut PdfDoc) -> crate::Result<()>,
+    ) {
+        send(
+            match self.with_doc_mut(|d| {
+                f(d)?;
+                Ok((d.security()?, d.protection_pending(), d.history_state()))
+            }) {
+                Ok((security, pending, history)) => Response::SecurityChanged {
+                    security,
+                    pending,
+                    history,
+                },
+                Err(e) => Response::SecurityFailed(e),
+            },
+        )
     }
 
     /// Roda `f` no documento aberto; erros (e a falta de documento) viram texto para a UI.

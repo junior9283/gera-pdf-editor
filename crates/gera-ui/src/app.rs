@@ -420,6 +420,12 @@ impl GeraApp {
                 .inner
                 .or(cmd);
         }
+        if doc.protect_tools {
+            cmd = egui::Panel::top("proteger")
+                .show(ui, |ui| toolbar::protect_row(ui, doc))
+                .inner
+                .or(cmd);
+        }
         if doc.cert_tools {
             cmd = egui::Panel::top("certificados")
                 .show(ui, |ui| toolbar::cert_row(ui, doc))
@@ -610,6 +616,7 @@ impl GeraApp {
             tools_catalog::FILL_SIGN => tools_catalog::FILL_SIGN,
             tools_catalog::PREPARE_FORM => tools_catalog::PREPARE_FORM,
             tools_catalog::CERTIFICATES => tools_catalog::CERTIFICATES,
+            tools_catalog::PROTECT => tools_catalog::PROTECT,
             _ => return,
         };
         match self.last_doc.clone().and_then(|p| self.tabs.find(&p)) {

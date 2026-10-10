@@ -225,6 +225,10 @@ pub fn combine(inputs: &[(PathBuf, Option<String>)], dest: &Path) -> Result<()> 
     let mut marks = Vec::new();
     for (path, password) in inputs {
         let src = open_authenticated(path, password.as_deref())?;
+        // arquivo restrito: copiar as páginas para um arquivo sem senha tiraria a proteção
+        if !crate::security::pages_can_be_copied(&src, password.as_deref())? {
+            return Err(crate::security::restricted_source(path));
+        }
         let n = src.page_count()?;
         let at = out.page_count()? as u32;
         let outline = src.outlines()?;

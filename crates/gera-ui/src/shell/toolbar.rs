@@ -56,6 +56,48 @@ pub fn show(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     out
 }
 
+/// Linha Proteger PDF: Proteger usando senha, Remover segurança, Desbloquear e Fechar.
+pub fn protect_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
+    let sec = doc.security;
+    let locked = sec.locked();
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(!locked, egui::Button::new("🔒 Proteger usando senha…"))
+            .on_disabled_hover_text("Desbloqueie com a senha de permissões primeiro")
+            .clicked()
+        {
+            doc.protect = Some(crate::shell::protect_dialog::ProtectDialog::new());
+        }
+        if ui
+            .add_enabled(
+                sec.encrypted && !locked,
+                egui::Button::new("Remover segurança"),
+            )
+            .clicked()
+        {
+            doc.remove_security();
+        }
+        if ui
+            .add_enabled(locked, egui::Button::new("Desbloquear…"))
+            .on_hover_text("Informar a senha de permissões")
+            .clicked()
+        {
+            doc.unlock = Some(String::new());
+        }
+        ui.label(match (sec.encrypted, locked) {
+            (false, _) => "Documento sem proteção.",
+            (true, true) => "Protegido: algumas ações não são permitidas.",
+            (true, false) => "Protegido por senha.",
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Fechar").clicked() {
+                doc.show_row("");
+            }
+        });
+    });
+    None
+}
+
 /// Linha Certificados: Assinar digitalmente, Validar todas as assinaturas e Fechar.
 pub fn cert_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     ui.horizontal(|ui| {
