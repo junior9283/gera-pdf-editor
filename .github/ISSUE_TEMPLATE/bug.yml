@@ -6,7 +6,7 @@ body:
     id: versao
     attributes:
       label: Versão
-      description: Ajuda → Sobre (ex.: 0.8.0) e forma de instalação (AppImage, compilado)
+      description: "Ajuda → Sobre (por exemplo 0.8.0) e forma de instalação (AppImage, compilado)"
     validations:
       required: true
   - type: input
