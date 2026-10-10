@@ -106,6 +106,8 @@ pub struct DocTab {
     password_prompt: Option<(PathBuf, String)>,
     /// Linha de ferramentas de comentário visível ("✏ Comentar").
     pub(crate) comment_tools: bool,
+    /// Linha Preencher e assinar aberta.
+    pub(crate) fill_tools: bool,
     /// Pedido de foco no campo de busca (Ctrl+F ou menu).
     pub(crate) focus_search: bool,
     /// Propriedades mostradas na janela (aberta enquanto houver).
@@ -187,6 +189,7 @@ impl DocTab {
             opening: None,
             password_prompt: None,
             comment_tools: false,
+            fill_tools: false,
             focus_search: false,
             properties: None,
             print_dialog: None,
@@ -584,11 +587,15 @@ impl DocTab {
         {
             if self.organize.is_some() {
                 self.organize = None; // Esc fecha o Organizar páginas
+            } else if self.edit.fill.dialog.take().is_some() {
+                // Esc fecha a janela de assinatura (como Cancelar)
+                self.edit.fill.into_field = None;
             } else if !self.form.escape() {
                 self.edit.escape();
             }
         }
         if !typing {
+            self.nudge_selected(ctx);
             let nav = [
                 (NavKey::PageUp, egui::Key::PageUp),
                 (NavKey::PageDown, egui::Key::PageDown),
@@ -643,8 +650,53 @@ impl DocTab {
         }
     }
 
+    /// Setas movem a anotação selecionada (1 pt; Shift, 10 pt), como no Acrobat.
+    fn nudge_selected(&mut self, ctx: &egui::Context) {
+        // com a janela de assinatura aberta, as setas são dela
+        let Some((page, id)) = self
+            .edit
+            .selected
+            .filter(|_| self.edit.fill.dialog.is_none())
+        else {
+            return;
+        };
+        let arrows = [
+            (egui::Key::ArrowLeft, (-1, 0)),
+            (egui::Key::ArrowRight, (1, 0)),
+            (egui::Key::ArrowUp, (0, -1)),
+            (egui::Key::ArrowDown, (0, 1)),
+        ];
+        let pressed = ctx.input_mut(|i| {
+            arrows.into_iter().find_map(|(k, dir)| {
+                if i.consume_key(egui::Modifiers::SHIFT, k) {
+                    Some((dir, true))
+                } else {
+                    i.consume_key(egui::Modifiers::NONE, k)
+                        .then_some((dir, false))
+                }
+            })
+        });
+        if let Some((dir, shift)) = pressed {
+            let rotation = self
+                .view
+                .as_ref()
+                .map_or_else(Default::default, |v| v.rotation);
+            let (dx, dy) = app_state::fill_sign::nudge(dir, shift, rotation);
+            self.worker
+                .send(Request::Annot(pdf_core::AnnotOp::Move { page, id, dx, dy }));
+        }
+    }
+
+    /// Abre a linha de ferramentas `id` (Comentar ou Preencher e assinar; uma por vez).
+    pub fn show_row(&mut self, id: &str) {
+        self.comment_tools = id == app_state::tools_catalog::COMMENT;
+        self.fill_tools = id == app_state::tools_catalog::FILL_SIGN;
+        self.edit.set_fill_tool(None);
+    }
+
     /// Início do quadro: tem que vir antes de qualquer pedido de render (painel ou canvas).
     pub fn begin(&mut self) {
+        self.edit.fill.active = self.fill_tools;
         if let Some(view) = self.view.as_mut() {
             view.begin_frame();
         }
@@ -758,6 +810,9 @@ impl DocTab {
         self.edit.drop_stale_drag(down);
         self.edit.note_window(ui);
         self.edit.props_window(ui, &self.annots);
+        if let Some(msg) = self.edit.signature_window(ui.ctx()) {
+            self.status = msg;
+        }
         self.split_window(ui);
         self.poll_files();
         self.identity_window(ui);
@@ -1175,10 +1230,7 @@ impl DocTab {
                 crate::fields::FieldAction::Set { page, id, value } => {
                     self.worker.send(Request::SetField { page, id, value })
                 }
-                crate::fields::FieldAction::Sign => {
-                    self.status =
-                        "Assinar campos de assinatura chega com Preencher e assinar.".into()
-                }
+                crate::fields::FieldAction::Sign { page, rect } => self.edit.sign_field(page, rect),
             }
         }
         let now = ui.input(|i| i.time);

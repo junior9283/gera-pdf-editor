@@ -69,6 +69,22 @@ pub(crate) fn fitted(rect: PdfRect, text: &str, size: f32, border: f32) -> Resul
     })
 }
 
+/// Caixa justa do texto solto (Typewriter): largura da linha mais longa, uma altura de linha por
+/// parágrafo, a partir do canto `at`.
+pub(crate) fn snug(at: (f32, f32), text: &str, size: f32) -> Result<PdfRect> {
+    let font = Font::new("Helvetica")?;
+    let mut w: f32 = size; // nunca menor que um "eme" (texto vazio continua clicável)
+    let mut lines = 0;
+    for line in text.split('\n') {
+        w = w.max(text_width(&font, line, size)?);
+        lines += 1;
+    }
+    // folga para a métrica do MuPDF ao desenhar (não quebrar a última palavra)
+    let w = w + 0.5 * size;
+    let h = lines as f32 * LINE_HEIGHT * size + 0.2 * size;
+    Ok(PdfRect::new(at.0, at.1, at.0 + w, at.1 + h))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

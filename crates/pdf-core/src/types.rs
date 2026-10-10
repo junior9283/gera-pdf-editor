@@ -232,6 +232,26 @@ pub enum NewAnnot {
         b: (f32, f32),
         arrow: bool,
     },
+    /// Texto do Preencher e assinar: sem borda, preto, a partir do canto `at`.
+    FillText {
+        page: i32,
+        at: (f32, f32),
+        text: String,
+        size: f32,
+    },
+    /// Marca do Preencher e assinar (preta, ajustada ao retângulo).
+    Mark {
+        page: i32,
+        rect: PdfRect,
+        mark: Mark,
+    },
+    /// Assinatura ou iniciais do Preencher e assinar.
+    Signature {
+        page: i32,
+        rect: PdfRect,
+        art: SignatureArt,
+        initials: bool,
+    },
     /// Carimbo: título e, nos dinâmicos, a linha com nome, data e hora.
     Stamp {
         page: i32,
@@ -240,6 +260,49 @@ pub enum NewAnnot {
         subtitle: Option<String>,
         color: [f32; 3],
     },
+}
+
+/// Marcas do Preencher e assinar (como no Acrobat).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Mark {
+    Cross,
+    Check,
+    Circle,
+    Line,
+    Dot,
+}
+
+/// Comando de caminho vetorial (coordenadas da arte, y para baixo).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PathCmd {
+    Move(f32, f32),
+    Line(f32, f32),
+    Curve(f32, f32, f32, f32, f32, f32),
+    Close,
+}
+
+/// Caminho da arte de uma assinatura: preenchido (letras) ou traçado com `width` (desenho).
+#[derive(Debug, Clone, PartialEq)]
+pub struct VectorPath {
+    pub cmds: Vec<PathCmd>,
+    pub fill: bool,
+    pub width: f32,
+}
+
+/// Arte da assinatura: vetorial (digitada ou desenhada; caixa 0..aspect × 0..1) ou imagem.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SignatureArt {
+    Vector { paths: Vec<VectorPath>, aspect: f32 },
+    Image { path: PathBuf },
+}
+
+impl SignatureArt {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Vector { paths, .. } => paths.iter().all(|p| p.cmds.len() < 2),
+            Self::Image { .. } => false,
+        }
+    }
 }
 
 impl NewAnnot {
@@ -253,6 +316,9 @@ impl NewAnnot {
             | Self::TextBox { page, .. }
             | Self::Shape { page, .. }
             | Self::Line { page, .. }
+            | Self::Signature { page, .. }
+            | Self::FillText { page, .. }
+            | Self::Mark { page, .. }
             | Self::Stamp { page, .. } => *page,
         }
     }
@@ -265,8 +331,10 @@ impl NewAnnot {
             | Self::StrikeOut { rects, .. } => rects.is_empty(),
             Self::Note { text, .. } => text.trim().is_empty(),
             Self::Ink { strokes, .. } => strokes.iter().all(|s| s.len() < 2),
-            Self::TextBox { text, .. } => text.trim().is_empty(),
-            Self::Shape { rect, .. } | Self::Stamp { rect, .. } => {
+            Self::TextBox { text, .. } | Self::FillText { text, .. } => text.trim().is_empty(),
+            Self::Mark { rect, .. } => rect.width() < 2.0 || rect.height() < 2.0,
+            Self::Signature { art, .. } if art.is_empty() => true,
+            Self::Shape { rect, .. } | Self::Stamp { rect, .. } | Self::Signature { rect, .. } => {
                 rect.width() < 3.0 || rect.height() < 3.0
             }
             Self::Line { a, b, .. } => (b.0 - a.0).hypot(b.1 - a.1) < 3.0,

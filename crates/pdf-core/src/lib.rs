@@ -6,6 +6,7 @@ mod doc;
 mod error;
 mod forms;
 mod pages;
+pub mod signature;
 pub(crate) mod split;
 mod stamp;
 mod text_fit;

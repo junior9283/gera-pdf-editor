@@ -13,6 +13,9 @@ pub enum Tool {
     Arrow,
     /// O carimbo escolhido fica no estado de edição.
     Stamp,
+    /// Uma ferramenta do Preencher e assinar (qual, fica no estado de edição); fora de `ALL`,
+    /// que é a linha Comentar.
+    Fill,
 }
 
 impl Tool {
@@ -43,6 +46,7 @@ impl Tool {
             Tool::Line => "Linha",
             Tool::Arrow => "Seta",
             Tool::Stamp => "Carimbo",
+            Tool::Fill => "Preencher e assinar",
         }
     }
 }

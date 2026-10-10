@@ -38,8 +38,9 @@ pub struct GeraApp {
     /// Recentes mudaram e ainda não foram gravados.
     recents_dirty: bool,
     fullscreen: bool,
-    /// Ligar a linha Comentar no próximo documento aberto pelo seletor.
-    comment_after_open: bool,
+    /// Linha de ferramentas (Comentar ou Preencher e assinar) a abrir no próximo documento
+    /// aberto pelo seletor.
+    row_after_open: Option<&'static str>,
     /// Último documento que esteve na frente (para o hub voltar a ele).
     last_doc: Option<PathBuf>,
     show_shortcuts: bool,
@@ -60,6 +61,7 @@ impl GeraApp {
         crate::print_job::sweep();
         let prefs = store::config_file(PREFS_FILE).map_or_else(Prefs::default, |p| Prefs::load(&p));
         cc.egui_ctx.set_visuals(visuals(prefs.dark));
+        crate::fill_sign::install_script_font(&cc.egui_ctx);
         let mut app = Self {
             tabs: TabList::default(),
             docs: Vec::new(),
@@ -76,7 +78,7 @@ impl GeraApp {
             prefs_dirty: false,
             recents_dirty: false,
             fullscreen: false,
-            comment_after_open: false,
+            row_after_open: None,
             last_doc: None,
             show_shortcuts: false,
             show_about: false,
@@ -235,18 +237,18 @@ impl GeraApp {
                     for f in files {
                         self.open_path(ctx, f);
                     }
-                    if std::mem::take(&mut self.comment_after_open) {
+                    if let Some(row) = self.row_after_open.take() {
                         if let Some(doc) = self.active_doc() {
-                            doc.comment_tools = true;
+                            doc.show_row(row);
                         }
                     }
                 }
                 Picked::SaveAs { doc, dest } => self.save_as(doc, dest),
                 Picked::Cancelled | Picked::Folder(_) | Picked::SaveTo(_) => {
-                    self.comment_after_open = false
+                    self.row_after_open = None
                 }
                 Picked::Failed => {
-                    self.comment_after_open = false;
+                    self.row_after_open = None;
                     self.status = "Não foi possível abrir o seletor de arquivos.".into();
                 }
             }
@@ -409,6 +411,12 @@ impl GeraApp {
         if doc.comment_tools {
             cmd = egui::Panel::top("comentar")
                 .show(ui, |ui| toolbar::comment_row(ui, doc))
+                .inner
+                .or(cmd);
+        }
+        if doc.fill_tools {
+            cmd = egui::Panel::top("preencher-assinar")
+                .show(ui, |ui| toolbar::fill_row(ui, doc))
                 .inner
                 .or(cmd);
         }
@@ -579,18 +587,20 @@ impl GeraApp {
             }
             return;
         }
-        if id != tools_catalog::COMMENT {
-            return;
-        }
+        let row = match id {
+            tools_catalog::COMMENT => tools_catalog::COMMENT,
+            tools_catalog::FILL_SIGN => tools_catalog::FILL_SIGN,
+            _ => return,
+        };
         match self.last_doc.clone().and_then(|p| self.tabs.find(&p)) {
             Some(tab) => {
                 self.activate(tab);
                 if let Some(doc) = self.active_doc() {
-                    doc.comment_tools = true;
+                    doc.show_row(row);
                 }
             }
             None => {
-                self.comment_after_open = true;
+                self.row_after_open = Some(row);
                 self.dialogs.open(ctx);
             }
         }

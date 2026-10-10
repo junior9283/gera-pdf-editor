@@ -6,6 +6,7 @@ mod create;
 mod doc_tab;
 mod edit;
 mod fields;
+mod fill_sign;
 mod open_dialog;
 mod organize;
 mod print_job;

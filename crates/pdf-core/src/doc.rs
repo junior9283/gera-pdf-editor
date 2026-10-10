@@ -3,7 +3,7 @@ use crate::error::{PdfError, Result};
 use crate::stamp;
 use crate::text_fit;
 use crate::types::{
-    AnnotInfo, AnnotKind, AnnotOp, Changed, DocProperties, DocSummary, HistoryState, LineEnd,
+    AnnotInfo, AnnotKind, AnnotOp, Changed, DocProperties, DocSummary, HistoryState, LineEnd, Mark,
     NewAnnot, OutlineItem, PageSize, PdfRect, RenderedPage, Rotation, StateModel, TextSelection,
     Word, COMMENT_RED,
 };
@@ -346,6 +346,23 @@ fn add_one(doc: &mut PdfDocument, page: &mut PdfPage, a: &NewAnnot) -> Result<Pd
             }
             a
         }
+        NewAnnot::FillText { at, text, size, .. } => {
+            let rect = text_fit::snug(*at, text, *size)?;
+            let mut a = page.add_free_text_annotation(Rect::from(rect), text)?;
+            a.set_default_appearance("Helv", *size, Some(rgb([0.0; 3])))?;
+            a.set_border_width(0.0)?;
+            // o "Typewriter" do Acrobat: texto solto, sem caixa
+            a.object()
+                .dict_put("IT", PdfObject::new_name("FreeTextTypeWriter")?)?;
+            a
+        }
+        NewAnnot::Mark { rect, mark, .. } => fill_sign_mark(page, *rect, *mark)?,
+        NewAnnot::Signature {
+            rect,
+            art,
+            initials,
+            ..
+        } => crate::signature::add(doc, page, *rect, art, *initials)?,
         NewAnnot::Stamp {
             rect,
             title,
@@ -443,6 +460,41 @@ pub(crate) fn rgb([red, green, blue]: [f32; 3]) -> AnnotationColor {
 /// Cor RGB pedida pela interface como edição; `None` vira `absent`.
 fn rgb_edit(color: Option<[f32; 3]>, absent: ColorEdit) -> ColorEdit {
     color.map_or(absent, |c| ColorEdit::Set(rgb(c)))
+}
+
+/// Marca preta: Xis, Visto e Linha viram tinta; Círculo e Ponto, círculo (o Ponto, cheio).
+fn fill_sign_mark(page: &mut PdfPage, r: PdfRect, mark: Mark) -> Result<PdfAnnotation> {
+    let black = rgb([0.0; 3]);
+    let width = (r.height().min(r.width()) / 8.0).clamp(0.75, 4.0);
+    // pontos relativos (0..1, y para baixo), recuados meia espessura para a tinta caber na caixa
+    let inset = width / 2.0;
+    let at = |fx: f32, fy: f32| {
+        (
+            r.x0 + inset + fx * (r.width() - 2.0 * inset),
+            r.y0 + inset + fy * (r.height() - 2.0 * inset),
+        )
+    };
+    let strokes = match mark {
+        Mark::Cross => vec![
+            vec![at(0.0, 0.0), at(1.0, 1.0)],
+            vec![at(1.0, 0.0), at(0.0, 1.0)],
+        ],
+        Mark::Check => vec![vec![at(0.0, 0.55), at(0.35, 0.95), at(1.0, 0.05)]],
+        Mark::Line => vec![vec![at(0.0, 0.5), at(1.0, 0.5)]],
+        Mark::Circle | Mark::Dot => {
+            let mut a = page.add_circle_annotation(Rect::from(r))?;
+            a.set_color(black)?;
+            a.set_border_width(if mark == Mark::Dot { 0.0 } else { width })?;
+            if mark == Mark::Dot {
+                a.set_interior_color(black)?;
+            }
+            return Ok(a);
+        }
+    };
+    let mut a = page.add_ink_annotation(annot_edit::ink_points(&strokes))?;
+    a.set_color(black)?;
+    a.set_border_width(width)?;
+    Ok(a)
 }
 
 /// Contorno padrão das formas e linhas: vermelho, 1 pt (como no Acrobat).
@@ -677,6 +729,28 @@ impl PdfDoc {
         Ok(())
     }
 
+    /// Caixa de texto `id` com `text` (ou o atual) em `size`: (retângulo atual, novo). O texto solto
+    /// do Preencher e assinar fica justo ao texto; a caixa comum só cresce para baixo.
+    fn refit(
+        &self,
+        page: i32,
+        id: i32,
+        text: Option<&str>,
+        size: f32,
+    ) -> Result<Option<(PdfRect, PdfRect)>> {
+        let Some((rect, current, _, border)) = annot_edit::text_box_of(&self.inner, page, id)?
+        else {
+            return Ok(None);
+        };
+        let text = text.unwrap_or(&current);
+        let new = if annot_edit::is_typewriter(&self.inner, page, id)? {
+            text_fit::snug((rect.x0, rect.y0), text, size)?
+        } else {
+            text_fit::fitted(rect, text, size, border)?
+        };
+        Ok(Some((rect, new)))
+    }
+
     /// Aplica uma operação do usuário no documento em memória; devolve as páginas mudadas.
     pub fn apply(&mut self, op: AnnotOp) -> Result<Vec<i32>> {
         let edit = match op {
@@ -740,12 +814,7 @@ impl PdfDoc {
                 color,
             } => {
                 let size = size.clamp(4.0, 144.0);
-                let fit = match annot_edit::text_box_of(&self.inner, page, id)? {
-                    Some((rect, text, _, border)) => {
-                        Some((rect, text_fit::fitted(rect, &text, size, border)?))
-                    }
-                    None => None,
-                };
+                let fit = self.refit(page, id, None, size)?;
                 with_fit(
                     Edit::Font {
                         page,
@@ -783,9 +852,7 @@ impl PdfDoc {
             },
             AnnotOp::SetContents { page, id, text } => {
                 let fit = match annot_edit::text_box_of(&self.inner, page, id)? {
-                    Some((rect, _, size, border)) => {
-                        Some((rect, text_fit::fitted(rect, &text, size, border)?))
-                    }
+                    Some((_, _, size, _)) => self.refit(page, id, Some(&text), size)?,
                     None => None,
                 };
                 let contents = Edit::Contents {

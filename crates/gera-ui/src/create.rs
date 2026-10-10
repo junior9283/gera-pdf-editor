@@ -156,6 +156,7 @@ impl EditState {
             size: TEXT_SIZE,
             color: COMMENT_RED,
             focused: false,
+            fill: false,
         });
     }
 
@@ -210,6 +211,12 @@ impl EditState {
             return;
         };
         match d.target {
+            TextTarget::New if d.fill => self.add(NewAnnot::FillText {
+                page: d.page,
+                at: (d.rect.x0, d.rect.y0),
+                text: d.text,
+                size: d.size,
+            }),
             TextTarget::New => self.add(NewAnnot::TextBox {
                 page: d.page,
                 rect: d.rect,
