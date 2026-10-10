@@ -26,6 +26,10 @@ for lang in por eng; do
   for dir in /usr/share/tesseract/tessdata /usr/share/tessdata /usr/share/tesseract-ocr/5/tessdata; do
     if [ -f "$dir/$lang.traineddata" ]; then cp "$dir/$lang.traineddata" "$APPDIR/usr/share/tessdata/"; break; fi
   done
+  if [ ! -f "$APPDIR/usr/share/tessdata/$lang.traineddata" ]; then
+    echo "faltam os dados de OCR '$lang' (instale tesseract-langpack-$lang)" >&2
+    exit 1
+  fi
 done
 ln -s usr/bin/gera-pdf-editor "$APPDIR/AppRun"
 

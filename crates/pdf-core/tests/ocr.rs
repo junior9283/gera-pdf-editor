@@ -96,3 +96,52 @@ fn rotated_scans_get_the_text_over_the_words() {
     let w = d.summary().unwrap().sizes[0].width;
     assert!(hits[0].x0 > w / 2.0, "{:?} largura {w}", hits[0]);
 }
+
+#[test]
+fn body_text_on_a_real_size_scan_is_read_correctly() {
+    // página Carta com texto de 6 pt, "digitalizada" a 300 ppp (o PNG guarda 300 ppp, então a
+    // página do PDF fica do tamanho real)
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("corpo.pdf");
+    let content = "BT /F1 6 Tf 72 700 Td (The quick brown fox jumps over the lazy dog) Tj ET";
+    let pdf = format!(
+        "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n\
+         3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 5 0 R>>>>/Contents 4 0 R>>endobj\n\
+         4 0 obj<</Length {}>>stream\n{content}\nendstream endobj\n\
+         5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\ntrailer<</Root 1 0 R>>\n",
+        content.len()
+    );
+    std::fs::write(&src, pdf).unwrap();
+    let png = dir.path().join("corpo.png");
+    let ok = std::process::Command::new("magick")
+        .args([
+            "-density",
+            "300",
+            src.to_str().unwrap(),
+            "-background",
+            "white",
+            "-alpha",
+            "remove",
+            "-units",
+            "PixelsPerInch",
+            png.to_str().unwrap(),
+        ])
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        return;
+    }
+    let scan = dir.path().join("scan.pdf");
+    create_pdf_from_images(&[png], &scan).unwrap();
+    let mut d = PdfDoc::open(&scan, None).unwrap();
+    assert!(
+        (d.summary().unwrap().sizes[0].width - 612.0).abs() < 2.0,
+        "página de tamanho real"
+    );
+    d.recognize_text(&[0], OcrLanguage::English, |_, _| true)
+        .unwrap();
+    let text = d.page_text(0).unwrap();
+    for word in ["quick", "brown", "jumps", "lazy"] {
+        assert!(text.contains(word), "{word} em {text:?}");
+    }
+}

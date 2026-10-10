@@ -64,7 +64,7 @@ fn reading_score(words: &[Word]) -> f32 {
 
 /// Resolução do reconhecimento e o limite de pixels do render.
 const OCR_DPI: f32 = 300.0;
-const MAX_PIXELS: f32 = 40_000_000.0;
+const MAX_PIXELS: f32 = 16_000_000.0;
 
 fn refused(msg: impl Into<String>) -> PdfError {
     PdfError::Refused(msg.into())
@@ -105,18 +105,24 @@ struct Word {
     height: f32,
 }
 
-/// Arquivo temporário único para o resultado do Tesseract.
-fn temp_pdf() -> PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    std::env::temp_dir().join(format!("gera-ocr-{}-{nanos}.pdf", std::process::id()))
-}
-
-/// Reconhece as palavras de uma imagem da página (`size` = tamanho da página na tela).
-fn recognize(img: &Image, size: (f32, f32), lang: OcrLanguage, data: &Path) -> Result<Vec<Word>> {
+/// Reconhece as palavras de uma imagem da página (`size` = tamanho da página na tela, `dpi` =
+/// resolução da imagem: o gravador do OCR rasteriza nela — o padrão dele, 96 ppp, perde texto
+/// de corpo).
+fn recognize(
+    img: &Image,
+    size: (f32, f32),
+    dpi: f32,
+    lang: OcrLanguage,
+    data: &Path,
+) -> Result<Vec<Word>> {
     let _one_at_a_time = OCR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let tmp = temp_pdf();
+    // temporário privado (0600, criado sem seguir links): guarda a imagem da página, que pode ser
+    // de um documento protegido por senha
+    let tmp_file = tempfile::Builder::new()
+        .prefix("gera-ocr-")
+        .suffix(".pdf")
+        .tempfile()?;
+    let tmp = tmp_file.path().to_path_buf();
     let utf8 = |p: &Path| -> Result<String> {
         p.to_str()
             .map(str::to_owned)
@@ -124,7 +130,12 @@ fn recognize(img: &Image, size: (f32, f32), lang: OcrLanguage, data: &Path) -> R
     };
     let result = (|| -> Result<Vec<Word>> {
         {
-            let options = format!("ocr-language={},ocr-datadir={}", lang.code(), utf8(data)?);
+            let options = format!(
+                "ocr-language={},ocr-datadir={},resolution={}",
+                lang.code(),
+                utf8(data)?,
+                dpi.round()
+            );
             let mut w = DocumentWriter::with_ocr(utf8(&tmp)?.as_str(), &options)?;
             let rect = Rect::new(0.0, 0.0, size.0, size.1);
             let dev = w.begin_page(rect)?;
@@ -174,7 +185,7 @@ fn recognize(img: &Image, size: (f32, f32), lang: OcrLanguage, data: &Path) -> R
         }
         Ok(words)
     })();
-    let _ = std::fs::remove_file(&tmp);
+    drop(tmp_file); // apaga o temporário
     result
 }
 
@@ -200,6 +211,10 @@ impl PdfDoc {
         })?;
         let before = self.snapshot()?;
         let mut report = OcrReport::default();
+        // uma fonte para todas as páginas da execução
+        let helv = self.inner.add_object(&self.inner.new_object_from_str(
+            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>",
+        )?)?;
         let run = (|| -> Result<()> {
             for (i, &p) in pages.iter().enumerate() {
                 if !progress(i, pages.len()) {
@@ -211,8 +226,14 @@ impl PdfDoc {
                     report.skipped += 1;
                     continue;
                 }
-                report.words += self.ocr_page(p, lang, &data)?;
-                report.recognized += 1;
+                let mut go_on = || progress(i, pages.len());
+                match self.ocr_page(p, lang, &data, &helv, &mut go_on)? {
+                    Some(words) => {
+                        report.words += words;
+                        report.recognized += 1;
+                    }
+                    None => break, // cancelado no meio da página
+                }
             }
             Ok(())
         })();
@@ -229,13 +250,24 @@ impl PdfDoc {
     /// Reconhece uma página e acrescenta a camada de texto invisível; devolve quantas palavras.
     /// Digitalização deitada ou de cabeça para baixo: tenta as outras orientações e fica com a de
     /// melhor leitura (o Tesseract só lê texto em pé).
-    fn ocr_page(&mut self, page: i32, lang: OcrLanguage, data: &Path) -> Result<usize> {
+    /// `None`: cancelado (`go_on` devolveu falso entre as orientações).
+    fn ocr_page(
+        &mut self,
+        page: i32,
+        lang: OcrLanguage,
+        data: &Path,
+        helv: &mupdf::pdf::PdfObject,
+        go_on: &mut dyn FnMut() -> bool,
+    ) -> Result<Option<usize>> {
         let fitz = self.load(page)?;
         let b = fitz.bounds()?;
         let (w, h) = (b.x1 - b.x0, b.y1 - b.y0);
         let scale = (OCR_DPI / 72.0).min((MAX_PIXELS / (w * h).max(1.0)).sqrt());
         let mut best: Option<(f32, Vec<Word>, Matrix)> = None;
         for angle in [0.0f32, 90.0, 270.0, 180.0] {
+            if angle != 0.0 && !go_on() {
+                return Ok(None);
+            }
             // render girado: a imagem fica com a origem no canto da caixa girada
             let rot = Matrix::new_rotate(angle);
             let corners = [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)]
@@ -252,9 +284,11 @@ impl PdfDoc {
             ctm.concat(Matrix::new(1.0, 0.0, 0.0, 1.0, -mx, -my));
             let mut render = ctm.clone();
             render.concat(Matrix::new_scale(scale, scale));
-            let pix = fitz.to_pixmap(&render, &Colorspace::device_rgb(), false, false)?;
+            let pix = fitz.to_pixmap(&render, &Colorspace::device_gray(), false, false)?;
             let img = Image::from_pixmap(&pix)?;
-            let words = recognize(&img, (rw, rh), lang, data)?;
+            let words = recognize(&img, (rw, rh), scale * 72.0, lang, data)?;
+            // página em branco (nenhuma palavra na orientação da tela): girar não ajuda
+            let blank = angle == 0.0 && words.is_empty();
             let score = reading_score(&words);
             // de volta: do espaço girado do OCR para a tela
             let back = ctm
@@ -263,15 +297,15 @@ impl PdfDoc {
             if best.as_ref().is_none_or(|(s, ..)| score > *s) {
                 best = Some((score, words, back));
             }
-            if score >= GOOD_READING {
+            if score >= GOOD_READING || blank {
                 break;
             }
         }
         let Some((_, words, back)) = best else {
-            return Ok(0);
+            return Ok(Some(0));
         };
         if words.is_empty() {
-            return Ok(0);
+            return Ok(Some(0));
         }
         let mut page_obj = self.inner.find_page(page)?;
         // da tela (com /Rotate e a origem da MediaBox) para o espaço do PDF
@@ -325,10 +359,7 @@ impl PdfDoc {
                 resources.get_dict("Font")?.expect("acabou de ser posto")
             }
         };
-        let helv = self.inner.add_object(&self.inner.new_object_from_str(
-            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>",
-        )?)?;
-        fonts.dict_put("GeraOCR", helv)?;
+        fonts.dict_put("GeraOCR", helv.clone())?;
         // conteúdo: o original entre q/Q (estado gráfico limpo) e a camada por cima
         let stream = |doc: &mut mupdf::pdf::PdfDocument, s: &str| -> Result<_> {
             Ok(doc.add_stream(&Buffer::from_bytes(s.as_bytes())?, None, false)?)
@@ -349,6 +380,6 @@ impl PdfDoc {
         }
         contents.array_push(stream(&mut self.inner, &ops)?)?;
         page_obj.dict_put("Contents", contents)?;
-        Ok(words.len())
+        Ok(Some(words.len()))
     }
 }

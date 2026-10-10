@@ -256,7 +256,10 @@ impl DocTab {
 
     /// Fechar esta aba precisa de confirmação (pendências ou salvamento em andamento)?
     pub fn needs_confirm(&self) -> bool {
-        self.is_dirty() || self.edit.saving || self.form.has_draft()
+        self.is_dirty()
+            || self.edit.saving
+            || self.form.has_draft()
+            || self.ocr.as_ref().is_some_and(|w| w.cancel.is_some())
     }
 
     /// Confirma o texto que está sendo digitado num campo (antes de salvar ou imprimir).
@@ -985,7 +988,12 @@ impl DocTab {
         let mut cancel = false;
         let mut open = true;
         let lang = LANGS[w.lang].1;
-        let has_data = pdf_core::tessdata_dir(lang).is_some();
+        // procurar os dados custa alguns stat: só quando o idioma muda
+        if w.data_for != Some(w.lang) {
+            w.has_data = pdf_core::tessdata_dir(lang).is_some();
+            w.data_for = Some(w.lang);
+        }
+        let has_data = w.has_data;
         egui::Window::new("Reconhecer texto")
             .open(&mut open)
             .collapsible(false)
@@ -1935,6 +1943,9 @@ pub(crate) struct OcrWindow {
     all_pages: bool,
     progress: Option<(usize, usize)>,
     cancel: Option<pdf_core::CancelToken>,
+    /// Há dados de idioma para `data_for` (o índice do idioma conferido).
+    has_data: bool,
+    data_for: Option<usize>,
 }
 
 impl Default for OcrWindow {
@@ -1944,6 +1955,8 @@ impl Default for OcrWindow {
             all_pages: true,
             progress: None,
             cancel: None,
+            has_data: false,
+            data_for: None,
         }
     }
 }
@@ -1986,6 +1999,10 @@ impl Drop for DocTab {
     fn drop(&mut self) {
         if let Some(p) = self.print_pending.take() {
             let _ = std::fs::remove_file(p.file);
+        }
+        // OCR em andamento: para (libera a CPU e a vez das outras abas)
+        if let Some(c) = self.ocr.as_ref().and_then(|w| w.cancel.as_ref()) {
+            c.cancel();
         }
     }
 }
