@@ -1308,16 +1308,6 @@ impl DocTab {
             return;
         }
         self.protect_tools = id == tc::PROTECT;
-        // Redigir: abre marcando texto; ao sair, as ferramentas de marcar voltam a Selecionar
-        self.redact_tools = id == tc::REDACT;
-        if self.redact_tools {
-            self.edit.tool = app_state::tools::Tool::RedactText;
-        } else if matches!(
-            self.edit.tool,
-            app_state::tools::Tool::RedactText | app_state::tools::Tool::RedactArea
-        ) {
-            self.edit.tool = app_state::tools::Tool::Select;
-        }
         self.comment_tools = id == app_state::tools_catalog::COMMENT;
         self.fill_tools = id == app_state::tools_catalog::FILL_SIGN;
         self.prepare_tools = id == app_state::tools_catalog::PREPARE_FORM;
@@ -1338,6 +1328,11 @@ impl DocTab {
             send_edit_action(&self.worker, &mut self.status, action);
         }
         self.edit.set_fill_tool(None);
+        // Redigir: abre marcando texto (depois do Preencher, que volta a Selecionar)
+        self.redact_tools = id == tc::REDACT;
+        if self.redact_tools {
+            self.edit.tool = app_state::tools::Tool::RedactText;
+        }
     }
 
     /// Editar PDF: aplica `edit` à imagem selecionada.
@@ -2233,6 +2228,18 @@ mod tests {
         tab.edit_pdf.editing.as_mut().unwrap().buffer = "Oi".into();
         assert!(tab.commit_field(), "o texto em edição vai antes de gravar");
         assert!(tab.edit_pdf.editing.is_none());
+    }
+
+    #[test]
+    fn opening_redact_marks_text_and_closing_it_goes_back_to_select() {
+        use app_state::tools::Tool;
+        let ctx = egui::Context::default();
+        let mut tab = DocTab::new(&ctx, PathBuf::from("/a.pdf"), false);
+        tab.show_row(app_state::tools_catalog::REDACT);
+        assert!(tab.redact_tools);
+        assert_eq!(tab.edit.tool, Tool::RedactText);
+        tab.show_row("");
+        assert_eq!(tab.edit.tool, Tool::Select);
     }
 
     #[test]
