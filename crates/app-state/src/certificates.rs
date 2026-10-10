@@ -111,7 +111,10 @@ pub fn bar_text(
             "Assinado e todas as assinaturas são válidas.",
         )
     } else {
-        (SigStatus::Unknown, "Validade da assinatura desconhecida: pelo menos uma assinatura não foi verificada como confiável.")
+        (
+            SigStatus::Unknown,
+            "A validade da assinatura é desconhecida.",
+        )
     })
 }
 
