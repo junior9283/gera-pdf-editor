@@ -385,12 +385,35 @@ pub struct OutlineItem {
     pub depth: usize,
 }
 
+/// Link de uma página (`/Subtype /Link`), já classificado pelo que o clique faz.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkInfo {
+    pub page: i32,
+    /// Área clicável, em coordenadas do MuPDF (y para baixo).
+    pub rect: PdfRect,
+    pub target: LinkTarget,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LinkTarget {
+    /// Página deste documento, opcionalmente num ponto dela (coordenadas do MuPDF).
+    Page { page: i32, at: Option<(f32, f32)> },
+    /// Endereço `http`, `https` ou `mailto` (abre só depois do aviso de segurança).
+    Uri(String),
+    /// Outro PDF (caminho absoluto) e a página nele.
+    File { path: PathBuf, page: Option<i32> },
+    /// Programa ou endereço não permitido: nunca é seguido. Guarda o alvo, para a mensagem.
+    Blocked(String),
+}
+
 #[derive(Debug, Clone)]
 pub struct DocSummary {
     pub path: PathBuf,
     pub sizes: Vec<PageSize>,
     pub outline: Vec<OutlineItem>,
     pub annots: Vec<AnnotInfo>,
+    /// Links de todas as páginas.
+    pub links: Vec<LinkInfo>,
     /// Campos de formulário de todas as páginas.
     pub fields: Vec<crate::FieldInfo>,
     pub form_notes: crate::FormNotes,

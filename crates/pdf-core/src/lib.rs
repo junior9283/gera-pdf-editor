@@ -12,6 +12,7 @@ mod edit_images;
 mod edit_text;
 mod error;
 mod forms;
+mod links;
 mod ocr;
 mod owner_password;
 mod page_content;

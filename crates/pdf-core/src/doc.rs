@@ -1190,6 +1190,7 @@ impl PdfDoc {
             sizes,
             outline: self.outline().unwrap_or_default(),
             annots: self.all_annotations().unwrap_or_default(),
+            links: self.all_links(),
             fields: self.all_fields().unwrap_or_default(),
             form_notes: self.form_notes().unwrap_or_default(),
             security: self.security()?,
