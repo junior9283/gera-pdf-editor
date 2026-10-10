@@ -3,7 +3,7 @@ use crate::error::{PdfError, Result};
 use crate::stamp;
 use crate::text_fit;
 use crate::types::{
-    AnnotInfo, AnnotKind, AnnotOp, Changed, DocProperties, DocSummary, HistoryState, LineEnd,
+    AnnotInfo, AnnotKind, AnnotOp, Changed, DocProperties, DocSummary, HistoryState, LineEnd, Mark,
     NewAnnot, OutlineItem, PageSize, PdfRect, RenderedPage, Rotation, StateModel, TextSelection,
     Word, COMMENT_RED,
 };
@@ -346,6 +346,24 @@ fn add_one(doc: &mut PdfDocument, page: &mut PdfPage, a: &NewAnnot) -> Result<Pd
             }
             a
         }
+        NewAnnot::FillText { at, text, size, .. } => {
+            let start = PdfRect::new(at.0, at.1, at.0 + *size, at.1 + *size);
+            let rect = text_fit::fitted(start, text, *size, 0.0)?;
+            let mut a = page.add_free_text_annotation(Rect::from(rect), text)?;
+            a.set_default_appearance("Helv", *size, Some(rgb([0.0; 3])))?;
+            a.set_border_width(0.0)?;
+            // o "Typewriter" do Acrobat: texto solto, sem caixa
+            a.object()
+                .dict_put("IT", PdfObject::new_name("FreeTextTypeWriter")?)?;
+            a
+        }
+        NewAnnot::Mark { rect, mark, .. } => fill_sign_mark(page, *rect, *mark)?,
+        NewAnnot::Signature {
+            rect,
+            art,
+            initials,
+            ..
+        } => crate::signature::add(doc, page, *rect, art, *initials)?,
         NewAnnot::Stamp {
             rect,
             title,
@@ -446,6 +464,41 @@ fn rgb_edit(color: Option<[f32; 3]>, absent: ColorEdit) -> ColorEdit {
 }
 
 /// Contorno padrão das formas e linhas: vermelho, 1 pt (como no Acrobat).
+/// Marca preta: Xis, Visto e Linha viram tinta; Círculo e Ponto, círculo (o Ponto, cheio).
+fn fill_sign_mark(page: &mut PdfPage, r: PdfRect, mark: Mark) -> Result<PdfAnnotation> {
+    let black = rgb([0.0; 3]);
+    let width = (r.height().min(r.width()) / 8.0).clamp(0.75, 4.0);
+    // pontos relativos (0..1, y para baixo), recuados meia espessura para a tinta caber na caixa
+    let inset = width / 2.0;
+    let at = |fx: f32, fy: f32| {
+        (
+            r.x0 + inset + fx * (r.width() - 2.0 * inset),
+            r.y0 + inset + fy * (r.height() - 2.0 * inset),
+        )
+    };
+    let strokes = match mark {
+        Mark::Cross => vec![
+            vec![at(0.0, 0.0), at(1.0, 1.0)],
+            vec![at(1.0, 0.0), at(0.0, 1.0)],
+        ],
+        Mark::Check => vec![vec![at(0.0, 0.55), at(0.35, 0.95), at(1.0, 0.05)]],
+        Mark::Line => vec![vec![at(0.0, 0.5), at(1.0, 0.5)]],
+        Mark::Circle | Mark::Dot => {
+            let mut a = page.add_circle_annotation(Rect::from(r))?;
+            a.set_color(black)?;
+            a.set_border_width(if mark == Mark::Dot { 0.0 } else { width })?;
+            if mark == Mark::Dot {
+                a.set_interior_color(black)?;
+            }
+            return Ok(a);
+        }
+    };
+    let mut a = page.add_ink_annotation(annot_edit::ink_points(&strokes))?;
+    a.set_color(black)?;
+    a.set_border_width(width)?;
+    Ok(a)
+}
+
 fn outlined(mut a: PdfAnnotation) -> Result<PdfAnnotation> {
     a.set_color(rgb(COMMENT_RED))?;
     a.set_border_width(1.0)?;
