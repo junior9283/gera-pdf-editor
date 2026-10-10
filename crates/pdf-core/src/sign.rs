@@ -54,7 +54,7 @@ pub struct SignatureInfo {
     pub modified_after: bool,
     /// Impressões digitais SHA-256 do certificado do titular e da cadeia (titular primeiro).
     pub fingerprints: Vec<String>,
-    /// As revisões posteriores só mexem em anotações e campos (assinar, comentar, preencher):
+    /// As revisões posteriores só preenchem campos ou assinam (sem comentários nem mudar páginas):
     /// o conteúdo das páginas é o assinado, como o Acrobat permite num documento não certificado.
     pub changes_permitted: bool,
     /// O certificado (e a cadeia) estava dentro da validade na hora da assinatura.
@@ -552,9 +552,42 @@ fn page_fingerprint(doc: &mupdf::pdf::PdfDocument, page: i32) -> Option<Vec<u8>>
     Some(out)
 }
 
-/// As revisões depois de `end` só mexeram em anotações e campos (assinar, comentar, preencher)?
+/// Anotações da página que não são campos: tipo, retângulo, flags e a aparência (resumo). Elas
+/// também mudam o que se vê (uma anotação opaca por cima do texto assinado).
+fn annots_fingerprint(doc: &mupdf::pdf::PdfDocument, page: i32) -> Option<Vec<u8>> {
+    let page = doc.load_pdf_page(page).ok()?;
+    let mut h = sha2::Sha256::new();
+    for a in page.annotations() {
+        let obj = a.object();
+        for key in ["Subtype", "Rect", "F", "C", "IC", "CA"] {
+            h.update(
+                obj.get_dict(key)
+                    .ok()?
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+            );
+            h.update(b"|");
+        }
+        if let Some(n) = obj
+            .get_dict("AP")
+            .ok()?
+            .and_then(|ap| ap.get_dict("N").ok().flatten())
+        {
+            if n.is_stream().ok()? {
+                h.update(n.read_stream().ok()?);
+            } else {
+                h.update(n.to_string());
+            }
+        }
+        h.update(b";");
+    }
+    Some(h.finalize().to_vec())
+}
+
+/// As revisões depois de `end` só preencheram campos ou assinaram (o nível "preenchimento e
+/// assinatura" do Acrobat)?
 /// O conteúdo de cada página e o número de páginas são os da versão assinada.
-fn only_annotations_changed(file: &[u8], end: usize, password: Option<&str>) -> bool {
+fn only_fields_changed(file: &[u8], end: usize, password: Option<&str>) -> bool {
     let open = |bytes: &[u8]| -> Option<mupdf::pdf::PdfDocument> {
         let mut d = mupdf::pdf::PdfDocument::from_bytes(bytes).ok()?;
         if let Some(p) = password {
@@ -571,7 +604,11 @@ fn only_annotations_changed(file: &[u8], end: usize, password: Option<&str>) -> 
     n == m
         && (0..n).all(|p| {
             let a = page_fingerprint(&signed, p);
-            a.is_some() && a == page_fingerprint(&now, p)
+            let b = annots_fingerprint(&signed, p);
+            a.is_some()
+                && b.is_some()
+                && a == page_fingerprint(&now, p)
+                && b == annots_fingerprint(&now, p)
         })
 }
 
@@ -657,7 +694,7 @@ impl PdfDoc {
                     modified_after,
                     integrity,
                     changes_permitted: modified_after
-                        && only_annotations_changed(&file, end, self.password.as_deref()),
+                        && only_fields_changed(&file, end, self.password.as_deref()),
                     cert_valid_at_signing: valid_then,
                     fingerprints: certs
                         .iter()

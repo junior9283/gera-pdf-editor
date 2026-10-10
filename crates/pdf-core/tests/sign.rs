@@ -407,3 +407,19 @@ fn swapping_a_page_resource_after_signing_is_not_permitted() {
         "a página mostra outra coisa: não é alteração permitida"
     );
 }
+
+#[test]
+fn a_comment_added_after_signing_is_not_a_permitted_change() {
+    // "shadow attack": uma anotação opaca por cima do conteúdo assinado muda o que se vê
+    let (_d, path) = signed(0);
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    d.apply(AnnotOp::Create(NewAnnot::Shape {
+        page: 0,
+        rect: PdfRect::new(50.0, 50.0, 400.0, 150.0),
+        ellipse: false,
+    }))
+    .unwrap();
+    d.save(&path).unwrap();
+    let s = PdfDoc::open(&path, None).unwrap().signatures().unwrap();
+    assert!(s[0].modified_after && !s[0].changes_permitted);
+}

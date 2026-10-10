@@ -234,7 +234,7 @@ pub fn panel(
                 });
                 if s.modified_after && s.changes_permitted {
                     ui.label(
-                        "Depois desta assinatura só houve alterações permitidas (assinaturas, comentários ou campos).",
+                        "Depois desta assinatura só houve alterações permitidas (preencher campos ou assinar).",
                     );
                 } else if s.modified_after {
                     ui.label("O conteúdo das páginas foi alterado depois desta assinatura.");
