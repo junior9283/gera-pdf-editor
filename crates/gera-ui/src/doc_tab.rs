@@ -742,9 +742,18 @@ impl DocTab {
                     }
                 }
                 Response::PagesChanged { summary, history } => {
-                    self.on_pages_changed(summary, history);
-                    self.on_redaction_outcome(true);
+                    self.on_pages_changed(summary, history)
                 }
+                Response::RedactionsApplied { result } => match result {
+                    Ok((summary, history)) => {
+                        self.on_pages_changed(summary, history);
+                        self.on_redaction_outcome(true);
+                    }
+                    Err(msg) => {
+                        self.status = format!("Não foi possível aplicar a redação: {msg}");
+                        self.on_redaction_outcome(false);
+                    }
+                },
                 Response::PagesFailed(msg) => {
                     self.delete_after_extract = None;
                     self.status = format!("Não foi possível organizar as páginas: {msg}");
@@ -799,7 +808,6 @@ impl DocTab {
                 }
                 Response::EditFailed(msg) => {
                     self.status = format!("Não foi possível fazer a alteração: {msg}");
-                    self.on_redaction_outcome(false);
                 }
                 Response::PageImages { page, images } => self.edit_pdf.on_images(page, images),
                 Response::RedactHits(hits) => {
