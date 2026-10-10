@@ -159,9 +159,15 @@ mod tests {
         let mut t = TrustedCerts::default();
         assert!(bar_text(&[], &t).is_none());
         let a = sig(Integrity::Intact, "aa");
-        assert_eq!(bar_text(std::slice::from_ref(&a), &t).unwrap().0, SigStatus::Unknown);
+        assert_eq!(
+            bar_text(std::slice::from_ref(&a), &t).unwrap().0,
+            SigStatus::Unknown
+        );
         t.trust("aa");
-        assert_eq!(bar_text(std::slice::from_ref(&a), &t).unwrap().0, SigStatus::Valid);
+        assert_eq!(
+            bar_text(std::slice::from_ref(&a), &t).unwrap().0,
+            SigStatus::Valid
+        );
         let bad = sig(Integrity::Broken("x".into()), "aa");
         assert_eq!(bar_text(&[a, bad], &t).unwrap().0, SigStatus::Invalid);
     }

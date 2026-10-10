@@ -78,6 +78,8 @@ pub fn show(
         LeftPanel::Thumbnails => thumbnails(ui, view, worker),
         LeftPanel::Outline => outline_list(ui, outline),
         LeftPanel::Annotations => annotation_list(ui, annots),
+        // desenhado pela aba (precisa das assinaturas validadas)
+        LeftPanel::Signatures => SidebarAction::None,
     }
 }
 

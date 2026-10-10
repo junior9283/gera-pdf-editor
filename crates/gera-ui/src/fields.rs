@@ -23,6 +23,7 @@ pub enum FieldAction {
     /// Campo de assinatura clicado (página e retângulo do campo).
     Sign {
         page: i32,
+        id: i32,
         rect: pdf_core::PdfRect,
     },
 }
@@ -291,6 +292,7 @@ fn open(st: &mut FormState, f: &FieldInfo, out: &mut Vec<FieldAction>) {
         }
         FieldKind::Signature => out.push(FieldAction::Sign {
             page: f.page,
+            id: f.id,
             rect: f.rect,
         }),
         _ => {}
