@@ -204,3 +204,81 @@ fn wrong_password_is_reported() {
     o.new.password = Some("segredo".into());
     assert!(run(&o).changes.is_empty());
 }
+
+fn with_image<'a>(lines: &'a [&'a str], gray: u8) -> Pg<'a> {
+    Pg {
+        lines,
+        image: Some(gray),
+    }
+}
+
+#[test]
+fn changed_image_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = text_pdf(dir.path(), "a.pdf", &[with_image(&["legenda"], 40)], 0);
+    let b = text_pdf(dir.path(), "b.pdf", &[with_image(&["legenda"], 200)], 0);
+    let c = run(&opts(&a, &b));
+    assert_eq!(kinds(&c), vec![ChangeKind::Image]);
+    let img = &c.changes[0];
+    assert_eq!((img.old_rects.len(), img.new_rects.len()), (1, 1));
+    // 100×100 pt em x=300 do PDF (na tela, y = 792 - 400)
+    let r = img.new_rects[0];
+    assert!((r.x0 - 300.0).abs() < 1.0 && (r.y0 - 392.0).abs() < 1.0, "{r:?}");
+    assert!(img.description.contains("substituída"));
+}
+
+#[test]
+fn same_image_is_not_a_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = text_pdf(dir.path(), "a.pdf", &[with_image(&["x"], 40)], 0);
+    let b = text_pdf(dir.path(), "b.pdf", &[with_image(&["x"], 40)], 0);
+    assert!(run(&opts(&a, &b)).changes.is_empty());
+}
+
+#[test]
+fn added_image_is_inserted() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = text_pdf(dir.path(), "a.pdf", &[pg(&["x"])], 0);
+    let b = text_pdf(dir.path(), "b.pdf", &[with_image(&["x"], 40)], 0);
+    let c = run(&opts(&a, &b));
+    assert_eq!(kinds(&c), vec![ChangeKind::Image]);
+    assert!(c.changes[0].old_rects.is_empty());
+    assert!(c.changes[0].description.contains("inserida"));
+}
+
+#[test]
+fn text_only_skips_images() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = text_pdf(dir.path(), "a.pdf", &[with_image(&["legenda"], 40)], 0);
+    let b = text_pdf(dir.path(), "b.pdf", &[with_image(&["legenda"], 200)], 0);
+    let mut o = opts(&a, &b);
+    o.text_only = true;
+    assert!(run(&o).changes.is_empty());
+}
+
+#[test]
+fn image_only_documents_compare_images() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = text_pdf(dir.path(), "a.pdf", &[with_image(&[], 40), with_image(&[], 90)], 0);
+    let b = text_pdf(dir.path(), "b.pdf", &[with_image(&[], 40), with_image(&[], 91)], 0);
+    let c = run(&opts(&a, &b));
+    assert_eq!(c.pairs, vec![(Some(0), Some(0)), (Some(1), Some(1))]);
+    assert_eq!(kinds(&c), vec![ChangeKind::Image]);
+    assert_eq!(c.changes[0].pair, 1);
+}
+
+#[test]
+fn formatting_only_when_enabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = text_pdf(dir.path(), "a.pdf", &[pg(&["titulo do texto", "corpo"])], 0);
+    let b = text_pdf(dir.path(), "b.pdf", &[pg(&["*titulo do texto", "corpo"])], 0);
+    assert!(run(&opts(&a, &b)).changes.is_empty());
+    let mut o = opts(&a, &b);
+    o.formatting = true;
+    let c = run(&o);
+    assert_eq!(kinds(&c), vec![ChangeKind::Formatting]);
+    let f = &c.changes[0];
+    // as três palavras seguidas, com a mesma mudança, viram uma alteração só (uma linha)
+    assert_eq!(f.new_rects.len(), 1);
+    assert!(f.description.contains("Helvetica 12") && f.description.contains("Helvetica-Bold 12"));
+}

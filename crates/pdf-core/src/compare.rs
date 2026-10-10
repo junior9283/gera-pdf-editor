@@ -3,6 +3,8 @@
 use crate::doc::open_authenticated;
 use crate::error::refused;
 use crate::{PdfError, PdfRect, Result};
+use md5::{Digest, Md5};
+use mupdf::text_page::TextBlockType;
 use mupdf::{Rect, TextPageFlags};
 use similar::{capture_diff_slices_deadline, Algorithm, DiffOp};
 use std::collections::{BTreeMap, HashMap};
@@ -127,10 +129,19 @@ pub(crate) struct WordAt {
     pub page: usize,
 }
 
+/// Uma imagem da página: o MD5 dos pixels e onde está.
+#[derive(Clone, Debug)]
+pub(crate) struct ImageAt {
+    pub hash: [u8; 16],
+    pub rect: PdfRect,
+    pub page: usize,
+}
+
 /// O que foi lido de um dos arquivos.
 pub(crate) struct Side {
     pub pages: Vec<i32>,
     pub words: Vec<WordAt>,
+    pub images: Vec<ImageAt>,
 }
 
 pub(crate) fn cancelled() -> PdfError {
@@ -157,6 +168,7 @@ fn union(a: PdfRect, b: PdfRect) -> PdfRect {
 /// Lê as palavras das páginas escolhidas de um arquivo.
 pub(crate) fn read_side(
     input: &CompareInput,
+    images: bool,
     progress: &mut dyn FnMut(CompareStage) -> bool,
     stage: fn(i32, i32) -> CompareStage,
 ) -> Result<Side> {
@@ -183,12 +195,33 @@ pub(crate) fn read_side(
     }
     let total = pages.len() as i32;
     let mut words = Vec::new();
+    let mut found = Vec::new();
+    let flags = if images {
+        TextPageFlags::PRESERVE_IMAGES
+    } else {
+        TextPageFlags::empty()
+    };
     for (k, &p) in pages.iter().enumerate() {
         if !progress(stage(k as i32 + 1, total)) {
             return Err(cancelled());
         }
-        let tp = doc.load_page(p)?.to_text_page(TextPageFlags::empty())?;
+        let tp = doc.load_page(p)?.to_text_page(flags)?;
         for block in tp.blocks() {
+            if block.r#type() == TextBlockType::Image {
+                if let Some(img) = block.image() {
+                    let pix = img.to_pixmap()?;
+                    let mut h = Md5::new();
+                    h.update(pix.width().to_le_bytes());
+                    h.update(pix.height().to_le_bytes());
+                    h.update(pix.samples());
+                    found.push(ImageAt {
+                        hash: h.finalize().into(),
+                        rect: block.bounds().into(),
+                        page: k,
+                    });
+                }
+                continue;
+            }
             for line in block.lines() {
                 let mut cur: Option<WordAt> = None;
                 for ch in line.chars() {
@@ -224,7 +257,11 @@ pub(crate) fn read_side(
             }
         }
     }
-    Ok(Side { pages, words })
+    Ok(Side {
+        pages,
+        words,
+        images: found,
+    })
 }
 
 /// Alinha as `n` páginas antigas com as `m` novas, em ordem, maximizando as palavras iguais de cada
@@ -321,38 +358,69 @@ fn anchor(words: &[WordAt], at: usize, pair_of: &[usize], pair: usize) -> Option
         .or_else(|| after.map(|w| caret(w.rect.x0, &w.rect)))
 }
 
+/// "Helvetica 12" ou "Helvetica 10,5", com a cor quando ela difere da outra.
+fn style_text(s: &Style, other: &Style) -> String {
+    let size = if s.half_points % 2 == 0 {
+        (s.half_points / 2).to_string()
+    } else {
+        format!("{},5", s.half_points / 2)
+    };
+    let color = if s.argb & 0xFF_FFFF != other.argb & 0xFF_FFFF {
+        format!(" #{:06X}", s.argb & 0xFF_FFFF)
+    } else {
+        String::new()
+    };
+    format!("{} {size}{color}", s.font)
+}
+
+/// Diff com prazo (o resultado fica mais grosso depois dele, mas sai).
+fn diff<T: Eq + std::hash::Hash>(a: &[T], b: &[T]) -> Vec<DiffOp> {
+    capture_diff_slices_deadline(
+        Algorithm::Patience,
+        a,
+        b,
+        Some(Instant::now() + DIFF_DEADLINE),
+    )
+}
+
+/// Os pares iguais de cada `Equal` (índice antigo, índice novo).
+fn equal_pairs(ops: &[DiffOp]) -> impl Iterator<Item = (usize, usize)> + '_ {
+    ops.iter().flat_map(|op| {
+        let (o, n, len) = match *op {
+            DiffOp::Equal {
+                old_index,
+                new_index,
+                len,
+            } => (old_index, new_index, len),
+            _ => (0, 0, 0),
+        };
+        (0..len).map(move |k| (o + k, n + k))
+    })
+}
+
 /// Compara os dois arquivos. `progress` devolve `false` para cancelar.
 pub fn compare(
     opts: &CompareOptions,
     progress: &mut dyn FnMut(CompareStage) -> bool,
 ) -> Result<Comparison> {
-    let old = read_side(&opts.old, progress, CompareStage::ReadingOld)?;
-    let new = read_side(&opts.new, progress, CompareStage::ReadingNew)?;
+    let images = !opts.text_only;
+    let old = read_side(&opts.old, images, progress, CompareStage::ReadingOld)?;
+    let new = read_side(&opts.new, images, progress, CompareStage::ReadingNew)?;
     if !progress(CompareStage::Diffing) {
         return Err(cancelled());
     }
-    let a: Vec<&str> = old.words.iter().map(|w| w.text.as_str()).collect();
-    let b: Vec<&str> = new.words.iter().map(|w| w.text.as_str()).collect();
-    let ops = capture_diff_slices_deadline(
-        Algorithm::Patience,
-        &a,
-        &b,
-        Some(Instant::now() + DIFF_DEADLINE),
-    );
+    let text = |s: &Side| s.words.iter().map(|w| w.text.clone()).collect::<Vec<_>>();
+    let ops = diff(&text(&old), &text(&new));
+    let hashes = |s: &Side| s.images.iter().map(|i| i.hash).collect::<Vec<_>>();
+    let image_ops = diff(&hashes(&old), &hashes(&new));
+
+    // as palavras e as imagens iguais dizem que páginas formam par
     let mut weights: HashMap<(usize, usize), u32> = HashMap::new();
-    for op in &ops {
-        if let DiffOp::Equal {
-            old_index,
-            new_index,
-            len,
-        } = *op
-        {
-            for k in 0..len {
-                *weights
-                    .entry((old.words[old_index + k].page, new.words[new_index + k].page))
-                    .or_default() += 1;
-            }
-        }
+    let page_pairs = equal_pairs(&ops)
+        .map(|(i, j)| (old.words[i].page, new.words[j].page))
+        .chain(equal_pairs(&image_ops).map(|(i, j)| (old.images[i].page, new.images[j].page)));
+    for key in page_pairs {
+        *weights.entry(key).or_default() += 1;
     }
     let aligned = align_pages(old.pages.len(), new.pages.len(), &weights);
     let mut old_pair = vec![0; old.pages.len()];
@@ -365,12 +433,10 @@ pub fn compare(
             new_pair[*n] = k;
         }
     }
+
     let mut changes = Vec::new();
-    for op in &ops {
+    for op in ops.iter().filter(|op| !matches!(op, DiffOp::Equal { .. })) {
         let (o, n) = (op.old_range(), op.new_range());
-        if matches!(op, DiffOp::Equal { .. }) {
-            continue;
-        }
         // por par: as palavras antigas e as novas
         let mut groups: BTreeMap<usize, (Vec<&WordAt>, Vec<&WordAt>)> = BTreeMap::new();
         for w in &old.words[o.clone()] {
@@ -407,6 +473,77 @@ pub fn compare(
             });
         }
     }
+
+    if opts.formatting {
+        // palavras iguais seguidas, no mesmo par, com a mesma mudança: uma alteração só
+        let mut run: Vec<(usize, usize)> = Vec::new();
+        let mut flush = |run: &mut Vec<(usize, usize)>| {
+            let Some(&(i, j)) = run.first() else { return };
+            let (os, ns) = (&old.words[i].style, &new.words[j].style);
+            changes.push(Change {
+                kind: ChangeKind::Formatting,
+                pair: new_pair[new.words[j].page],
+                old_rects: merge_lines(run.iter().map(|&(i, _)| old.words[i].rect)),
+                new_rects: merge_lines(run.iter().map(|&(_, j)| new.words[j].rect)),
+                anchor: None,
+                description: format!(
+                    "Formatação: {} → {}",
+                    style_text(os, ns),
+                    style_text(ns, os)
+                ),
+            });
+            run.clear();
+        };
+        for (i, j) in equal_pairs(&ops) {
+            let (ow, nw) = (&old.words[i], &new.words[j]);
+            let same_pair = old_pair[ow.page] == new_pair[nw.page];
+            let differs = same_pair && ow.style != nw.style;
+            let continues = run.last().is_some_and(|&(pi, pj)| {
+                pi + 1 == i
+                    && pj + 1 == j
+                    && old.words[pi].style == ow.style
+                    && new.words[pj].style == nw.style
+                    && new_pair[new.words[pj].page] == new_pair[nw.page]
+            });
+            if !continues {
+                flush(&mut run);
+            }
+            if differs {
+                run.push((i, j));
+            }
+        }
+        flush(&mut run);
+    }
+
+    for op in image_ops.iter().filter(|op| !matches!(op, DiffOp::Equal { .. })) {
+        let (o, n) = (&old.images[op.old_range()], &new.images[op.new_range()]);
+        // uma de cada lado no mesmo par: substituída; o resto entra ou sai
+        let (mut oi, mut ni) = (o.iter().peekable(), n.iter().peekable());
+        loop {
+            let pair_o = oi.peek().map(|i| old_pair[i.page]);
+            let pair_n = ni.peek().map(|i| new_pair[i.page]);
+            let (kind_text, pair, old_rects, new_rects) = match (pair_o, pair_n) {
+                (Some(a), Some(b)) if a == b => {
+                    let (x, y) = (oi.next().unwrap(), ni.next().unwrap());
+                    ("substituída", a, vec![x.rect], vec![y.rect])
+                }
+                (Some(a), b) if b.is_none_or(|b| a < b) => {
+                    ("excluída", a, vec![oi.next().unwrap().rect], vec![])
+                }
+                (_, Some(b)) => ("inserida", b, vec![], vec![ni.next().unwrap().rect]),
+                _ => break,
+            };
+            changes.push(Change {
+                kind: ChangeKind::Image,
+                pair,
+                old_rects,
+                new_rects,
+                anchor: None,
+                description: format!("Imagem {kind_text}"),
+            });
+        }
+    }
+
     changes.sort_by_key(|c| c.pair);
     let pairs = aligned
         .iter()
