@@ -123,6 +123,8 @@ pub struct DocTab {
     identity_name: String,
     /// Painel Comentários (busca, filtros, ordenação e resposta em digitação).
     comments: crate::comments_panel::PanelState,
+    /// Preencher formulários: realce, campo em edição, lista aberta.
+    form: crate::fields::FormState,
     /// Diálogo Dividir documento aberto.
     split: Option<SplitDialog>,
     /// Modo Organizar páginas (a grade substitui o documento).
@@ -194,6 +196,7 @@ impl DocTab {
             turned_at: f64::NEG_INFINITY,
             identity_name: String::new(),
             comments: Default::default(),
+            form: Default::default(),
             organize: None,
             split: None,
             files: Default::default(),
@@ -722,6 +725,15 @@ impl DocTab {
             Some(PrintChoice::Cancel) => self.print_dialog = None,
             None => {}
         }
+        if !self.fields.is_empty() && self.organize.is_none() {
+            let reset = egui::Panel::top("formulario")
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| crate::fields::bar(ui, &mut self.form))
+                .inner;
+            if reset {
+                self.worker.send(Request::ResetForm);
+            }
+        }
         if self.organize.is_some() {
             egui::CentralPanel::default().show(ui, |ui| self.organize_view(ui));
         } else {
@@ -1113,6 +1125,8 @@ impl DocTab {
         }
         let (worker, edit, search, annots) =
             (&self.worker, &mut self.edit, &self.search, &self.annots);
+        let (form, fields) = (&mut self.form, &self.fields);
+        let mut field_actions = Vec::new();
         let jump_to = self.jump_to.take();
         // cada aba com seu id: a área de rolagem guarda a posição de cada documento
         self.last = ui
@@ -1125,10 +1139,29 @@ impl DocTab {
                     &mut |ui, page, rect, map: &PageMap| {
                         paint_search_hits(ui, search, page as i32, map);
                         edit.on_page(ui, worker, annots, page as i32, rect, map);
+                        // depois dos gestos da página: os campos ficam por cima
+                        field_actions.extend(crate::fields::on_page(
+                            ui,
+                            form,
+                            fields,
+                            page as i32,
+                            map,
+                        ));
                     },
                 )
             })
             .inner;
+        for action in field_actions {
+            match action {
+                crate::fields::FieldAction::Set { page, id, value } => {
+                    self.worker.send(Request::SetField { page, id, value })
+                }
+                crate::fields::FieldAction::Sign => {
+                    self.status =
+                        "Assinar campos de assinatura chega com Preencher e assinar.".into()
+                }
+            }
+        }
         let now = ui.input(|i| i.time);
         if self.last.turn != 0 && now - self.turned_at > 0.25 && view.turn(self.last.turn) {
             self.turned_at = now;
