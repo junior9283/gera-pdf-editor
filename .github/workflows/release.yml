@@ -24,6 +24,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang libclang-dev cmake pkg-config libfontconfig1-dev libfreetype-dev \
             tesseract-ocr-por tesseract-ocr-eng
+          # o Ubuntu 22.04 guarda os dados em tesseract-ocr/4.00 (tags antigas só olham os caminhos padrão)
+          [ -e /usr/share/tessdata ] || sudo ln -s /usr/share/tesseract-ocr/*/tessdata /usr/share/tessdata
       - uses: dtolnay/rust-toolchain@stable
       - run: packaging/build-appimage.sh
       - name: Publicar o AppImage na release
