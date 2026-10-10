@@ -443,3 +443,39 @@ fn recognizing_text_reports_progress_and_the_result() {
     }
     assert_eq!(progress, 2);
 }
+
+#[test]
+fn text_blocks_are_listed_and_edited_through_the_worker() {
+    let (_d, w, _) = opened(1);
+    w.send(Request::PageTextBlocks { page: 0 });
+    let rect = match recv(&w) {
+        Response::PageTextBlocks { page: 0, blocks } => {
+            blocks
+                .into_iter()
+                .find(|b| b.text.contains("Hello Gera"))
+                .expect("bloco do texto")
+                .rect
+        }
+        other => panic!("esperava PageTextBlocks, veio {other:?}"),
+    };
+    w.send(Request::EditTextBlock {
+        page: 0,
+        rect,
+        text: "Trocado".into(),
+    });
+    assert!(!matches!(recv(&w), Response::EditFailed(_)));
+    w.send(Request::AddText {
+        page: 0,
+        at: (72.0, 300.0),
+        text: "Novo".into(),
+    });
+    assert!(!matches!(recv(&w), Response::EditFailed(_)));
+    w.send(Request::PageTextBlocks { page: 0 });
+    match recv(&w) {
+        Response::PageTextBlocks { blocks, .. } => {
+            let all: Vec<_> = blocks.iter().map(|b| b.text.as_str()).collect();
+            assert!(all.contains(&"Trocado") && all.contains(&"Novo"), "{all:?}");
+        }
+        other => panic!("esperava PageTextBlocks, veio {other:?}"),
+    }
+}
