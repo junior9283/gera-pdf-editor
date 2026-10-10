@@ -72,6 +72,8 @@ pub(crate) enum Edit {
         size: f32,
         color: [f32; 3],
     },
+    /// Várias mudanças da mesma anotação num passo só do desfazer (ex.: texto e tamanho da caixa).
+    Batch(Vec<Edit>),
 }
 
 impl Edit {
@@ -84,6 +86,7 @@ impl Edit {
             | Self::LinePoints { page, .. }
             | Self::Fill { page, .. }
             | Self::Font { page, .. } => *page,
+            Self::Batch(edits) => edits.first().map_or(0, Edit::page),
         }
     }
 }
@@ -185,6 +188,21 @@ fn geometry(a: &PdfAnnotation) -> Result<(PdfRect, Option<Strokes>)> {
     }
 }
 
+/// Caixa de texto `id`: retângulo, texto, tamanho da fonte e borda; `None` se não é caixa de texto.
+pub(crate) fn text_box_of(
+    doc: &PdfDocument,
+    page: i32,
+    id: i32,
+) -> Result<Option<(PdfRect, String, f32, f32)>> {
+    let (_, a) = find(doc, page, id)?;
+    if a.r#type()? != PdfAnnotationType::FreeText {
+        return Ok(None);
+    }
+    let size = a.default_appearance()?.map_or(12.0, |da| da.size);
+    let text = a.contents()?.unwrap_or_default().to_owned();
+    Ok(Some((a.rect()?.into(), text, size, a.border_width()?)))
+}
+
 /// Pontos atuais da linha `id`, ou `None` se a anotação não é linha.
 pub(crate) fn line_of(doc: &PdfDocument, page: i32, id: i32) -> Result<Option<Segment>> {
     let (_, a) = find(doc, page, id)?;
@@ -210,7 +228,25 @@ pub(crate) fn apply_edit(
     hidden: &mut HashSet<(i32, i32)>,
     edit: Edit,
 ) -> Result<Edit> {
+    if let Edit::Batch(edits) = edit {
+        // aplica em ordem; se uma falhar, desfaz as já aplicadas (nada fica pela metade)
+        let mut inverses = Vec::new();
+        for e in edits {
+            match apply_edit(doc, hidden, e) {
+                Ok(inv) => inverses.push(inv),
+                Err(err) => {
+                    for inv in inverses.into_iter().rev() {
+                        let _ = apply_edit(doc, hidden, inv);
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        inverses.reverse();
+        return Ok(Edit::Batch(inverses));
+    }
     let (page, id) = match &edit {
+        Edit::Batch(_) => unreachable!("tratado acima"),
         Edit::Visibility { page, id, .. }
         | Edit::Geometry { page, id, .. }
         | Edit::Style { page, id, .. }
@@ -221,6 +257,7 @@ pub(crate) fn apply_edit(
     };
     let (mut page_ref, mut a) = find(doc, page, id)?;
     let inverse = match edit {
+        Edit::Batch(_) => unreachable!("tratado acima"),
         Edit::Visibility { hidden: hide, .. } => {
             let mut flags = a.flags()?;
             flags.set(AnnotationFlags::IS_HIDDEN, hide);

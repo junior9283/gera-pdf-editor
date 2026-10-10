@@ -332,3 +332,103 @@ fn removing_a_fill_redraws_the_shape_without_it() {
         "o desfazer tem que apagar o azul da tela"
     );
 }
+
+/// Máscara (vermelho sim/não) da área `r` da página 0 renderizada a 1:1.
+fn red_mask(d: &PdfDoc, r: PdfRect) -> Vec<bool> {
+    let img = d.render(0, 1.0, false).unwrap();
+    let w = img.width as usize;
+    let mut out = Vec::new();
+    for y in r.y0 as usize..r.y1 as usize {
+        for x in r.x0 as usize..r.x1 as usize {
+            let p = &img.rgb[(y * w + x) * 3..][..3];
+            out.push(p[0] > 150 && p[1] < 90 && p[2] < 90);
+        }
+    }
+    out
+}
+
+#[test]
+fn stamp_on_a_rotated_page_looks_the_same_as_on_a_normal_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let render = |rotate| {
+        let path = write_sample(&dir, &format!("p{rotate}.pdf"), 1, rotate);
+        let mut d = PdfDoc::open(&path, None).unwrap();
+        let s = created(&mut d, stamp(Some("Maria Silva, 09/10/2026 14:30")));
+        red_mask(&d, s.rect)
+    };
+    let flat = render(0);
+    for rotate in [90, 180, 270] {
+        let turned = render(rotate);
+        assert_eq!(flat.len(), turned.len());
+        let same = flat.iter().zip(&turned).filter(|(a, b)| a == b).count();
+        assert!(
+            same as f32 / flat.len() as f32 > 0.88, // deitado dá ~0,76; em pé, ≥ 0,92
+            "carimbo em página girada {rotate}° tem que ficar em pé: {same}/{}",
+            flat.len()
+        );
+    }
+}
+
+fn small_box(text: &str) -> NewAnnot {
+    NewAnnot::TextBox {
+        page: 0,
+        rect: PdfRect::new(100.0, 100.0, 300.0, 124.0),
+        text: text.into(),
+        size: 12.0,
+        color: [1.0, 0.0, 0.0],
+    }
+}
+
+#[test]
+fn text_boxes_grow_to_fit_their_text() {
+    let (_d, _p, mut d) = doc();
+    let t = created(&mut d, small_box("um\ndois\ntrês\nquatro"));
+    assert!(t.rect.height() >= 4.0 * 12.0 * 1.2, "{:?}", t.rect);
+    let (_d, _p, mut d) = doc();
+    let long = "palavras que não cabem numa linha só da caixa de texto estreita";
+    let t = created(&mut d, small_box(long));
+    assert!(
+        t.rect.height() >= 2.0 * 12.0 * 1.2,
+        "quebra automática: {:?}",
+        t.rect
+    );
+}
+
+#[test]
+fn editing_text_grows_the_box_and_undo_restores_both() {
+    let (_d, _p, mut d) = doc();
+    let t = created(&mut d, small_box("curto"));
+    d.apply(AnnotOp::SetContents {
+        page: 0,
+        id: t.id,
+        text: "primeira\nsegunda\nterceira".into(),
+    })
+    .unwrap();
+    let grown = d.annotations(0).unwrap()[0].clone();
+    assert!(grown.rect.height() >= 3.0 * 12.0 * 1.2, "{:?}", grown.rect);
+    d.undo().unwrap();
+    assert_eq!(
+        d.annotations(0).unwrap()[0],
+        t,
+        "um Ctrl+Z desfaz texto e tamanho"
+    );
+    d.redo().unwrap();
+    assert_eq!(d.annotations(0).unwrap()[0], grown);
+}
+
+#[test]
+fn bigger_font_grows_the_box() {
+    let (_d, _p, mut d) = doc();
+    let t = created(&mut d, small_box("um\ndois"));
+    d.apply(AnnotOp::Font {
+        page: 0,
+        id: t.id,
+        size: 24.0,
+        color: [1.0, 0.0, 0.0],
+    })
+    .unwrap();
+    let r = d.annotations(0).unwrap()[0].rect;
+    assert!(r.height() >= 2.0 * 24.0 * 1.2, "{r:?}");
+    d.undo().unwrap();
+    assert_eq!(d.annotations(0).unwrap()[0], t);
+}

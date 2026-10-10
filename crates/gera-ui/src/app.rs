@@ -44,6 +44,8 @@ pub struct GeraApp {
     last_doc: Option<PathBuf>,
     show_shortcuts: bool,
     show_about: bool,
+    /// Diálogo Identidade aberto pelo menu: nome sendo digitado.
+    identity: Option<String>,
     bench: Option<Bench>,
 }
 
@@ -76,6 +78,7 @@ impl GeraApp {
             last_doc: None,
             show_shortcuts: false,
             show_about: false,
+            identity: None,
             bench,
         };
         app.refresh_recent_exists();
@@ -214,13 +217,7 @@ impl GeraApp {
                         self.docs[i].path = dest.clone();
                         self.remember(dest);
                     }
-                    DocEvent::Author(name) => {
-                        self.prefs.author = Some(name.clone());
-                        self.prefs_dirty = true;
-                        for doc in &mut self.docs {
-                            doc.set_author(Some(name.clone()));
-                        }
-                    }
+                    DocEvent::Author(name) => self.set_author(name),
                     DocEvent::Failed(msg) => {
                         self.status = msg;
                         self.close_tab(tab);
@@ -318,6 +315,9 @@ impl GeraApp {
             Command::ActivateTab(t) => self.activate(t),
             Command::Shortcuts => self.show_shortcuts = true,
             Command::About => self.show_about = true,
+            Command::Identity => {
+                self.identity = Some(self.prefs.author.clone().unwrap_or_default());
+            }
             Command::Print => {
                 if let Some(doc) = self.active_doc() {
                     doc.open_print_dialog(ctx);
@@ -328,6 +328,31 @@ impl GeraApp {
                     doc.request_properties();
                 }
             }
+        }
+    }
+
+    /// Editar → Preferências → Identidade: muda o nome dos carimbos e autor das anotações.
+    fn identity_window(&mut self, ui: &mut egui::Ui) {
+        let Some(name) = self.identity.as_mut() else {
+            return;
+        };
+        match crate::shell::identity::window(ui, name) {
+            Some(true) => {
+                let name = name.trim().to_owned();
+                self.identity = None;
+                self.set_author(name);
+            }
+            Some(false) => self.identity = None,
+            None => {}
+        }
+    }
+
+    /// Guarda o nome nas preferências e o passa a todas as abas.
+    fn set_author(&mut self, name: String) {
+        self.prefs.author = Some(name.clone());
+        self.prefs_dirty = true;
+        for doc in &mut self.docs {
+            doc.set_author(Some(name.clone()));
         }
     }
 
@@ -636,6 +661,7 @@ impl eframe::App for GeraApp {
         self.drive_close(ui);
         help::shortcuts_window(ui, &mut self.show_shortcuts);
         help::about_window(ui, &mut self.show_about);
+        self.identity_window(ui);
     }
 }
 

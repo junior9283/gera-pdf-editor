@@ -1,6 +1,7 @@
 use crate::annot_edit::{self, ColorEdit, Edit, History};
 use crate::error::{PdfError, Result};
 use crate::stamp;
+use crate::text_fit;
 use crate::types::{
     AnnotInfo, AnnotKind, AnnotOp, DocProperties, DocSummary, HistoryState, LineEnd, NewAnnot,
     OutlineItem, PageSize, PdfRect, RenderedPage, Rotation, TextSelection, Word, COMMENT_RED,
@@ -318,7 +319,8 @@ fn add_one(doc: &mut PdfDocument, page: &mut PdfPage, a: &NewAnnot) -> Result<Pd
             color,
             ..
         } => {
-            let mut a = page.add_free_text_annotation(Rect::from(*rect), text)?;
+            let rect = text_fit::fitted(*rect, text, *size, 1.0)?;
+            let mut a = page.add_free_text_annotation(Rect::from(rect), text)?;
             // na caixa de texto o MuPDF desenha a borda com a cor do texto; /C é o fundo
             a.set_default_appearance("Helv", *size, Some(rgb(*color)))?;
             a.set_border_width(1.0)?;
@@ -346,7 +348,7 @@ fn add_one(doc: &mut PdfDocument, page: &mut PdfPage, a: &NewAnnot) -> Result<Pd
             color,
             ..
         } => {
-            let img = stamp::image(title, subtitle.as_deref(), *color)?;
+            let img = stamp::image(title, subtitle.as_deref(), *color, page.rotation()?)?;
             add_stamp(doc, page, *rect, title, &img)?
         }
     })
@@ -377,6 +379,22 @@ fn add_stamp(
     ap.dict_put("N", normal)?;
     annot.object().dict_put("AP", ap)?;
     Ok(annot)
+}
+
+/// Junta à edição o crescimento da caixa de texto, quando `fit` = (atual, necessário) difere.
+fn with_fit(edit: Edit, page: i32, id: i32, fit: Option<(PdfRect, PdfRect)>) -> Edit {
+    match fit {
+        Some((now, need)) if need != now => Edit::Batch(vec![
+            edit,
+            Edit::Geometry {
+                page,
+                id,
+                rect: need,
+                ink: None,
+            },
+        ]),
+        _ => edit,
+    }
 }
 
 /// Cor RGB da interface no formato do MuPDF (o inverso de `rgb_of`).
@@ -632,12 +650,26 @@ impl PdfDoc {
                 id,
                 size,
                 color,
-            } => Edit::Font {
-                page,
-                id,
-                size: size.clamp(4.0, 144.0),
-                color,
-            },
+            } => {
+                let size = size.clamp(4.0, 144.0);
+                let fit = match annot_edit::text_box_of(&self.inner, page, id)? {
+                    Some((rect, text, _, border)) => {
+                        Some((rect, text_fit::fitted(rect, &text, size, border)?))
+                    }
+                    None => None,
+                };
+                with_fit(
+                    Edit::Font {
+                        page,
+                        id,
+                        size,
+                        color,
+                    },
+                    page,
+                    id,
+                    fit,
+                )
+            }
             AnnotOp::Resize { page, id, rect } => {
                 let (old, ink) = annot_edit::geometry_of(&self.inner, page, id)?;
                 let ink = annot_edit::scaled(old, rect, ink);
@@ -661,7 +693,15 @@ impl PdfDoc {
                 opacity,
                 width,
             },
-            AnnotOp::SetContents { page, id, text } => Edit::Contents { page, id, text },
+            AnnotOp::SetContents { page, id, text } => {
+                let fit = match annot_edit::text_box_of(&self.inner, page, id)? {
+                    Some((rect, _, size, border)) => {
+                        Some((rect, text_fit::fitted(rect, &text, size, border)?))
+                    }
+                    None => None,
+                };
+                with_fit(Edit::Contents { page, id, text }, page, id, fit)
+            }
             AnnotOp::Delete { page, id } => Edit::Visibility {
                 page,
                 id,

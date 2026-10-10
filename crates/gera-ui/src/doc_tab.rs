@@ -437,8 +437,7 @@ impl DocTab {
             && self.edit.text_draft.is_none()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
-            self.edit.tool = app_state::tools::Tool::Select;
-            self.edit.shape_drag = None;
+            self.edit.escape();
         }
         if !typing {
             let nav = [

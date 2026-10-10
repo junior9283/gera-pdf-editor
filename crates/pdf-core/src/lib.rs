@@ -5,6 +5,7 @@ mod annot_edit;
 mod doc;
 mod error;
 mod stamp;
+mod text_fit;
 mod types;
 mod worker;
 

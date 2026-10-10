@@ -3,6 +3,7 @@
 //! moldura arredondada e as duas linhas do carimbo dinâmico, e o MuPDF a reajusta ao mover e
 //! redimensionar.
 use crate::error::Result;
+use crate::text_fit::text_width;
 use mupdf::{Colorspace, Document, Font, Image, Matrix};
 
 /// Tamanho do desenho do carimbo, em pontos: também o tamanho padrão do carimbo na página
@@ -21,18 +22,35 @@ fn literal(s: &str) -> String {
             '(' | ')' | '\\' => format!("\\{c}"),
             c if (c as u32) < 128 => c.to_string(),
             c if (c as u32) < 256 => format!("\\{:03o}", c as u32),
-            _ => "?".into(),
+            c => winansi_extra(c).map_or_else(|| "?".into(), |b| format!("\\{b:03o}")),
         })
         .collect()
 }
 
-/// Largura do texto em pontos, na fonte e no tamanho dados.
-fn text_width(font: &Font, s: &str, size: f32) -> Result<f32> {
-    let mut w = 0.0;
-    for c in s.chars() {
-        w += font.advance_glyph(font.encode_character(c as i32)?)?;
-    }
-    Ok(w * size)
+/// Código WinAnsi (0x80–0x9F) dos caracteres tipográficos fora do Latin-1.
+fn winansi_extra(c: char) -> Option<u8> {
+    Some(match c {
+        '€' => 0x80,
+        '‚' => 0x82,
+        '„' => 0x84,
+        '…' => 0x85,
+        '•' => 0x95,
+        '‘' => 0x91,
+        '’' => 0x92,
+        '“' => 0x93,
+        '”' => 0x94,
+        '–' => 0x96,
+        '—' => 0x97,
+        '™' => 0x99,
+        'Œ' => 0x8C,
+        'œ' => 0x9C,
+        'Š' => 0x8A,
+        'š' => 0x9A,
+        'Ž' => 0x8E,
+        'ž' => 0x9E,
+        'Ÿ' => 0x9F,
+        _ => return None,
+    })
 }
 
 /// Retângulo de cantos arredondados (raio `r`) como operadores de caminho PDF.
@@ -53,7 +71,14 @@ fn rounded_rect(x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> String {
 }
 
 /// Desenha o carimbo: título grande e, nos dinâmicos, a linha de baixo (nome, data e hora).
-pub(crate) fn image(title: &str, subtitle: Option<&str>, [r, g, b]: [f32; 3]) -> Result<Image> {
+/// `page_rotation` (/Rotate da página, em graus): a imagem vai para o espaço sem giro do /Rect, e
+/// a página a gira na tela; por isso ela é desenhada contra-girada, para o carimbo ficar em pé.
+pub(crate) fn image(
+    title: &str,
+    subtitle: Option<&str>,
+    [r, g, b]: [f32; 3],
+    page_rotation: i32,
+) -> Result<Image> {
     let font = Font::new("Times-Bold")?;
     let mut ops = format!(
         "q {r} {g} {b} RG {r} {g} {b} rg 2.5 w {} S\n",
@@ -89,12 +114,9 @@ pub(crate) fn image(title: &str, subtitle: Option<&str>, [r, g, b]: [f32; 3]) ->
     );
     let page = Document::from_bytes(pdf.as_bytes(), "pdf")?.load_page(0)?;
     let scale = DPI / 72.0;
-    let pix = page.to_pixmap(
-        &Matrix::new_scale(scale, scale),
-        &Colorspace::device_rgb(),
-        true,
-        false,
-    )?;
+    let mut ctm = Matrix::new_scale(scale, scale);
+    ctm.concat(Matrix::new_rotate(-(page_rotation as f32)));
+    let pix = page.to_pixmap(&ctm, &Colorspace::device_rgb(), true, false)?;
     Ok(Image::from_pixmap(&pix)?)
 }
 
@@ -105,6 +127,14 @@ mod tests {
     #[test]
     fn accents_and_pdf_delimiters_are_escaped() {
         assert_eq!(literal("NÃO (1)"), "N\\303O \\(1\\)");
+    }
+
+    #[test]
+    fn typographic_quotes_dashes_and_euro_use_winansi() {
+        assert_eq!(
+            literal("D’Ávila – “ok” …€"),
+            "D\\222\\301vila \\226 \\223ok\\224 \\205\\200"
+        );
     }
 
     #[test]

@@ -287,6 +287,14 @@ impl EditState {
         }
     }
 
+    /// Esc (como no Acrobat): volta para Selecionar, tira a seleção e cancela gestos em andamento.
+    pub fn escape(&mut self) {
+        self.tool = Tool::Select;
+        self.selected = None;
+        self.annot_drag = None;
+        self.shape_drag = None;
+    }
+
     pub(crate) fn push_op(&mut self, op: AnnotOp) {
         self.ops.push(op);
     }
@@ -1101,5 +1109,19 @@ mod tests {
             d.op(),
             Some(AnnotOp::MoveLinePoint { id: 3, end: LineEnd::End, to, .. }) if to == (130.0, 70.0)
         ));
+    }
+
+    #[test]
+    fn escape_returns_to_select_and_drops_selection_and_drags() {
+        let mut e = EditState {
+            tool: Tool::Rect,
+            selected: Some((0, 1)),
+            annot_drag: Some(drag(Grab::Move, (200.0, 200.0))),
+            ..Default::default()
+        };
+        e.escape();
+        assert_eq!(e.tool, Tool::Select);
+        assert!(e.selected.is_none() && e.annot_drag.is_none());
+        assert!(e.take_ops().is_empty(), "cancelar não manda edição");
     }
 }
