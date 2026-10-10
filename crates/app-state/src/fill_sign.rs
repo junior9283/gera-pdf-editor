@@ -66,10 +66,20 @@ pub fn step_text_size(size: f32, grow: bool) -> f32 {
     next.clamp(TEXT_SIZES.0, TEXT_SIZES.1)
 }
 
-/// Deslocamento das setas do teclado (pontos da página): 1 pt, ou 10 pt com Shift.
-pub fn nudge(dir: (i8, i8), shift: bool) -> (f32, f32) {
+/// Deslocamento das setas do teclado (pontos da página): 1 pt, ou 10 pt com Shift, na direção da
+/// seta na tela (com a vista girada, desfaz a rotação para chegar ao eixo da página).
+pub fn nudge(dir: (i8, i8), shift: bool, view: pdf_core::Rotation) -> (f32, f32) {
+    use pdf_core::Rotation::*;
     let step = if shift { 10.0 } else { 1.0 };
-    (dir.0 as f32 * step, dir.1 as f32 * step)
+    let (x, y) = (dir.0 as f32 * step, dir.1 as f32 * step);
+    let (px, py) = match view {
+        R0 => (x, y),
+        R90 => (y, -x),
+        R180 => (-x, -y),
+        R270 => (-y, x),
+    };
+    // sem "-0.0" (mesmo deslocamento, comparações mais simples)
+    (px + 0.0, py + 0.0)
 }
 
 /// Distância (pixels) até a qual pontos vizinhos são tremido do mouse; além dela, o ponto é um
@@ -256,8 +266,14 @@ mod tests {
         assert_eq!(step_text_size(12.0, true), 14.0);
         assert_eq!(step_text_size(6.0, false), 6.0);
         assert_eq!(step_text_size(72.0, true), 72.0);
-        assert_eq!(nudge((1, 0), false), (1.0, 0.0));
-        assert_eq!(nudge((0, -1), true), (0.0, -10.0));
+        use pdf_core::Rotation;
+        assert_eq!(nudge((1, 0), false, Rotation::R0), (1.0, 0.0));
+        assert_eq!(nudge((0, -1), true, Rotation::R0), (0.0, -10.0));
+        // vista girada 90° (horário): seta para a direita na tela = para cima na página
+        assert_eq!(nudge((1, 0), false, Rotation::R90), (0.0, -1.0));
+        assert_eq!(nudge((0, 1), false, Rotation::R90), (1.0, 0.0));
+        assert_eq!(nudge((1, 0), false, Rotation::R180), (-1.0, 0.0));
+        assert_eq!(nudge((1, 0), false, Rotation::R270), (0.0, 1.0));
     }
 
     #[test]

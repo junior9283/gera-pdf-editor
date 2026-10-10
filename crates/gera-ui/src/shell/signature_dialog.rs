@@ -51,6 +51,15 @@ impl SignatureDialog {
         }
     }
 
+    /// Já há o que aplicar? (barato: roda a cada quadro; a montagem fica para o clique)
+    fn ready(&self) -> bool {
+        match self.tab {
+            Tab::Type => !self.text.trim().is_empty(),
+            Tab::Draw => self.strokes.iter().any(|s| s.len() >= 2),
+            Tab::Image => self.image.is_some(),
+        }
+    }
+
     /// O que "Aplicar" guardaria agora (`None`: ainda não há assinatura).
     fn result(&self) -> Option<Saved> {
         match self.tab {
@@ -85,6 +94,10 @@ impl SignatureDialog {
         };
         let mut out = None;
         let mut open = true;
+        // Esc fecha a janela, como Cancelar
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            return Some(None);
+        }
         egui::Window::new(title)
             .open(&mut open)
             .collapsible(false)
@@ -158,7 +171,7 @@ impl SignatureDialog {
                     }
                 });
                 let (r, painter) = canvas(ui);
-                if let Some(saved) = self.result() {
+                if let Some(saved) = self.image.clone().map(|file| Saved::Image { file }) {
                     paint_saved(&painter, &saved, r.shrink(20.0), egui::Color32::DARK_GRAY);
                 }
             }
@@ -169,12 +182,11 @@ impl SignatureDialog {
         ui.separator();
         let mut out = None;
         ui.horizontal(|ui| {
-            let result = self.result();
             if ui
-                .add_enabled(result.is_some(), egui::Button::new("Aplicar"))
+                .add_enabled(self.ready(), egui::Button::new("Aplicar"))
                 .clicked()
             {
-                out = self.finish(result);
+                out = self.finish(self.result());
             }
             if ui.button("Cancelar").clicked() {
                 out = Some(None);
@@ -214,7 +226,20 @@ fn copy_image(file: &std::path::Path, initials: bool) -> std::io::Result<PathBuf
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::copy(file, &dest)?;
+    // escolheu a própria cópia guardada: copiar por cima a truncaria
+    let same = file
+        .canonicalize()
+        .ok()
+        .is_some_and(|f| dest.canonicalize().ok() == Some(f));
+    if !same {
+        std::fs::copy(file, &dest)?;
+    }
+    // a assinatura é pessoal: só o dono lê
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(dest)
 }
 
@@ -258,10 +283,14 @@ mod tests {
     fn a_drawing_needs_ink_to_apply() {
         let mut d = SignatureDialog::new(false, None);
         d.tab = Tab::Draw;
-        assert!(d.result().is_none());
+        assert!(!d.ready() && d.result().is_none());
         d.strokes = vec![vec![(5.0, 5.0)]];
-        assert!(d.result().is_none(), "um ponto só não é assinatura");
+        assert!(
+            !d.ready() && d.result().is_none(),
+            "um ponto só não é assinatura"
+        );
         d.strokes = vec![vec![(5.0, 5.0), (80.0, 40.0), (150.0, 10.0)]];
+        assert!(d.ready());
         assert!(matches!(d.result(), Some(Saved::Drawn { .. })));
     }
 

@@ -249,3 +249,53 @@ fn bigger_fill_text_gets_a_wider_box() {
         "{r:?}"
     );
 }
+
+#[test]
+fn image_signature_stays_upright_after_resizing_on_a_rotated_page() {
+    let (dir, _p, mut d) = doc(90);
+    // imagem 40x10 preta (larga): deitada na tela ficaria mais alta que larga
+    let png = dir.path().join("larga.png");
+    let mut pix =
+        mupdf::Pixmap::new_with_w_h(&mupdf::Colorspace::device_rgb(), 40, 10, false).unwrap();
+    pix.clear_with(0).unwrap();
+    pix.save_as(png.to_str().unwrap(), mupdf::ImageFormat::PNG)
+        .unwrap();
+    let base = d.render(0, 1.0, false).unwrap();
+    place(
+        &mut d,
+        PdfRect::new(100.0, 300.0, 300.0, 350.0),
+        SignatureArt::Image { path: png },
+    );
+    let (x0, y0, x1, y1) = dark_box(&d, &base).expect("imagem desenhada ao colocar");
+    assert!(
+        x1 - x0 > 2 * (y1 - y0),
+        "deitada ao colocar: {x0} {y0} {x1} {y1}"
+    );
+    let id = d.annotations(0).unwrap()[0].id;
+    d.apply(AnnotOp::Resize {
+        page: 0,
+        id,
+        rect: PdfRect::new(100.0, 300.0, 340.0, 360.0),
+    })
+    .unwrap();
+    d.apply(AnnotOp::Style {
+        page: 0,
+        id,
+        color: None,
+        opacity: 0.99,
+        width: None,
+    })
+    .unwrap();
+    let (x0, y0, x1, y1) = dark_box(&d, &base).expect("imagem desenhada depois de editar");
+    assert!(
+        x1 - x0 > 2 * (y1 - y0),
+        "deitada depois de mover: {x0} {y0} {x1} {y1}"
+    );
+}
+
+#[test]
+fn a_folder_or_device_is_not_an_image() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(signature::image_aspect(dir.path()).is_err());
+    assert!(signature::image_aspect(std::path::Path::new("/dev/zero")).is_err());
+}

@@ -587,6 +587,9 @@ impl DocTab {
         {
             if self.organize.is_some() {
                 self.organize = None; // Esc fecha o Organizar páginas
+            } else if self.edit.fill.dialog.take().is_some() {
+                // Esc fecha a janela de assinatura (como Cancelar)
+                self.edit.fill.into_field = None;
             } else if !self.form.escape() {
                 self.edit.escape();
             }
@@ -647,10 +650,14 @@ impl DocTab {
         }
     }
 
-    /// Início do quadro: tem que vir antes de qualquer pedido de render (painel ou canvas).
     /// Setas movem a anotação selecionada (1 pt; Shift, 10 pt), como no Acrobat.
     fn nudge_selected(&mut self, ctx: &egui::Context) {
-        let Some((page, id)) = self.edit.selected else {
+        // com a janela de assinatura aberta, as setas são dela
+        let Some((page, id)) = self
+            .edit
+            .selected
+            .filter(|_| self.edit.fill.dialog.is_none())
+        else {
             return;
         };
         let arrows = [
@@ -670,7 +677,11 @@ impl DocTab {
             })
         });
         if let Some((dir, shift)) = pressed {
-            let (dx, dy) = app_state::fill_sign::nudge(dir, shift);
+            let rotation = self
+                .view
+                .as_ref()
+                .map_or_else(Default::default, |v| v.rotation);
+            let (dx, dy) = app_state::fill_sign::nudge(dir, shift, rotation);
             self.worker
                 .send(Request::Annot(pdf_core::AnnotOp::Move { page, id, dx, dy }));
         }
@@ -683,6 +694,7 @@ impl DocTab {
         self.edit.set_fill_tool(None);
     }
 
+    /// Início do quadro: tem que vir antes de qualquer pedido de render (painel ou canvas).
     pub fn begin(&mut self) {
         self.edit.fill.active = self.fill_tools;
         if let Some(view) = self.view.as_mut() {

@@ -3,7 +3,7 @@ use crate::doc_tab::{DocCommand, DocTab};
 use crate::fill_sign::{paint_saved, store_saved, with_saved};
 use crate::shell::annot_props::color32;
 use crate::shell::commands::{hover, Command};
-use app_state::fill_sign::{self as fs, FillTool, Saved};
+use app_state::fill_sign::{self as fs, FillTool};
 use app_state::stamps::StampKind;
 use app_state::tools::Tool;
 use app_state::tools_catalog;
@@ -182,10 +182,8 @@ fn sign_menu(ui: &mut egui::Ui, doc: &mut DocTab) {
             )
             .clicked()
         {
+            // store_saved também apaga a cópia da imagem
             for initials in [false, true] {
-                if let Some(Saved::Image { file }) = with_saved(|s| s.get(initials).cloned()) {
-                    let _ = std::fs::remove_file(file);
-                }
                 if let Err(e) = store_saved(initials, None) {
                     doc.status = format!("Não foi possível apagar: {e}");
                 }

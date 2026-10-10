@@ -462,7 +462,6 @@ fn rgb_edit(color: Option<[f32; 3]>, absent: ColorEdit) -> ColorEdit {
     color.map_or(absent, |c| ColorEdit::Set(rgb(c)))
 }
 
-/// Contorno padrão das formas e linhas: vermelho, 1 pt (como no Acrobat).
 /// Marca preta: Xis, Visto e Linha viram tinta; Círculo e Ponto, círculo (o Ponto, cheio).
 fn fill_sign_mark(page: &mut PdfPage, r: PdfRect, mark: Mark) -> Result<PdfAnnotation> {
     let black = rgb([0.0; 3]);
@@ -498,6 +497,7 @@ fn fill_sign_mark(page: &mut PdfPage, r: PdfRect, mark: Mark) -> Result<PdfAnnot
     Ok(a)
 }
 
+/// Contorno padrão das formas e linhas: vermelho, 1 pt (como no Acrobat).
 fn outlined(mut a: PdfAnnotation) -> Result<PdfAnnotation> {
     a.set_color(rgb(COMMENT_RED))?;
     a.set_border_width(1.0)?;
@@ -729,7 +729,6 @@ impl PdfDoc {
         Ok(())
     }
 
-    /// Aplica uma operação do usuário no documento em memória; devolve as páginas mudadas.
     /// Caixa de texto `id` com `text` (ou o atual) em `size`: (retângulo atual, novo). O texto solto
     /// do Preencher e assinar fica justo ao texto; a caixa comum só cresce para baixo.
     fn refit(
@@ -752,6 +751,7 @@ impl PdfDoc {
         Ok(Some((rect, new)))
     }
 
+    /// Aplica uma operação do usuário no documento em memória; devolve as páginas mudadas.
     pub fn apply(&mut self, op: AnnotOp) -> Result<Vec<i32>> {
         let edit = match op {
             AnnotOp::Create(a) => {

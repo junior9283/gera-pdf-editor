@@ -545,7 +545,9 @@ impl EditState {
                 to: p,
                 line: a.line,
                 keep_aspect: a.kind == AnnotKind::Stamp,
-                mark_like: matches!(a.kind, AnnotKind::Ink | AnnotKind::Ellipse),
+                // as marcas do Preencher e assinar são pretas (desenhos de comentário, não)
+                mark_like: matches!(a.kind, AnnotKind::Ink | AnnotKind::Ellipse)
+                    && a.color == Some([0.0; 3]),
             });
             return true;
         }

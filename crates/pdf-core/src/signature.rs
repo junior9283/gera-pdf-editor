@@ -14,6 +14,7 @@ pub const STAMP_NAME: &str = "GeraSignature";
 
 /// Imagem de assinatura maior que isto é recusada (fotos enormes travariam a gravação).
 const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_IMAGE_PIXELS: u64 = 50_000_000;
 
 /// Junta os comandos de contorno de um glifo, já deslocado e em y para baixo.
 struct Collect {
@@ -100,7 +101,14 @@ pub fn typed(text: &str) -> Result<(Vec<VectorPath>, f32)> {
 }
 
 fn checked_image(path: &Path) -> Result<Image> {
-    let size = std::fs::metadata(path)?.len();
+    let meta = std::fs::metadata(path)?;
+    if !meta.is_file() {
+        // pasta ou dispositivo (/dev/zero travaria a leitura)
+        return Err(PdfError::InvalidAnnotation(
+            "não é um arquivo de imagem".into(),
+        ));
+    }
+    let size = meta.len();
     if size > MAX_IMAGE_BYTES {
         return Err(PdfError::InvalidAnnotation(
             "imagem grande demais para assinatura (máximo 20 MB)".into(),
@@ -109,8 +117,15 @@ fn checked_image(path: &Path) -> Result<Image> {
     let name = path
         .to_str()
         .ok_or_else(|| PdfError::Engine("caminho não é UTF-8 válido".into()))?;
-    Image::from_file(name)
-        .map_err(|_| PdfError::InvalidAnnotation("não foi possível ler a imagem".into()))
+    let img = Image::from_file(name)
+        .map_err(|_| PdfError::InvalidAnnotation("não foi possível ler a imagem".into()))?;
+    // poucos KB podem descomprimir em gigabytes (40000 × 40000 de uma cor só)
+    if img.width() as u64 * img.height() as u64 > MAX_IMAGE_PIXELS {
+        return Err(PdfError::InvalidAnnotation(
+            "imagem grande demais para assinatura (máximo 50 megapixels)".into(),
+        ));
+    }
+    Ok(img)
 }
 
 /// Proporção largura/altura da imagem (para a interface montar o retângulo).
@@ -168,11 +183,24 @@ pub(crate) fn add(
     let ops = match art {
         SignatureArt::Vector { paths, aspect } => vector_ops(paths, *aspect, w, h),
         SignatureArt::Image { path } => {
+            // a imagem vai dentro de um formulário próprio: com a imagem direto no /AP, o MuPDF
+            // trata o carimbo como "de imagem" e regera a aparência ao mover (sem a /Matrix que
+            // contra-gira a página)
             let img = checked_image(path)?;
-            let mut xobjects = doc.new_dict()?;
-            xobjects.dict_put("I", doc.add_image(&img)?)?;
-            resources.dict_put("XObject", xobjects)?;
-            format!("q {} 0 0 {} 0 0 cm /I Do Q", num(w), num(h))
+            let mut images = doc.new_dict()?;
+            images.dict_put("I", doc.add_image(&img)?)?;
+            let mut inner_res = doc.new_dict()?;
+            inner_res.dict_put("XObject", images)?;
+            let mut inner = doc.new_dict()?;
+            inner.dict_put("Type", PdfObject::new_name("XObject")?)?;
+            inner.dict_put("Subtype", PdfObject::new_name("Form")?)?;
+            inner.dict_put("BBox", doc.new_object_from_str("[0 0 1 1]")?)?;
+            inner.dict_put("Resources", inner_res)?;
+            let inner = doc.add_stream(&Buffer::from_bytes(b"/I Do")?, Some(&inner), false)?;
+            let mut forms = doc.new_dict()?;
+            forms.dict_put("Img", inner)?;
+            resources.dict_put("XObject", forms)?;
+            format!("q {} 0 0 {} 0 0 cm /Img Do Q", num(w), num(h))
         }
     };
     let title = if initials { "Iniciais" } else { "Assinatura" };

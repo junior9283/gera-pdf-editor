@@ -34,26 +34,63 @@ impl Default for FillState {
     }
 }
 
-/// Assinatura e iniciais guardadas, lidas do disco uma vez e compartilhadas pelas abas.
-static SAVED: Mutex<Option<SavedSignatures>> = Mutex::new(None);
-
-pub fn with_saved<R>(f: impl FnOnce(&SavedSignatures) -> R) -> R {
-    let mut cache = SAVED.lock().unwrap_or_else(|e| e.into_inner());
-    let saved = cache.get_or_insert_with(|| {
-        store::config_file(fs::FILE)
-            .map_or_else(SavedSignatures::default, |p| SavedSignatures::load(&p))
-    });
-    f(saved)
+/// Assinatura e iniciais guardadas, com a arte e a proporção já montadas (a fonte e a imagem são
+/// lidas uma vez, não a cada quadro).
+struct Cache {
+    saved: SavedSignatures,
+    /// [assinatura, iniciais]: arte e proporção.
+    art: [Option<(pdf_core::SignatureArt, f32)>; 2],
 }
 
-/// Troca a assinatura (ou as iniciais) guardada e grava no disco.
+impl Cache {
+    fn new(saved: SavedSignatures) -> Self {
+        let art = [false, true].map(|initials| {
+            let art = saved.get(initials).and_then(Saved::art)?;
+            let aspect = fs::aspect_of(&art);
+            Some((art, aspect))
+        });
+        Self { saved, art }
+    }
+}
+
+/// Lido do disco uma vez e compartilhado pelas abas.
+static SAVED: Mutex<Option<Cache>> = Mutex::new(None);
+
+fn with_cache<R>(f: impl FnOnce(&Cache) -> R) -> R {
+    let mut cache = SAVED.lock().unwrap_or_else(|e| e.into_inner());
+    let cache = cache.get_or_insert_with(|| {
+        Cache::new(
+            store::config_file(fs::FILE)
+                .map_or_else(SavedSignatures::default, |p| SavedSignatures::load(&p)),
+        )
+    });
+    f(cache)
+}
+
+pub fn with_saved<R>(f: impl FnOnce(&SavedSignatures) -> R) -> R {
+    with_cache(|c| f(&c.saved))
+}
+
+/// Arte e proporção da assinatura (ou das iniciais) guardada.
+fn saved_art(initials: bool) -> Option<(pdf_core::SignatureArt, f32)> {
+    with_cache(|c| c.art[initials as usize].clone())
+}
+
+/// Troca a assinatura (ou as iniciais) guardada e grava no disco. A cópia de imagem que deixou de
+/// ser usada é apagada (não fica assinatura esquecida na pasta de configuração).
 pub fn store_saved(initials: bool, saved: Option<Saved>) -> std::io::Result<()> {
     let mut all = with_saved(Clone::clone);
+    if let Some(Saved::Image { file }) = all.get(initials) {
+        let still_used = matches!(&saved, Some(Saved::Image { file: new }) if new == file);
+        if !still_used {
+            let _ = std::fs::remove_file(file);
+        }
+    }
     all.set(initials, saved);
     if let Some(path) = store::config_file(fs::FILE) {
         all.save(&path)?;
     }
-    *SAVED.lock().unwrap_or_else(|e| e.into_inner()) = Some(all);
+    *SAVED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Cache::new(all));
     Ok(())
 }
 
@@ -129,9 +166,9 @@ impl EditState {
             }),
             FillTool::Signature | FillTool::Initials => {
                 let initials = tool == FillTool::Initials;
-                match with_saved(|s| s.get(initials).and_then(Saved::art)) {
-                    Some(art) => {
-                        let rect = fs::art_rect(at, fs::aspect_of(&art), height_for(initials));
+                match saved_art(initials) {
+                    Some((art, aspect)) => {
+                        let rect = fs::art_rect(at, aspect, height_for(initials));
                         self.add(NewAnnot::Signature {
                             page,
                             rect,
@@ -155,9 +192,9 @@ impl EditState {
 
     /// Campo de assinatura clicado: a assinatura guardada, ajustada ao campo (ou a janela).
     pub fn sign_field(&mut self, page: i32, field: PdfRect) {
-        match with_saved(|s| s.get(false).and_then(Saved::art)) {
-            Some(art) => {
-                let rect = fs::fit_in(field, fs::aspect_of(&art));
+        match saved_art(false) {
+            Some((art, aspect)) => {
+                let rect = fs::fit_in(field, aspect);
                 self.add(NewAnnot::Signature {
                     page,
                     rect,
@@ -235,18 +272,14 @@ fn paint_ghost(ui: &egui::Ui, tool: FillTool, st: &FillState, at: (f32, f32), ma
         }
         FillTool::Signature | FillTool::Initials => {
             let initials = tool == FillTool::Initials;
-            with_saved(|s| {
-                let Some(saved) = s.get(initials) else {
+            // a prévia tem o tamanho exato do que vai ser colocado
+            with_cache(|c| {
+                let (Some(saved), Some((_, aspect))) =
+                    (c.saved.get(initials), &c.art[initials as usize])
+                else {
                     return;
                 };
-                let aspect = match saved {
-                    Saved::Drawn { aspect, .. } => *aspect,
-                    // a prévia do digitado usa a fonte manuscrita do egui; a medida exata vem ao
-                    // gravar
-                    Saved::Typed { text } => 0.45 * text.chars().count().max(1) as f32,
-                    Saved::Image { file } => pdf_core::signature::image_aspect(file).unwrap_or(2.0),
-                };
-                let r = screen_rect(&fs::art_rect(at, aspect, height_for(initials)), map);
+                let r = screen_rect(&fs::art_rect(at, *aspect, height_for(initials)), map);
                 paint_saved(painter, saved, r, ink);
             });
         }
