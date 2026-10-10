@@ -132,12 +132,12 @@ pub enum Request {
     },
     /// Marca d'água (`replace`: no lugar da existente — o Atualizar).
     AddWatermark {
-        watermark: crate::Watermark,
+        watermark: Box<crate::Watermark>,
         replace: bool,
     },
     /// Cabeçalho e rodapé (`replace`: no lugar dos existentes).
     AddHeaderFooter {
-        header_footer: crate::HeaderFooter,
+        header_footer: Box<crate::HeaderFooter>,
         replace: bool,
     },
     /// Tira as marcas d'água (ou os cabeçalhos e rodapés) de todas as páginas.

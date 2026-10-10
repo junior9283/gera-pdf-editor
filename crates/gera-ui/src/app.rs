@@ -514,6 +514,12 @@ impl GeraApp {
                 .inner
                 .or(cmd);
         }
+        if doc.pagination.tool.is_some() {
+            cmd = egui::Panel::top("marca-cabecalho")
+                .show(ui, |ui| toolbar::pagination_row(ui, doc))
+                .inner
+                .or(cmd);
+        }
         if doc.edit_pdf_tools {
             cmd = egui::Panel::top("editar-pdf")
                 .show(ui, |ui| toolbar::edit_pdf_row(ui, doc))
@@ -747,6 +753,8 @@ impl GeraApp {
             tools_catalog::EDIT_PDF => tools_catalog::EDIT_PDF,
             tools_catalog::CERTIFICATES => tools_catalog::CERTIFICATES,
             tools_catalog::PROTECT => tools_catalog::PROTECT,
+            tools_catalog::WATERMARK => tools_catalog::WATERMARK,
+            tools_catalog::HEADER_FOOTER => tools_catalog::HEADER_FOOTER,
             _ => return,
         };
         match self.last_doc.clone().and_then(|p| self.tabs.find(&p)) {
