@@ -66,6 +66,8 @@ pub enum DocEvent {
     ShowPanel(LeftPanel),
     /// Abrir este arquivo numa aba (ex.: o resultado do Comprimir PDF).
     OpenFile(PathBuf),
+    /// Documento criado pelo app (sem lugar escolhido): Salvar pede o destino.
+    NeedSaveAs,
 }
 
 /// Impressão esperando a cópia temporária: opções, página atual no clique e o arquivo pedido.
@@ -131,6 +133,8 @@ pub struct DocTab {
     /// Janela Exportar PDF: formato (0 Word, 1 texto, 2 PNG, 3 JPEG), resolução e se está
     /// exportando.
     pub(crate) export: Option<(usize, u32, bool)>,
+    /// Criado pelo app (Criar PDF): ainda sem lugar escolhido, conta como não salvo.
+    pub(crate) created: bool,
     /// Pedido de foco no campo de busca (Ctrl+F ou menu).
     pub(crate) focus_search: bool,
     /// Propriedades mostradas na janela (aberta enquanto houver).
@@ -223,6 +227,7 @@ impl DocTab {
             unlock: None,
             compress: None,
             export: None,
+            created: false,
             focus_search: false,
             properties: None,
             print_dialog: None,
@@ -243,7 +248,7 @@ impl DocTab {
 
     /// Há edições ainda não gravadas no arquivo?
     pub fn is_dirty(&self) -> bool {
-        self.history.dirty
+        self.history.dirty || self.created
     }
 
     /// Fechar esta aba precisa de confirmação (pendências ou salvamento em andamento)?
@@ -286,6 +291,8 @@ impl DocTab {
             }
         }
         match cmd {
+            // PDF criado pelo app: o primeiro Salvar escolhe onde guardar (como o Acrobat)
+            DocCommand::Save if self.created => self.events.push(DocEvent::NeedSaveAs),
             DocCommand::Save => self.save(),
             DocCommand::Undo if self.history.can_undo => self.worker.send(Request::Undo),
             DocCommand::Redo if self.history.can_redo => self.worker.send(Request::Redo),

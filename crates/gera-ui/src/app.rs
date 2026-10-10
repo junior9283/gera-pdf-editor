@@ -43,6 +43,8 @@ pub struct GeraApp {
     row_after_open: Option<&'static str>,
     /// As imagens do próximo seletor viram um PDF (Criar PDF).
     create_after_pick: bool,
+    /// Criar PDF em andamento.
+    creating: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
     /// Último documento que esteve na frente (para o hub voltar a ele).
     last_doc: Option<PathBuf>,
     show_shortcuts: bool,
@@ -82,6 +84,7 @@ impl GeraApp {
             fullscreen: false,
             row_after_open: None,
             create_after_pick: false,
+            creating: None,
             last_doc: None,
             show_shortcuts: false,
             show_about: false,
@@ -96,8 +99,13 @@ impl GeraApp {
         app
     }
 
-    /// Criar PDF: as imagens viram um PDF novo (pasta de documentos criados), aberto numa aba.
+    /// Criar PDF: as imagens viram um PDF novo (pasta de documentos criados) numa thread (fotos
+    /// grandes levam segundos); o resultado abre numa aba como "não salvo".
     fn create_from_images(&mut self, ctx: &egui::Context, images: Vec<PathBuf>) {
+        if self.creating.is_some() {
+            self.status = "Já há um PDF sendo criado.".into();
+            return;
+        }
         let stem = images.first().and_then(|p| p.file_stem()).map_or_else(
             || "Imagens".to_owned(),
             |s| s.to_string_lossy().into_owned(),
@@ -106,12 +114,43 @@ impl GeraApp {
             self.status = "Pasta de documentos criados indisponível.".into();
             return;
         };
-        match pdf_core::create_pdf_from_images(&images, &dest) {
-            Ok(()) => {
-                self.open_path(ctx, dest);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx2 = ctx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("criar-pdf".into())
+            .spawn(move || {
+                let r = pdf_core::create_pdf_from_images(&images, &dest)
+                    .map(|()| dest)
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(r);
+                ctx2.request_repaint();
+            });
+        if spawned.is_ok() {
+            self.creating = Some(rx);
+            self.status = "Criando o PDF…".into();
+        }
+    }
+
+    /// O PDF criado ficou pronto: abre e marca como não salvo.
+    fn poll_creating(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.creating else {
+            return;
+        };
+        let result = match rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("falha ao criar".into()),
+        };
+        self.creating = None;
+        match result {
+            Ok(dest) => {
+                self.open_path(ctx, dest.clone());
+                let tab = self.tabs.find(&canonical(&dest));
+                if let Some(doc) = tab.and_then(|t| self.doc_at(t)) {
+                    doc.created = true;
+                }
                 self.status =
-                    "PDF criado a partir das imagens: use Salvar como para guardá-lo onde quiser."
-                        .into();
+                    "PDF criado a partir das imagens: Salvar escolhe onde guardá-lo.".into();
             }
             Err(e) => self.status = format!("Não foi possível criar o PDF: {e}"),
         }
@@ -248,6 +287,7 @@ impl GeraApp {
                 match event {
                     DocEvent::Opened => self.remember(self.docs[i].path.clone()),
                     DocEvent::Renamed(dest) => {
+                        self.docs[i].created = false;
                         let dest = canonical(&dest);
                         self.tabs.rename(tab, dest.clone());
                         self.docs[i].path = dest.clone();
@@ -266,12 +306,14 @@ impl GeraApp {
                         break;
                     }
                     DocEvent::OpenFile(path) => to_open.push(path),
+                    DocEvent::NeedSaveAs => self.dialogs.save_as(ctx, self.docs[i].path.clone()),
                 }
             }
         }
         for path in to_open {
             self.open_path(ctx, path);
         }
+        self.poll_creating(ctx);
         if let Some(picked) = self.dialogs.poll() {
             match picked {
                 Picked::Open(files) if std::mem::take(&mut self.create_after_pick) => {
