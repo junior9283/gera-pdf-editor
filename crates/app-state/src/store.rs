@@ -15,6 +15,34 @@ pub fn config_file(name: &str) -> Option<PathBuf> {
     Some(base.join(APP_DIR).join(name))
 }
 
+/// PDF novo criado pelo app (Criar PDF, abrir imagem) na pasta de documentos criados
+/// (`$XDG_CACHE_HOME` ou `~/.cache`): "<stem>.pdf", "<stem> (2).pdf"…, sem sobrescrever.
+pub fn created_pdf(stem: &str) -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
+    let dir = base.join(APP_DIR).join("criados");
+    std::fs::create_dir_all(&dir).ok()?;
+    let first = dir.join(format!("{stem}.pdf"));
+    if !first.exists() {
+        return Some(first);
+    }
+    (2..)
+        .map(|n| dir.join(format!("{stem} ({n}).pdf")))
+        .find(|p| !p.exists())
+}
+
+/// É uma imagem que o Criar PDF aceita (pela extensão)?
+pub fn is_image(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        matches!(
+            e.to_ascii_lowercase().as_str(),
+            "jpg" | "jpeg" | "png" | "tif" | "tiff" | "bmp" | "gif"
+        )
+    })
+}
+
 /// Lê `path`; arquivo ausente, ilegível ou inválido vira o valor padrão (e não é apagado).
 pub fn load_json<T: DeserializeOwned + Default>(path: &Path) -> T {
     std::fs::read(path)
@@ -106,6 +134,12 @@ impl Drop for BackgroundSaver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn images_are_recognised_by_extension() {
+        assert!(is_image(Path::new("/x/Foto.JPG")) && is_image(Path::new("a.tiff")));
+        assert!(!is_image(Path::new("a.pdf")) && !is_image(Path::new("sem_extensao")));
+    }
 
     #[derive(Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
     struct Sample {

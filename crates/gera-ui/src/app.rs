@@ -41,6 +41,8 @@ pub struct GeraApp {
     /// Linha de ferramentas (Comentar ou Preencher e assinar) a abrir no próximo documento
     /// aberto pelo seletor.
     row_after_open: Option<&'static str>,
+    /// As imagens do próximo seletor viram um PDF (Criar PDF).
+    create_after_pick: bool,
     /// Último documento que esteve na frente (para o hub voltar a ele).
     last_doc: Option<PathBuf>,
     show_shortcuts: bool,
@@ -79,6 +81,7 @@ impl GeraApp {
             recents_dirty: false,
             fullscreen: false,
             row_after_open: None,
+            create_after_pick: false,
             last_doc: None,
             show_shortcuts: false,
             show_about: false,
@@ -93,7 +96,33 @@ impl GeraApp {
         app
     }
 
+    /// Criar PDF: as imagens viram um PDF novo (pasta de documentos criados), aberto numa aba.
+    fn create_from_images(&mut self, ctx: &egui::Context, images: Vec<PathBuf>) {
+        let stem = images.first().and_then(|p| p.file_stem()).map_or_else(
+            || "Imagens".to_owned(),
+            |s| s.to_string_lossy().into_owned(),
+        );
+        let Some(dest) = store::created_pdf(&stem) else {
+            self.status = "Pasta de documentos criados indisponível.".into();
+            return;
+        };
+        match pdf_core::create_pdf_from_images(&images, &dest) {
+            Ok(()) => {
+                self.open_path(ctx, dest);
+                self.status =
+                    "PDF criado a partir das imagens: use Salvar como para guardá-lo onde quiser."
+                        .into();
+            }
+            Err(e) => self.status = format!("Não foi possível criar o PDF: {e}"),
+        }
+    }
+
     pub(crate) fn open_path(&mut self, ctx: &egui::Context, path: PathBuf) {
+        // abrir uma imagem cria um PDF com ela (como o Acrobat)
+        if store::is_image(&path) {
+            self.create_from_images(ctx, vec![path]);
+            return;
+        }
         let path = canonical(&path);
         let mut created = false;
         self.switch_tab(|tabs| created = tabs.open(path.clone()).1);
@@ -245,6 +274,9 @@ impl GeraApp {
         }
         if let Some(picked) = self.dialogs.poll() {
             match picked {
+                Picked::Open(files) if std::mem::take(&mut self.create_after_pick) => {
+                    self.create_from_images(ctx, files);
+                }
                 Picked::Open(files) => {
                     for f in files {
                         self.open_path(ctx, f);
@@ -257,9 +289,11 @@ impl GeraApp {
                 }
                 Picked::SaveAs { doc, dest } => self.save_as(doc, dest),
                 Picked::Cancelled | Picked::Folder(_) | Picked::SaveTo(_) => {
+                    self.create_after_pick = false;
                     self.row_after_open = None
                 }
                 Picked::Failed => {
+                    self.create_after_pick = false;
                     self.row_after_open = None;
                     self.status = "Não foi possível abrir o seletor de arquivos.".into();
                 }
@@ -597,6 +631,23 @@ impl GeraApp {
     fn run_tool(&mut self, ctx: &egui::Context, id: &str) {
         if id == tools_catalog::COMBINE {
             self.combine.open = true;
+            return;
+        }
+        if id == tools_catalog::CREATE {
+            self.create_after_pick = true;
+            self.dialogs.pick_images(ctx);
+            return;
+        }
+        if id == tools_catalog::EXPORT {
+            match self.last_doc.clone().and_then(|p| self.tabs.find(&p)) {
+                Some(tab) => {
+                    self.activate(tab);
+                    if let Some(doc) = self.active_doc() {
+                        doc.open_export();
+                    }
+                }
+                None => self.status = "Abra um PDF para exportar.".into(),
+            }
             return;
         }
         if id == tools_catalog::COMPRESS {

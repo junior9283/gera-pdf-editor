@@ -128,6 +128,9 @@ pub struct DocTab {
     /// Janela Comprimir PDF aberta: nível escolhido (0 baixa, 1 média, 2 alta) e se está
     /// comprimindo.
     pub(crate) compress: Option<(usize, bool)>,
+    /// Janela Exportar PDF: formato (0 Word, 1 texto, 2 PNG, 3 JPEG), resolução e se está
+    /// exportando.
+    pub(crate) export: Option<(usize, u32, bool)>,
     /// Pedido de foco no campo de busca (Ctrl+F ou menu).
     pub(crate) focus_search: bool,
     /// Propriedades mostradas na janela (aberta enquanto houver).
@@ -219,6 +222,7 @@ impl DocTab {
             protect: None,
             unlock: None,
             compress: None,
+            export: None,
             focus_search: false,
             properties: None,
             print_dialog: None,
@@ -518,6 +522,24 @@ impl DocTab {
                             .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
                     );
                     self.events.push(DocEvent::OpenFile(dest));
+                }
+                Response::ExportedTo(files) => {
+                    self.export = None;
+                    self.status = match files.as_slice() {
+                        [one] => format!("Exportado: {}", one.display()),
+                        [first, ..] => format!(
+                            "{} imagens exportadas em {}",
+                            files.len(),
+                            first
+                                .parent()
+                                .map_or_else(String::new, |p| p.display().to_string())
+                        ),
+                        [] => "Nada exportado.".into(),
+                    };
+                }
+                Response::ExportToFailed(e) => {
+                    self.export = None;
+                    self.status = format!("Não foi possível exportar: {e}");
                 }
                 Response::CompressFailed(e) => {
                     self.compress = None;
@@ -897,6 +919,76 @@ impl DocTab {
         }
     }
 
+    /// Exportar PDF: abre a janela (precisa da permissão de copiar o conteúdo).
+    pub fn open_export(&mut self) {
+        if !self.security.permissions.copy {
+            self.deny("exportar o conteúdo");
+            return;
+        }
+        if self.view.is_some() && self.export.is_none() {
+            self.export = Some((0, 150, false));
+        }
+    }
+
+    /// Janela Exportar PDF: formato, resolução das imagens e Exportar.
+    fn export_window(&mut self, ctx: &egui::Context) {
+        let Some((format, dpi, busy)) = self.export.as_mut() else {
+            return;
+        };
+        const FORMATS: [&str; 4] = [
+            "Microsoft Word (.docx)",
+            "Texto (.txt)",
+            "Imagens PNG (uma por página)",
+            "Imagens JPEG (uma por página)",
+        ];
+        let mut go = false;
+        let mut open = true;
+        egui::Window::new("Exportar PDF")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                for (i, name) in FORMATS.iter().enumerate() {
+                    ui.radio_value(format, i, *name);
+                }
+                if *format >= 2 {
+                    ui.horizontal(|ui| {
+                        ui.label("Resolução");
+                        for d in [72, 150, 300] {
+                            ui.radio_value(dpi, d, format!("{d} ppp"));
+                        }
+                    });
+                }
+                ui.label("O resultado é gravado ao lado do original, sem sobrescrever nada.");
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!*busy, egui::Button::new("Exportar"))
+                        .clicked()
+                    {
+                        go = true;
+                    }
+                    if *busy {
+                        ui.spinner();
+                        ui.label("Exportando…");
+                    }
+                });
+            });
+        if !open && !*busy {
+            self.export = None;
+            return;
+        }
+        if go {
+            let f = match *format {
+                0 => pdf_core::ExportFormat::Word,
+                1 => pdf_core::ExportFormat::Text,
+                2 => pdf_core::ExportFormat::Png { dpi: *dpi },
+                _ => pdf_core::ExportFormat::Jpeg { dpi: *dpi },
+            };
+            *busy = true;
+            self.worker.send(Request::Export { format: f });
+        }
+    }
+
     /// Janelas do Proteger PDF: Proteger usando senha e Desbloquear.
     fn protect_windows(&mut self, ctx: &egui::Context) {
         if let Some(d) = self.protect.as_mut() {
@@ -1171,6 +1263,7 @@ impl DocTab {
         self.field_props_window(ui.ctx());
         self.protect_windows(ui.ctx());
         self.compress_window(ui.ctx());
+        self.export_window(ui.ctx());
         self.sign_window(ui.ctx());
         self.split_window(ui);
         self.poll_files();

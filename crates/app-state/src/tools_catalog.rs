@@ -47,6 +47,8 @@ pub const PREPARE_FORM: &str = "formulario";
 pub const CERTIFICATES: &str = "certificados";
 pub const PROTECT: &str = "proteger";
 pub const COMPRESS: &str = "comprimir";
+pub const CREATE: &str = "criar";
+pub const EXPORT: &str = "exportar";
 /// Ferramentas que abrem o Organizar páginas.
 pub const ORGANIZE: &str = "organizar";
 pub const INSERT: &str = "inserir";
@@ -74,9 +76,9 @@ const fn tool(
 
 #[rustfmt::skip]
 pub const CATALOG: &[ToolEntry] = &[
-    tool("criar", "Criar PDF", "📄", CreateEdit, Planned("v5"), "PDF a partir de imagens e documentos"),
+    tool(CREATE, "Criar PDF", "📄", CreateEdit, Ready, "PDF a partir de imagens"),
     tool("editar", "Editar PDF", "✏", CreateEdit, Planned("v4"), "Alterar texto e imagens"),
-    tool("exportar", "Exportar PDF", "📤", CreateEdit, Planned("v5"), "Converter para Word, Excel ou imagens"),
+    tool(EXPORT, "Exportar PDF", "📤", CreateEdit, Ready, "Converter para Word, texto ou imagens"),
     tool("ocr", "Digitalizar e OCR", "🔎", CreateEdit, Planned("v5"), "Reconhecer texto em páginas escaneadas"),
     tool(COMBINE, "Combinar arquivos", "🗐", CreateEdit, Ready, "Juntar vários PDFs em um"),
     tool(COMMENT, "Comentar", "💬", Review, Ready, "Destacar, sublinhar, notas e desenho"),
@@ -145,6 +147,8 @@ mod tests {
         assert_eq!(
             ready,
             [
+                CREATE,
+                EXPORT,
                 COMBINE,
                 COMMENT,
                 FILL_SIGN,

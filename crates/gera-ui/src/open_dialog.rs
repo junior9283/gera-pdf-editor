@@ -69,6 +69,23 @@ impl FileDialogs {
         });
     }
 
+    /// Imagens para o Criar PDF (várias).
+    pub fn pick_images(&mut self, ctx: &egui::Context) {
+        self.spawn(ctx, || {
+            match rfd::FileDialog::new()
+                .set_title("Criar PDF a partir de imagens")
+                .add_filter(
+                    "Imagens",
+                    &["jpg", "jpeg", "png", "tif", "tiff", "bmp", "gif"],
+                )
+                .pick_files()
+            {
+                Some(p) if !p.is_empty() => Picked::Open(p),
+                _ => Picked::Cancelled,
+            }
+        });
+    }
+
     /// Arquivo de ID digital (PKCS#12).
     pub fn pick_id_file(&mut self, ctx: &egui::Context) {
         self.spawn(ctx, || {

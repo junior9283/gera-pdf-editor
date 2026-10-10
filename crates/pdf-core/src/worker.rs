@@ -83,6 +83,10 @@ pub enum Request {
     Compress {
         level: crate::CompressLevel,
     },
+    /// Exportar PDF (Word, texto, imagens) ao lado do original.
+    Export {
+        format: crate::ExportFormat,
+    },
     /// Propriedades do campo, para a janela Propriedades.
     FieldProps {
         page: i32,
@@ -209,6 +213,9 @@ pub enum Response {
         report: crate::CompressReport,
     },
     CompressFailed(String),
+    /// Arquivos criados pelo Exportar PDF.
+    ExportedTo(Vec<PathBuf>),
+    ExportToFailed(String),
     /// Propriedades de um campo (Preparar formulário).
     FieldProps {
         page: i32,
@@ -357,6 +364,10 @@ impl State {
             Request::SetProtection(p) => self.security(send, |d| d.set_protection(p)),
             Request::Unlock { password } => self.security(send, |d| d.unlock(&password)),
             Request::Security => self.security(send, |_| Ok(())),
+            Request::Export { format } => send(match self.with_doc(|d| d.export(format)) {
+                Ok(files) => Response::ExportedTo(files),
+                Err(e) => Response::ExportToFailed(e),
+            }),
             Request::Compress { level } => send(
                 match self.with_doc(|d| {
                     let stem = crate::split::stem_of(d.path(), "documento");
