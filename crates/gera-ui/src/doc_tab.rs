@@ -212,7 +212,19 @@ impl DocTab {
 
     /// Fechar esta aba precisa de confirmação (pendências ou salvamento em andamento)?
     pub fn needs_confirm(&self) -> bool {
-        self.is_dirty() || self.edit.saving
+        self.is_dirty() || self.edit.saving || self.form.has_draft()
+    }
+
+    /// Confirma o texto que está sendo digitado num campo (antes de salvar ou imprimir).
+    /// Devolve se havia o que gravar.
+    fn commit_field(&mut self) -> bool {
+        match self.form.commit() {
+            Some(crate::fields::FieldAction::Set { page, id, value }) => {
+                self.worker.send(Request::SetField { page, id, value });
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn run(&mut self, ctx: &egui::Context, cmd: DocCommand) {
@@ -286,7 +298,9 @@ impl DocTab {
 
     /// Salvar: só quando há o que gravar.
     pub fn save(&mut self) {
-        if let Some(view) = self.view.as_ref().filter(|_| self.history.dirty) {
+        // o worker atende em ordem: o valor do campo chega antes da gravação
+        let typed = self.commit_field();
+        if let Some(view) = self.view.as_ref().filter(|_| self.history.dirty || typed) {
             self.edit.save(&self.worker, view.path.clone());
         }
     }
@@ -315,6 +329,7 @@ impl DocTab {
     }
 
     pub fn save_as(&mut self, dest: PathBuf) {
+        self.commit_field();
         if self.view.is_some() && self.edit.save(&self.worker, dest.clone()) {
             self.save_dest = Some(dest);
         }
@@ -346,6 +361,7 @@ impl DocTab {
     fn on_opened(&mut self, summary: DocSummary) {
         self.annots = summary.annots;
         self.fields = summary.fields;
+        self.form.notes = summary.form_notes;
         self.history = HistoryState::default();
         self.outline = summary.outline;
         self.password_prompt = None;
@@ -370,6 +386,7 @@ impl DocTab {
     fn on_pages_changed(&mut self, summary: DocSummary, history: HistoryState) {
         self.annots = summary.annots;
         self.fields = summary.fields;
+        self.form.notes = summary.form_notes;
         self.outline = summary.outline;
         self.history = history;
         self.edit.keep_valid_selection(&self.annots);
@@ -526,17 +543,14 @@ impl DocTab {
                         _ => "Nenhum arquivo criado.".into(),
                     };
                 }
-                Response::FieldsChanged {
-                    page,
-                    fields,
-                    history,
-                } => {
-                    self.fields.retain(|f| f.page != page);
-                    self.fields.extend(fields);
-                    self.fields.sort_by_key(|f| f.page);
+                Response::FieldsChanged { fields, history } => {
+                    let mut pages: Vec<i32> =
+                        self.fields.iter().chain(&fields).map(|f| f.page).collect();
+                    pages.dedup();
+                    self.fields = fields;
                     self.history = history;
                     if let Some(view) = self.view.as_mut() {
-                        view.invalidate_page(page);
+                        pages.into_iter().for_each(|p| view.invalidate_page(p));
                     }
                 }
                 Response::SplitFailed(msg) => {
@@ -570,7 +584,7 @@ impl DocTab {
         {
             if self.organize.is_some() {
                 self.organize = None; // Esc fecha o Organizar páginas
-            } else {
+            } else if !self.form.escape() {
                 self.edit.escape();
             }
         }
@@ -653,6 +667,7 @@ impl DocTab {
 
     /// Opções escolhidas: o worker grava a cópia temporária; o envio continua em `send_to_printer`.
     fn start_print(&mut self, options: PrintOptions) {
+        self.commit_field();
         match print_job::temp_file() {
             Ok(dest) => {
                 self.worker.send(Request::ExportForPrint {
@@ -1151,6 +1166,10 @@ impl DocTab {
                 )
             })
             .inner;
+        if let Some((page, r)) = self.form.scroll_to.take() {
+            // o Tab foi a um campo de outra página
+            self.jump_to = view.go_to(page, Some((r.x0, r.y0)));
+        }
         for action in field_actions {
             match action {
                 crate::fields::FieldAction::Set { page, id, value } => {

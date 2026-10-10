@@ -156,9 +156,8 @@ pub enum Response {
     PagesFailed(String),
     Extracted(Vec<PathBuf>),
     Split(Vec<PathBuf>),
-    /// Campos da página mudaram (preencher, desfazer/refazer de um valor).
+    /// Campos mudaram (preencher, desfazer/refazer de um valor): todos, de todas as páginas.
     FieldsChanged {
-        page: i32,
         fields: Vec<crate::FieldInfo>,
         history: HistoryState,
     },
@@ -285,8 +284,7 @@ impl State {
             }
             Request::Annot(op) => self.edit(send, |d| d.apply(op).map(Changed::Pages)),
             Request::SetField { page, id, value } => self.edit(send, |d| {
-                d.set_field(page, id, &value)
-                    .map(|()| Changed::Fields(page))
+                d.set_field(page, id, &value).map(|()| Changed::Fields)
             }),
             Request::ResetForm => self.edit(send, |d| d.reset_form().map(|()| Changed::Document)),
             Request::Pages(op) => {
@@ -369,9 +367,8 @@ impl State {
                 },
                 Err(e) => Response::PagesFailed(e.to_string()),
             }),
-            Ok(Changed::Fields(page)) => send(Response::FieldsChanged {
-                page,
-                fields: d.fields(page).unwrap_or_default(),
+            Ok(Changed::Fields) => send(Response::FieldsChanged {
+                fields: d.all_fields().unwrap_or_default(),
                 history: d.history_state(),
             }),
             Ok(Changed::Pages(pages)) => send(Response::AnnotsChanged {

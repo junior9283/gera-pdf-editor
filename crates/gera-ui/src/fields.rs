@@ -37,6 +37,12 @@ pub struct FormState {
     focused: Option<(i32, i32)>,
     /// Barra pedindo confirmação para limpar o formulário.
     pub confirm_reset: bool,
+    /// O Tab foi para um campo de outra página: rolar até ele (página, retângulo).
+    pub scroll_to: Option<(i32, pdf_core::PdfRect)>,
+    /// Texto livre de uma lista suspensa editável.
+    combo_text: String,
+    /// XFA ou scripts de campo que o app não executa (a barra avisa).
+    pub notes: pdf_core::FormNotes,
 }
 
 impl Default for FormState {
@@ -48,32 +54,55 @@ impl Default for FormState {
             pending_focus: None,
             focused: None,
             confirm_reset: false,
+            scroll_to: None,
+            combo_text: String::new(),
+            notes: Default::default(),
         }
     }
 }
 
-/// Ordem de Tab: página, de cima para baixo, da esquerda para a direita.
-pub fn tab_order(fields: &[FieldInfo]) -> Vec<(i32, i32)> {
-    let mut v: Vec<&FieldInfo> = fields.iter().filter(|f| !f.readonly).collect();
-    v.sort_by(|a, b| {
-        (a.page, a.rect.y0 as i64, a.rect.x0 as i64).cmp(&(
-            b.page,
-            b.rect.y0 as i64,
-            b.rect.x0 as i64,
-        ))
-    });
-    let mut out: Vec<(i32, i32)> = Vec::new();
-    for f in v {
-        // um grupo de botões de opção é uma parada só
-        let same_group = out
-            .last()
-            .and_then(|&(p, id)| fields.iter().find(|x| x.page == p && x.id == id))
-            .is_some_and(|prev| prev.name == f.name && matches!(f.kind, FieldKind::Radio { .. }));
-        if !same_group {
-            out.push((f.page, f.id));
-        }
+impl FormState {
+    /// Há texto em edição num campo (conta como alteração pendente).
+    pub fn has_draft(&self) -> bool {
+        self.draft.as_ref().is_some_and(|d| d.text != d.original)
     }
-    out
+
+    /// Confirma o texto em edição (antes de salvar, imprimir ou abrir outro campo).
+    pub fn commit(&mut self) -> Option<FieldAction> {
+        let d = self.draft.take()?;
+        (d.text != d.original).then_some(FieldAction::Set {
+            page: d.page,
+            id: d.id,
+            value: d.text,
+        })
+    }
+
+    /// Esc: fecha a lista aberta ou tira o foco do campo. Devolve se havia o que fechar.
+    pub fn escape(&mut self) -> bool {
+        self.choices.take().is_some() | self.focused.take().is_some()
+    }
+
+    /// Passa o foco ao campo seguinte (ou anterior), rolando até ele se estiver em outra página.
+    fn tab(&mut self, fields: &[FieldInfo], from: (i32, i32), back: bool) {
+        self.pending_focus = next_field(fields, from, back);
+        self.scroll_to = self
+            .pending_focus
+            .filter(|&(page, _)| page != from.0)
+            .and_then(|(page, id)| fields.iter().find(|f| f.page == page && f.id == id))
+            .map(|f| (f.page, f.rect));
+    }
+}
+
+/// Ordem de Tab: a de /Annots em cada página (a que o autor do formulário deu, como no Acrobat);
+/// um grupo de botões de opção é uma parada só, no lugar do primeiro botão dele.
+pub fn tab_order(fields: &[FieldInfo]) -> Vec<(i32, i32)> {
+    let mut groups = std::collections::HashSet::new();
+    fields
+        .iter()
+        .filter(|f| !f.readonly)
+        .filter(|f| !matches!(f.kind, FieldKind::Radio { .. }) || groups.insert(f.name.as_str()))
+        .map(|f| (f.page, f.id))
+        .collect()
 }
 
 /// Campo seguinte (ou anterior) na ordem de Tab, dando a volta.
@@ -83,7 +112,22 @@ pub fn next_field(fields: &[FieldInfo], from: (i32, i32), back: bool) -> Option<
     if n == 0 {
         return None;
     }
-    let at = order.iter().position(|&k| k == from).unwrap_or(0);
+    // um botão de opção que não é o primeiro do grupo conta como a parada do grupo
+    let name = fields
+        .iter()
+        .find(|f| (f.page, f.id) == from)
+        .map(|f| f.name.as_str());
+    let at = order
+        .iter()
+        .position(|&k| k == from)
+        .or_else(|| {
+            order.iter().position(|&(p, id)| {
+                fields
+                    .iter()
+                    .any(|f| f.page == p && f.id == id && Some(f.name.as_str()) == name)
+            })
+        })
+        .unwrap_or(0);
     Some(order[if back { (at + n - 1) % n } else { (at + 1) % n }])
 }
 
@@ -157,38 +201,39 @@ pub fn on_page(
                 open(st, f, &mut out);
             } else {
                 st.focused = Some(key);
-                // o Tab também andou o foco do egui (até o menu): o teclado fica com o campo
-                ui.memory_mut(|m| {
-                    if let Some(id) = m.focused() {
-                        m.surrender_focus(id);
-                    }
-                });
+                surrender_egui_focus(ui);
             }
         }
         if resp.clicked() {
             st.focused = Some(key);
             open(st, f, &mut out);
         }
+        if st.focused == Some(key)
+            && ui.input(|i| i.pointer.any_pressed())
+            && !resp.contains_pointer()
+        {
+            // clicou fora: o campo perde o foco (o teclado volta ao resto da janela)
+            st.focused = None;
+        }
         if st.focused == Some(key) {
+            // o teclado é do campo: o Tab do egui não pode levar o foco para o menu
+            surrender_egui_focus(ui);
             ui.painter().rect_stroke(
                 r.expand(2.0),
                 2.0,
                 egui::Stroke::new(1.5, ui.visuals().selection.stroke.color),
                 egui::StrokeKind::Outside,
             );
-            let (activate, tab, shift) = ui.input(|i| {
-                (
-                    i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter),
-                    i.key_pressed(egui::Key::Tab),
-                    i.modifiers.shift,
-                )
-            });
+            let activate =
+                ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter));
             if activate && !resp.clicked() {
                 open(st, f, &mut out);
             }
-            if tab {
+            // consumido: senão o campo seguinte, no mesmo quadro, veria o mesmo Tab e passaria adiante
+            let shift = ui.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
+            if shift || ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
                 st.focused = None;
-                st.pending_focus = next_field(fields, key, shift);
+                st.tab(fields, key, shift);
             }
         }
     }
@@ -197,14 +242,34 @@ pub fn on_page(
     out
 }
 
-/// Começa a editar o campo (ou age, se for caixa/opção/assinatura).
+/// Tira o foco do teclado de qualquer widget do egui (ele fica com o campo do formulário).
+fn surrender_egui_focus(ui: &egui::Ui) {
+    ui.memory_mut(|m| {
+        if let Some(id) = m.focused() {
+            m.surrender_focus(id);
+        }
+    });
+}
+
+/// Começa a editar o campo (ou age, se for caixa/opção/assinatura). O texto que estava sendo
+/// digitado em outro campo é confirmado antes.
 fn open(st: &mut FormState, f: &FieldInfo, out: &mut Vec<FieldAction>) {
+    if st
+        .draft
+        .as_ref()
+        .is_some_and(|d| (d.page, d.id) != (f.page, f.id))
+    {
+        out.extend(st.commit());
+    }
     if let Some(value) = toggled(f) {
-        out.push(FieldAction::Set {
-            page: f.page,
-            id: f.id,
-            value,
-        });
+        // botão de opção já escolhido: nada muda (nem entra no desfazer)
+        if value != f.value {
+            out.push(FieldAction::Set {
+                page: f.page,
+                id: f.id,
+                value,
+            });
+        }
         return;
     }
     match f.kind {
@@ -217,7 +282,10 @@ fn open(st: &mut FormState, f: &FieldInfo, out: &mut Vec<FieldAction>) {
                 focused: false,
             })
         }
-        FieldKind::Combo { .. } | FieldKind::List { .. } => st.choices = Some((f.page, f.id)),
+        FieldKind::Combo { .. } | FieldKind::List { .. } => {
+            st.choices = Some((f.page, f.id));
+            st.combo_text = f.value.clone();
+        }
         FieldKind::Signature => out.push(FieldAction::Sign),
         _ => {}
     }
@@ -296,7 +364,7 @@ fn text_overlay(
         });
     }
     if tab {
-        st.pending_focus = next_field(fields, (d.page, d.id), shift);
+        st.tab(fields, (d.page, d.id), shift);
     }
 }
 
@@ -315,8 +383,9 @@ fn choices_popup(
         st.choices = None;
         return;
     };
-    let options = match &f.kind {
-        FieldKind::Combo { options, .. } | FieldKind::List { options } => options,
+    let (options, editable) = match &f.kind {
+        FieldKind::Combo { options, editable } => (options, *editable),
+        FieldKind::List { options } => (options, false),
         _ => return,
     };
     let r = screen_rect(&f.rect, map);
@@ -326,6 +395,21 @@ fn choices_popup(
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_min_width(r.width());
+                if editable {
+                    // lista suspensa editável: aceita texto livre (Enter confirma)
+                    let typed = ui.add(
+                        egui::TextEdit::singleline(&mut st.combo_text).desired_width(r.width()),
+                    );
+                    if typed.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        out.push(FieldAction::Set {
+                            page: p,
+                            id,
+                            value: st.combo_text.clone(),
+                        });
+                        st.choices = None;
+                    }
+                    ui.separator();
+                }
                 for (export, label) in options {
                     let text = if label.is_empty() { export } else { label };
                     if ui.selectable_label(f.value == *export, text).clicked() {
@@ -339,12 +423,25 @@ fn choices_popup(
                 }
             });
         });
-    // clicar fora fecha a lista
+    // clicar fora fecha a lista (o Esc chega por `FormState::escape`)
     let clicked_elsewhere = ui.input(|i| i.pointer.any_click())
         && !area.response.hovered()
         && !ui.rect_contains_pointer(r);
     if clicked_elsewhere {
         st.choices = None;
+    }
+}
+
+/// Aviso do que o formulário tem e o app ainda não executa.
+fn notes_warning(n: pdf_core::FormNotes) -> Option<&'static str> {
+    match (n.xfa, n.scripts) {
+        (false, false) => None,
+        (true, _) => {
+            Some("Formulário XFA: alguns campos ou regras do autor podem não aparecer aqui.")
+        }
+        (false, true) => {
+            Some("O formulário tem cálculos ou validações em JavaScript, que não são executados.")
+        }
     }
 }
 
@@ -363,6 +460,9 @@ pub fn bar(ui: &mut egui::Ui, st: &mut FormState) -> bool {
                         .color(egui::Color32::from_rgb(60, 40, 110)),
                 );
                 ui.checkbox(&mut st.highlight, "Realçar campos");
+                if let Some(warning) = notes_warning(st.notes) {
+                    ui.colored_label(ui.visuals().warn_fg_color, format!("⚠ {warning}"));
+                }
                 if st.confirm_reset {
                     ui.label("Limpar todos os campos?");
                     if ui.button("Limpar").clicked() {
@@ -408,23 +508,47 @@ mod tests {
     }
 
     #[test]
-    fn tab_goes_top_to_bottom_left_to_right_and_wraps() {
+    fn tab_follows_the_form_order_with_one_stop_per_radio_group() {
         let radio = || FieldKind::Radio { on: "a".into() };
+        // na ordem de /Annots (a do autor), não na geométrica
         let fields = vec![
             f(3, 0, 100.0, 10.0, "c", text()),
-            f(1, 0, 10.0, 200.0, "b", text()),
-            f(2, 0, 10.0, 10.0, "a", text()),
             f(4, 0, 200.0, 10.0, "r", radio()),
+            f(1, 0, 10.0, 200.0, "b", text()),
             f(5, 0, 200.0, 100.0, "r", radio()),
             f(6, 1, 0.0, 0.0, "d", text()),
         ];
-        assert_eq!(tab_order(&fields), [(0, 2), (0, 1), (0, 3), (0, 4), (1, 6)]);
+        assert_eq!(tab_order(&fields), [(0, 3), (0, 4), (0, 1), (1, 6)]);
         assert_eq!(
             next_field(&fields, (1, 6), false),
-            Some((0, 2)),
+            Some((0, 3)),
             "dá a volta"
         );
-        assert_eq!(next_field(&fields, (0, 2), true), Some((1, 6)));
+        assert_eq!(next_field(&fields, (0, 3), true), Some((1, 6)));
+        assert_eq!(
+            next_field(&fields, (0, 5), false),
+            Some((0, 1)),
+            "do segundo botão do grupo, segue depois do grupo"
+        );
+    }
+
+    #[test]
+    fn opening_another_field_keeps_what_was_typed() {
+        let mut st = FormState::default();
+        let mut out = Vec::new();
+        let (a, b) = (
+            f(1, 0, 0.0, 0.0, "a", text()),
+            f(2, 0, 50.0, 0.0, "b", text()),
+        );
+        open(&mut st, &a, &mut out);
+        st.draft.as_mut().unwrap().text = "digitado".into();
+        open(&mut st, &b, &mut out);
+        assert!(matches!(&out[..], [FieldAction::Set { id: 1, value, .. }] if value == "digitado"));
+        assert!(!st.has_draft(), "aberto sem mudar nada");
+        st.draft.as_mut().unwrap().text = "outro".into();
+        assert!(st.has_draft());
+        assert!(matches!(st.commit(), Some(FieldAction::Set { id: 2, .. })));
+        assert!(!st.has_draft() && st.commit().is_none());
     }
 
     #[test]
@@ -441,6 +565,29 @@ mod tests {
         c.value = "Sim".into();
         assert_eq!(toggled(&c).as_deref(), Some("Off"));
         assert_eq!(toggled(&f(2, 0, 0.0, 0.0, "t", text())), None);
+    }
+
+    #[test]
+    fn clicking_the_chosen_radio_changes_nothing() {
+        let mut r = f(1, 0, 0.0, 0.0, "r", FieldKind::Radio { on: "a".into() });
+        r.value = "a".into();
+        let mut out = Vec::new();
+        open(&mut FormState::default(), &r, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn escape_closes_the_list_then_releases_the_field() {
+        let mut st = FormState {
+            choices: Some((0, 1)),
+            focused: Some((0, 1)),
+            ..Default::default()
+        };
+        assert!(st.escape());
+        assert!(
+            !st.escape(),
+            "nada mais a fechar: Esc segue para as ferramentas"
+        );
     }
 
     #[test]

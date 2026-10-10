@@ -247,18 +247,17 @@ impl PdfDoc {
     fn write_print_copy(&self, dest: &Path, with_annots: bool) -> Result<()> {
         // A cópia é sempre um documento à parte: gravar o documento aberto sem criptografia faria o
         // MuPDF tirar o /Encrypt dele, e o próximo Salvar estragaria o arquivo protegido.
-        let copy = if with_annots {
-            let mut bytes = Vec::new();
-            let mut keep = PdfWriteOptions::default();
-            keep.set_encryption(Encryption::Keep);
-            self.inner.write_to_with_options(&mut bytes, keep)?;
-            let mut copy = PdfDocument::from_bytes(&bytes)?;
-            if let Some(p) = self.password.as_deref() {
-                copy.authenticate(p)?;
-            }
-            copy
-        } else {
-            let copy = open_authenticated(&self.path, self.password.as_deref())?;
+        // Sempre do documento em memória: os campos de formulário saem com os valores atuais.
+        let mut bytes = Vec::new();
+        let mut keep = PdfWriteOptions::default();
+        keep.set_encryption(Encryption::Keep);
+        self.inner.write_to_with_options(&mut bytes, keep)?;
+        let mut copy = PdfDocument::from_bytes(&bytes)?;
+        if let Some(p) = self.password.as_deref() {
+            copy.authenticate(p)?;
+        }
+        if !with_annots {
+            // "Documento": sem comentários; os widgets (campos) não entram nessa lista e ficam
             for p in 0..copy.page_count()? {
                 let mut page = copy.load_pdf_page(p)?;
                 let all: Vec<_> = page.annotations().collect();
@@ -267,8 +266,7 @@ impl PdfDoc {
                 }
                 page.update()?;
             }
-            copy
-        };
+        }
         let dest = utf8_path(dest)?;
         // o padrão do MuPDF é manter a criptografia; o CUPS precisa de uma cópia legível
         let mut opts = PdfWriteOptions::default();
@@ -873,7 +871,7 @@ impl PdfDoc {
                             id,
                             value: old,
                         },
-                        Changed::Fields(page),
+                        Changed::Fields,
                     )
                 })
             }
@@ -1026,6 +1024,7 @@ impl PdfDoc {
             outline: self.outline().unwrap_or_default(),
             annots: self.all_annotations().unwrap_or_default(),
             fields: self.all_fields().unwrap_or_default(),
+            form_notes: self.form_notes().unwrap_or_default(),
         })
     }
 }

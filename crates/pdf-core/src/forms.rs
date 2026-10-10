@@ -34,6 +34,15 @@ pub enum FieldKind {
     Button,
 }
 
+/// O que o formulário tem e o app não executa: a barra avisa (o Acrobat roda ambos).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FormNotes {
+    /// Formulário XFA (LiveCycle): os campos do PDF podem não ser os que o autor desenhou.
+    pub xfa: bool,
+    /// JavaScript de cálculo, formatação ou validação nos campos.
+    pub scripts: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FieldInfo {
     /// Número do objeto do widget (cada botão de opção tem o seu).
@@ -96,6 +105,63 @@ fn on_state(obj: &PdfObject) -> Result<String> {
     Ok("Yes".into())
 }
 
+/// Nó do campo (com /T) de um widget: os botões de opção são filhos sem nome do grupo.
+fn field_head(obj: &PdfObject) -> Result<PdfObject> {
+    let mut node = obj.try_clone()?;
+    while node.get_dict("T")?.is_none() {
+        match node.get_dict("Parent")? {
+            Some(parent) => node = parent,
+            None => break,
+        }
+    }
+    Ok(node)
+}
+
+/// Widgets do campo: os /Kids, ou o próprio nó quando campo e widget são o mesmo objeto.
+fn kids_of(head: &PdfObject) -> Result<Vec<PdfObject>> {
+    match head.get_dict("Kids")? {
+        Some(kids) => (0..kids.len()? as i32)
+            .filter_map(|i| kids.get_array(i).transpose())
+            .collect::<std::result::Result<_, _>>()
+            .map_err(Into::into),
+        None => Ok(vec![head.try_clone()?]),
+    }
+}
+
+/// Liga o estado `value` no grupo inteiro (caixa ou botões de opção): /V vira o nome do estado e
+/// cada widget mostra `value` se tiver essa aparência, senão "Off" — como o Acrobat grava.
+fn set_buttons(head: &mut PdfObject, value: &str) -> Result<()> {
+    let value = if value.is_empty() { "Off" } else { value };
+    head.dict_put("V", PdfObject::new_name(value)?)?;
+    for mut kid in kids_of(head)? {
+        let has = kid
+            .get_dict("AP")?
+            .and_then(|ap| ap.get_dict("N").ok().flatten())
+            .and_then(|n| n.get_dict(value).ok().flatten())
+            .is_some();
+        kid.dict_put("AS", PdfObject::new_name(if has { value } else { "Off" })?)?;
+    }
+    Ok(())
+}
+
+/// Campo oculto (flags Hidden ou NoView): o Acrobat não mostra nem deixa preencher.
+fn hidden(obj: &PdfObject) -> Result<bool> {
+    const HIDDEN: i32 = 2;
+    const NO_VIEW: i32 = 32;
+    Ok(obj
+        .get_dict("F")?
+        .map(|f| f.as_int())
+        .transpose()?
+        .is_some_and(|f| f & (HIDDEN | NO_VIEW) != 0))
+}
+
+fn is_button(w: &PdfWidget) -> Result<bool> {
+    Ok(matches!(
+        w.r#type()?,
+        WidgetType::Checkbox | WidgetType::RadioButton
+    ))
+}
+
 fn info(w: &PdfWidget, page: i32) -> Result<FieldInfo> {
     let obj = w.annotation().object();
     let flags = w.field_flags()?;
@@ -148,7 +214,13 @@ impl PdfDoc {
     pub fn fields(&self, page: i32) -> Result<Vec<FieldInfo>> {
         self.check_page(page)?;
         let page_ref = self.inner.load_pdf_page(page)?;
-        page_ref.widgets().map(|w| info(&w, page)).collect()
+        let mut out = Vec::new();
+        for w in page_ref.widgets() {
+            if !hidden(&w.annotation().object())? {
+                out.push(info(&w, page)?);
+            }
+        }
+        Ok(out)
     }
 
     pub fn all_fields(&self) -> Result<Vec<FieldInfo>> {
@@ -157,6 +229,30 @@ impl PdfDoc {
             all.extend(self.fields(p)?);
         }
         Ok(all)
+    }
+
+    /// Avisos sobre o formulário (XFA, scripts de campo).
+    pub fn form_notes(&self) -> Result<FormNotes> {
+        let acro = self.inner.catalog()?.get_dict("AcroForm")?;
+        let xfa = match &acro {
+            Some(a) => a.get_dict("XFA")?.is_some(),
+            None => false,
+        };
+        let mut scripts = false;
+        'pages: for p in 0..self.page_count()? {
+            for w in self.inner.load_pdf_page(p)?.widgets() {
+                let head = field_head(&w.annotation().object())?;
+                if let Some(aa) = head.get_dict("AA")? {
+                    for key in ["C", "F", "K", "V"] {
+                        if aa.get_dict(key)?.is_some() {
+                            scripts = true;
+                            break 'pages;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(FormNotes { xfa, scripts })
     }
 
     /// Grava o valor no campo e devolve o anterior. Botão de opção: `value` = estado dele.
@@ -173,13 +269,26 @@ impl PdfDoc {
             ));
         }
         let old = widget.value()?.unwrap_or_default();
-        if !widget.set_value(&mut self.inner, value, true)? {
+        if is_button(&widget)? {
+            set_buttons(&mut field_head(&widget.annotation().object())?, value)?;
+            self.update_widgets()?;
+        } else if !widget.set_value(&mut self.inner, value, true)? {
             return Err(PdfError::InvalidAnnotation(
                 "valor recusado pelo campo".into(),
             ));
         }
         widget.update()?;
         Ok(old)
+    }
+
+    /// Redesenha os widgets (um grupo pode ter botões em várias páginas).
+    fn update_widgets(&self) -> Result<()> {
+        for p in 0..self.page_count()? {
+            for mut w in self.inner.load_pdf_page(p)?.widgets() {
+                w.update()?;
+            }
+        }
+        Ok(())
     }
 
     /// Preenche o campo; desfazer volta o valor anterior.
@@ -199,10 +308,20 @@ impl PdfDoc {
         for p in 0..self.page_count()? {
             let page_ref = self.inner.load_pdf_page(p)?;
             for mut w in page_ref.widgets() {
-                w.reset(&mut self.inner)?;
-                w.update()?;
+                if is_button(&w)? {
+                    // o reset do MuPDF não volta o grupo de botões: padrão (/DV) ou "Off"
+                    let mut head = field_head(&w.annotation().object())?;
+                    let default = match head.get_dict("DV")? {
+                        Some(dv) => String::from_utf8_lossy(&dv.as_name()?).into_owned(),
+                        None => "Off".into(),
+                    };
+                    set_buttons(&mut head, &default)?;
+                } else {
+                    w.reset(&mut self.inner)?;
+                }
             }
         }
+        self.update_widgets()?;
         if self.history.record_snapshot(before, SNAPSHOT_BUDGET) {
             self.mark_unsaved();
         }

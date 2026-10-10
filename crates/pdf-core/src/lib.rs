@@ -14,7 +14,7 @@ mod worker;
 
 pub use doc::{max_render_scale, PdfDoc};
 pub use error::{PdfError, Result};
-pub use forms::{FieldInfo, FieldKind};
+pub use forms::{FieldInfo, FieldKind, FormNotes};
 pub use split::{combine, safe_file_name, SplitRule};
 pub use stamp::{HEIGHT as STAMP_HEIGHT, WIDTH as STAMP_WIDTH};
 pub use types::*;
