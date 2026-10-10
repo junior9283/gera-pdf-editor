@@ -297,3 +297,24 @@ fn encrypted_file_keeps_its_password_with_new_fields() {
     assert_eq!(d.fields(0).unwrap().len(), 1);
     let _ = FieldProps::default();
 }
+
+#[test]
+fn a_broken_field_does_not_block_new_ones() {
+    // campo com ciclo de /Parent (PDF malicioso): os outros campos continuam editáveis
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ciclo.pdf");
+    let s = String::from_utf8(pdf_core::sample::form_pdf())
+        .unwrap()
+        .replace("/T (plano) /V /Off", "/Parent 6 0 R /V /Off");
+    std::fs::write(&path, s).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut d = PdfDoc::open(&path, None).unwrap();
+        let r = d.add_field(0, PdfRect::new(300.0, 50.0, 450.0, 72.0), NewFieldKind::Text, "Novo");
+        tx.send(r.is_ok()).unwrap();
+    });
+    let ok = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("travou");
+    assert!(ok, "campo novo criado apesar do campo defeituoso");
+}

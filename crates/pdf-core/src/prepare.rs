@@ -262,7 +262,8 @@ impl PdfDoc {
     fn field_named(&self, name: &str) -> Result<Option<PdfObject>> {
         for p in 0..self.page_count()? {
             for w in self.inner.load_pdf_page(p)?.widgets() {
-                if w.name()?.as_deref() == Some(name) {
+                // campo defeituoso (ex.: ciclo de /Parent) não impede os outros
+                if w.name().ok().flatten().as_deref() == Some(name) {
                     return Ok(Some(field_head(&w.annotation().object())?));
                 }
             }
@@ -282,7 +283,8 @@ impl PdfDoc {
     /// Redesenha os campos da página (aparências geradas pelo MuPDF).
     fn refresh_widgets(&self, page: i32) -> Result<()> {
         for mut w in self.inner.load_pdf_page(page)?.widgets() {
-            w.update()?;
+            // um campo defeituoso de outro programa fica como está; os nossos são redesenhados
+            let _ = w.update();
         }
         Ok(())
     }

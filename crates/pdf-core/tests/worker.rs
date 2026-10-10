@@ -319,3 +319,29 @@ fn preparing_a_form_reports_the_new_fields() {
         "nome repetido"
     );
 }
+
+#[test]
+fn field_properties_come_from_the_worker() {
+    let (_d, w, _) = opened(1);
+    w.send(Request::Prepare(pdf_core::PrepareOp::Add {
+        page: 0,
+        rect: PdfRect::new(100.0, 100.0, 250.0, 122.0),
+        kind: pdf_core::NewFieldKind::Text,
+        name: "Nome".into(),
+    }));
+    let Response::FieldsChanged { fields, .. } = recv(&w) else {
+        panic!()
+    };
+    let id = fields[0].id;
+    w.send(Request::FieldProps { page: 0, id });
+    match recv(&w) {
+        Response::FieldProps {
+            page: 0,
+            id: got,
+            props: Ok(p),
+        } => {
+            assert_eq!((got, p.name.as_str()), (id, "Nome"));
+        }
+        other => panic!("esperava FieldProps, veio {other:?}"),
+    }
+}
