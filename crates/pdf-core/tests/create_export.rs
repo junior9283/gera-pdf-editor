@@ -76,3 +76,36 @@ fn exports_to_word_text_and_images() {
     let again = d.export(ExportFormat::Text).unwrap();
     assert_eq!(again[0], dir.path().join("rel (2).txt"));
 }
+
+#[test]
+fn giant_images_and_giant_renders_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    // PNG de 30000×30000 (900 Mpx) com poucos KB: decodificar estouraria a memória
+    let path = dir.path().join("bomba.png");
+    std::process::Command::new("magick")
+        .args([
+            "-size",
+            "30000x30000",
+            "xc:white",
+            "-depth",
+            "1",
+            path.to_str().unwrap(),
+        ])
+        .status()
+        .ok();
+    if path.exists() {
+        let out = dir.path().join("b.pdf");
+        assert!(create_pdf_from_images(&[path], &out).is_err());
+    }
+    // página do tamanho máximo do PDF (200 pol) a 600 ppp = 120000 px de lado: não renderiza
+    let big = dir.path().join("grande.pdf");
+    let mut doc = mupdf::pdf::PdfDocument::new();
+    doc.new_page(mupdf::Size {
+        width: 14400.0,
+        height: 14400.0,
+    })
+    .unwrap();
+    doc.save(big.to_str().unwrap()).unwrap();
+    let d = PdfDoc::open(&big, None).unwrap();
+    assert!(d.export(ExportFormat::Png { dpi: 600 }).is_err());
+}

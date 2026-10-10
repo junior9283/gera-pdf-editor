@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 
 /// Imagem maior que isto (arquivo) não entra (fotos de câmera ficam bem abaixo).
 const MAX_IMAGE_BYTES: u64 = 200 * 1024 * 1024;
+/// Mais pixels que isto não são decodificados (imagem) nem renderizados (exportar): 100 Mpx RGB
+/// já são 300 MB. Arquivo pequeno pode declarar dimensões enormes (bomba de descompressão).
+const MAX_PIXELS: u64 = 100_000_000;
 /// Maior lado de página que o PDF aceita (200 polegadas).
 const MAX_PAGE_PT: f32 = 14_400.0;
 
@@ -28,7 +31,15 @@ fn open_image(path: &Path) -> Result<Image> {
     let utf8 = path
         .to_str()
         .ok_or_else(|| refused("caminho não é UTF-8 válido"))?;
-    Image::from_file(utf8).map_err(|_| refused(format!("{name}: não foi possível ler a imagem")))
+    let img = Image::from_file(utf8)
+        .map_err(|_| refused(format!("{name}: não foi possível ler a imagem")))?;
+    // só o cabeçalho foi lido até aqui: as dimensões são conferidas antes de decodificar
+    if u64::from(img.width()) * u64::from(img.height()) > MAX_PIXELS {
+        return Err(refused(format!(
+            "{name}: imagem grande demais (mais de 100 megapixels)"
+        )));
+    }
+    Ok(img)
 }
 
 /// Cria um PDF com uma página por imagem, do tamanho da imagem pela resolução dela (sem
@@ -144,6 +155,14 @@ impl PdfDoc {
                 let mut out = Vec::new();
                 for p in 0..self.page_count()? {
                     let page = self.load(p)?;
+                    let b = page.bounds()?;
+                    let px = f64::from((b.x1 - b.x0) * scale) * f64::from((b.y1 - b.y0) * scale);
+                    if px > MAX_PIXELS as f64 {
+                        return Err(refused(format!(
+                            "a página {} ficaria grande demais nessa resolução: escolha uma menor",
+                            p + 1
+                        )));
+                    }
                     let pix = page.to_pixmap(
                         &Matrix::new_scale(scale, scale),
                         &Colorspace::device_rgb(),
