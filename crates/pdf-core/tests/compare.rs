@@ -282,3 +282,31 @@ fn formatting_only_when_enabled() {
     assert_eq!(f.new_rects.len(), 1);
     assert!(f.description.contains("Helvetica 12") && f.description.contains("Helvetica-Bold 12"));
 }
+
+/// Imagem de 5000×5000 pixels num fluxo comprimido pequeno (bomba de descompressão): a comparação
+/// não a decodifica e termina.
+#[test]
+fn decompression_bomb_is_not_decoded() {
+    let dir = tempfile::tempdir().unwrap();
+    let ops = "q 100 0 0 100 300 300 cm /Im0 Do Q";
+    let mut raw = format!(
+        "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n\
+         2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n\
+         3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</XObject<</Im0 5 0 R>>>>/Contents 4 0 R>>endobj\n\
+         4 0 obj<</Length {}>>stream\n{ops}\nendstream endobj\n\
+         5 0 obj<</Type/XObject/Subtype/Image/Width 5000/Height 5000/ColorSpace/DeviceGray/BitsPerComponent 8/Length {}>>stream\n",
+        ops.len() + 1,
+        5000 * 5000
+    )
+    .into_bytes();
+    raw.extend(std::iter::repeat_n(0u8, 5000 * 5000));
+    raw.extend_from_slice(b"\nendstream endobj\ntrailer<</Root 1 0 R>>\n");
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&raw).unwrap();
+    let path = dir.path().join("bomba.pdf");
+    let mut w = mupdf::pdf::PdfWriteOptions::default();
+    w.set_compress(true);
+    doc.save_with_options(path.to_str().unwrap(), w).unwrap();
+    assert!(std::fs::metadata(&path).unwrap().len() < 200_000);
+    let c = run(&opts(&path, &path));
+    assert!(c.changes.is_empty());
+}

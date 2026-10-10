@@ -17,6 +17,9 @@ const MAX_PAGES: usize = 20_000;
 const DIFF_DEADLINE: Duration = Duration::from_secs(10);
 /// Alinhamento ótimo das páginas só até este tamanho de tabela; acima, em sequência.
 const MAX_ALIGN_CELLS: usize = 4_000_000;
+/// Imagens maiores que isto (bytes dos pixels) não são decodificadas: são identificadas só pelas
+/// dimensões (um PDF com uma imagem enorme e bem comprimida esgotaria a memória).
+const MAX_DECODED_BYTES: u64 = 16_000_000;
 /// Máximo de caracteres de cada trecho citado na descrição de uma alteração.
 const QUOTE_CHARS: usize = 140;
 
@@ -165,6 +168,14 @@ fn union(a: PdfRect, b: PdfRect) -> PdfRect {
     }
 }
 
+/// Se a imagem (largura × altura × componentes) cabe no limite para ser decodificada.
+fn decodable(width: u32, height: u32, components: u8) -> bool {
+    u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(u64::from(components.max(1)))
+        <= MAX_DECODED_BYTES
+}
+
 /// Lê as palavras das páginas escolhidas de um arquivo.
 pub(crate) fn read_side(
     input: &CompareInput,
@@ -209,11 +220,13 @@ pub(crate) fn read_side(
         for block in tp.blocks() {
             if block.r#type() == TextBlockType::Image {
                 if let Some(img) = block.image() {
-                    let pix = img.to_pixmap()?;
                     let mut h = Md5::new();
-                    h.update(pix.width().to_le_bytes());
-                    h.update(pix.height().to_le_bytes());
-                    h.update(pix.samples());
+                    h.update(img.width().to_le_bytes());
+                    h.update(img.height().to_le_bytes());
+                    h.update([img.n()]);
+                    if decodable(img.width(), img.height(), img.n()) {
+                        h.update(img.to_pixmap()?.samples());
+                    }
                     found.push(ImageAt {
                         hash: h.finalize().into(),
                         rect: block.bounds().into(),
@@ -607,6 +620,13 @@ mod tests {
         assert_eq!(pairs.len(), n + 2000);
         assert_eq!(pairs[0], (Some(0), Some(0)));
         assert_eq!(pairs[n], (None, Some(n)));
+    }
+
+    #[test]
+    fn huge_images_are_not_decoded() {
+        assert!(decodable(2000, 2000, 3));
+        assert!(!decodable(5000, 5000, 1));
+        assert!(!decodable(u32::MAX, u32::MAX, 4));
     }
 
     #[test]
