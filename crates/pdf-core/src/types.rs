@@ -93,6 +93,8 @@ pub enum AnnotKind {
     Ellipse,
     Line,
     Stamp,
+    /// Marca de redação (a aplicar).
+    Redact,
     /// Tipo que não criamos (de outro programa): selecionável e apagável.
     #[default]
     Other,
@@ -180,7 +182,11 @@ impl AnnotInfo {
     pub fn movable(&self) -> bool {
         !matches!(
             self.kind,
-            AnnotKind::Highlight | AnnotKind::Underline | AnnotKind::StrikeOut | AnnotKind::Other
+            AnnotKind::Highlight
+                | AnnotKind::Underline
+                | AnnotKind::StrikeOut
+                | AnnotKind::Redact
+                | AnnotKind::Other
         )
     }
 
@@ -265,6 +271,11 @@ pub enum NewAnnot {
         art: SignatureArt,
         initials: bool,
     },
+    /// Marca de redação (Redigir): sobre o texto (uma caixa por linha) ou uma área.
+    Redact {
+        page: i32,
+        rects: Vec<PdfRect>,
+    },
     /// Carimbo: título e, nos dinâmicos, a linha com nome, data e hora.
     Stamp {
         page: i32,
@@ -332,6 +343,7 @@ impl NewAnnot {
             | Self::Signature { page, .. }
             | Self::FillText { page, .. }
             | Self::Mark { page, .. }
+            | Self::Redact { page, .. }
             | Self::Stamp { page, .. } => *page,
         }
     }
@@ -342,6 +354,7 @@ impl NewAnnot {
             Self::Highlight { rects, .. }
             | Self::Underline { rects, .. }
             | Self::StrikeOut { rects, .. } => rects.is_empty(),
+            Self::Redact { rects, .. } => rects.iter().all(|r| r.width() < 2.0 || r.height() < 2.0),
             Self::Note { text, .. } => text.trim().is_empty(),
             Self::Ink { strokes, .. } => strokes.iter().all(|s| s.len() < 2),
             Self::TextBox { text, .. } | Self::FillText { text, .. } => text.trim().is_empty(),

@@ -378,6 +378,7 @@ fn add_one(doc: &mut PdfDocument, page: &mut PdfPage, a: &NewAnnot) -> Result<Pd
         NewAnnot::Highlight { rects, .. } => page.add_highlight_annotation(quads(rects)?)?,
         NewAnnot::Underline { rects, .. } => page.add_underline_annotation(quads(rects)?)?,
         NewAnnot::StrikeOut { rects, .. } => page.add_strikeout_annotation(quads(rects)?)?,
+        NewAnnot::Redact { rects, .. } => page.add_redact_annotation(quads(rects)?)?,
         NewAnnot::Note { at, text, .. } => {
             page.add_text_annotation(Rect::new(at.0, at.1, at.0 + 24.0, at.1 + 24.0), text)?
         }
@@ -583,6 +584,7 @@ fn kind_of(t: PdfAnnotationType) -> AnnotKind {
         PdfAnnotationType::Circle => AnnotKind::Ellipse,
         PdfAnnotationType::Line => AnnotKind::Line,
         PdfAnnotationType::Stamp => AnnotKind::Stamp,
+        PdfAnnotationType::Redact => AnnotKind::Redact,
         _ => AnnotKind::Other,
     }
 }

@@ -135,6 +135,12 @@ pub enum Request {
         config: Box<crate::PaginationConfig>,
         replace: bool,
     },
+    /// Redigir: procura frases ou padrões no documento.
+    FindRedactions(crate::RedactQuery),
+    /// Redigir: aplica todas as marcas de redação (permanente).
+    ApplyRedactions(crate::RedactLook),
+    /// Limpar documento (remover informações ocultas).
+    Sanitize(crate::SanitizeOptions),
     /// Tira as marcas d'água (ou os cabeçalhos e rodapés) de todas as páginas.
     RemovePagination(crate::Pagination),
     /// Há marca d'água (ou cabeçalho e rodapé)? E as escolhas gravadas, para o Atualizar.
@@ -278,6 +284,8 @@ pub enum Response {
         page: i32,
         images: Vec<crate::PageImage>,
     },
+    /// Trechos achados pelo Localizar do Redigir.
+    RedactHits(Vec<crate::RedactHit>),
     /// Resposta ao `PaginationState`.
     PaginationState {
         kind: crate::Pagination,
@@ -510,6 +518,18 @@ impl State {
                 d.add_pagination(&config, replace)
                     .map(|()| Changed::Document)
             }),
+            Request::FindRedactions(query) => {
+                send(match self.with_doc(|d| d.find_redactions(&query)) {
+                    Ok(hits) => Response::RedactHits(hits),
+                    Err(e) => Response::EditFailed(e.to_string()),
+                })
+            }
+            Request::ApplyRedactions(look) => self.edit(send, |d| {
+                d.apply_redactions(&look).map(|_| Changed::Document)
+            }),
+            Request::Sanitize(opts) => {
+                self.edit(send, |d| d.sanitize(&opts).map(|()| Changed::Document))
+            }
             Request::RemovePagination(kind) => self.edit(send, |d| {
                 d.remove_pagination(kind).map(|_| Changed::Document)
             }),
