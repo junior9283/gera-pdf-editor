@@ -424,7 +424,17 @@ impl GeraApp {
                 .show(ui, |ui| doc.side_panel(ui, p));
             prefs.left_width = r.response.rect.width();
         }
-        let tool_id = prefs.tools_panel.then(|| {
+        let comments = doc.comment_tools;
+        if comments {
+            // com Comentar ligado, a direita mostra o painel Comentários (como no Acrobat)
+            let r = egui::Panel::right("painel-comentarios")
+                .resizable(true)
+                .default_size(prefs.tools_width.max(280.0))
+                .size_range(MIN_PANEL..=MAX_PANEL)
+                .show(ui, |ui| doc.comments_panel(ui));
+            prefs.tools_width = r.response.rect.width();
+        }
+        let tool_id = (prefs.tools_panel && !comments).then(|| {
             let r = egui::Panel::right("painel-ferramentas")
                 .resizable(true)
                 .default_size(prefs.tools_width)

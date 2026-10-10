@@ -91,6 +91,24 @@ pub type Segment = ((f32, f32), (f32, f32));
 /// Cor dos comentários novos (contorno das formas e linhas, texto da caixa), como no Acrobat.
 pub const COMMENT_RED: [f32; 3] = [1.0, 0.0, 0.0];
 
+/// Modelo de estado de um comentário (como o Acrobat grava): revisão ou visto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateModel {
+    /// Revisão: /State Accepted, Rejected, Cancelled, Completed ou None.
+    Review,
+    /// Visto: /State Marked ou Unmarked.
+    Marked,
+}
+
+impl StateModel {
+    pub fn pdf_name(self) -> &'static str {
+        match self {
+            Self::Review => "Review",
+            Self::Marked => "Marked",
+        }
+    }
+}
+
 /// Ponta de uma linha ou seta.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineEnd {
@@ -129,10 +147,19 @@ pub struct AnnotInfo {
     pub fill: Option<[f32; 3]>,
     /// Pontos de início e fim (linha e seta).
     pub line: Option<Segment>,
+    /// Linha com ponta de seta.
+    pub arrow: bool,
     /// Tamanho e cor do texto (caixa de texto).
     pub font: Option<(f32, [f32; 3])>,
     /// Autor (/T); vazio quando não há.
     pub author: String,
+    /// Comentário de que esta é resposta (ou status): id do pai (/IRT).
+    pub reply_to: Option<i32>,
+    /// Anotação de status: modelo e estado (nome PDF, ex. "Accepted").
+    pub state: Option<(StateModel, String)>,
+    /// Datas cruas do PDF (`D:AAAAMMDDhhmmss…`): criação e última modificação.
+    pub created: String,
+    pub modified: String,
 }
 
 impl AnnotInfo {
@@ -142,6 +169,11 @@ impl AnnotInfo {
             self.kind,
             AnnotKind::Highlight | AnnotKind::Underline | AnnotKind::StrikeOut | AnnotKind::Other
         )
+    }
+
+    /// Resposta ou status de outro comentário (fica no painel Comentários, não na página).
+    pub fn is_reply(&self) -> bool {
+        self.reply_to.is_some()
     }
 
     /// Tem alças nos cantos para mudar de tamanho (a linha tem alças nas pontas).
@@ -335,6 +367,19 @@ pub enum AnnotOp {
     Delete {
         page: i32,
         id: i32,
+    },
+    /// Responde ao comentário `parent` (resposta na conversa, como no Acrobat).
+    Reply {
+        page: i32,
+        parent: i32,
+        text: String,
+    },
+    /// Define o status (revisão) ou o visto do comentário `parent`; `state` é o nome PDF.
+    SetState {
+        page: i32,
+        parent: i32,
+        model: StateModel,
+        state: String,
     },
     /// Leva uma ponta da linha/seta para `to`.
     MoveLinePoint {

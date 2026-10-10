@@ -2,12 +2,14 @@
 pub mod annot_geom;
 pub mod cache;
 pub mod close;
+pub mod comments;
 pub mod layout;
 pub mod nav;
 pub mod pdf_date;
 pub mod prefs;
 pub mod print;
 pub mod recents;
+pub mod review;
 pub mod stamps;
 pub mod store;
 pub mod tabs;

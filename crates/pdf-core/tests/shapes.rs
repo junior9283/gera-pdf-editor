@@ -51,6 +51,7 @@ fn shapes_and_lines_are_created_and_read_back() {
         assert_eq!(a.fill, None);
         if kind == AnnotKind::Line {
             assert_eq!(a.line, Some(((100.0, 100.0), (300.0, 200.0))));
+            assert!(a.arrow, "seta");
         }
     }
 }

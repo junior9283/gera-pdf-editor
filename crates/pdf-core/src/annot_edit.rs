@@ -7,7 +7,9 @@ use crate::doc::{annot_id, rgb, rgb_of};
 use crate::error::{PdfError, Result};
 use crate::types::{PdfRect, Segment};
 use mupdf::color::AnnotationColor;
-use mupdf::pdf::{AnnotationFlags, PdfAnnotation, PdfAnnotationType, PdfDocument, PdfPage};
+use mupdf::pdf::{
+    AnnotationFlags, PdfAnnotation, PdfAnnotationType, PdfDocument, PdfObject, PdfPage,
+};
 use mupdf::{Point, Rect};
 use std::collections::HashSet;
 
@@ -28,11 +30,7 @@ pub(crate) enum ColorEdit {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Edit {
     /// Esconde (apagar, desfazer criar) ou mostra de novo.
-    Visibility {
-        page: i32,
-        id: i32,
-        hidden: bool,
-    },
+    Visibility { page: i32, id: i32, hidden: bool },
     /// Retângulo e, para desenho, os traços (mover e redimensionar).
     Geometry {
         page: i32,
@@ -47,10 +45,12 @@ pub(crate) enum Edit {
         opacity: f32,
         width: Option<f32>,
     },
+    /// Texto e data de modificação (`None` em `modified`: sem /M).
     Contents {
         page: i32,
         id: i32,
         text: String,
+        modified: Option<String>,
     },
     /// Pontos da linha/seta (mover e puxar uma ponta).
     LinePoints {
@@ -188,6 +188,35 @@ fn geometry(a: &PdfAnnotation) -> Result<(PdfRect, Option<Strokes>)> {
     }
 }
 
+/// Comentário de que `a` é resposta ou status (/IRT), como o Acrobat: só com /RT ausente ou /R
+/// (/RT /Group é uma anotação visível agrupada, não resposta).
+pub(crate) fn reply_of(a: &PdfAnnotation) -> Result<Option<i32>> {
+    let parent = match a.object().get_dict("IRT")? {
+        Some(o) if o.is_indirect()? => o.as_indirect()?,
+        _ => return Ok(None),
+    };
+    Ok(match name_entry(a, "RT")?.as_deref() {
+        None | Some("R") => Some(parent),
+        Some(_) => None,
+    })
+}
+
+/// Texto de uma entrada do dicionário da anotação (`None` se não existe).
+pub(crate) fn string_entry(a: &PdfAnnotation, key: &str) -> Result<Option<String>> {
+    Ok(match a.object().get_dict(key)? {
+        Some(o) => Some(o.as_string()?),
+        None => None,
+    })
+}
+
+/// Nome PDF de uma entrada do dicionário (`None` se não existe).
+pub(crate) fn name_entry(a: &PdfAnnotation, key: &str) -> Result<Option<String>> {
+    Ok(match a.object().get_dict(key)? {
+        Some(o) if o.is_name()? => Some(String::from_utf8_lossy(&o.as_name()?).into_owned()),
+        _ => None,
+    })
+}
+
 /// Caixa de texto `id`: retângulo, texto, tamanho da fonte e borda; `None` se não é caixa de texto.
 pub(crate) fn text_box_of(
     doc: &PdfDocument,
@@ -259,9 +288,13 @@ pub(crate) fn apply_edit(
     let inverse = match edit {
         Edit::Batch(_) => unreachable!("tratado acima"),
         Edit::Visibility { hidden: hide, .. } => {
-            let mut flags = a.flags()?;
-            flags.set(AnnotationFlags::IS_HIDDEN, hide);
-            a.set_flags(flags)?;
+            // respostas e status já são invisíveis na página (NoView ou Hidden, como o Acrobat
+            // grava): apagar só os tira da lista; mexer na flag os faria aparecer ao desfazer
+            if reply_of(&a)?.is_none() {
+                let mut flags = a.flags()?;
+                flags.set(AnnotationFlags::IS_HIDDEN, hide);
+                a.set_flags(flags)?;
+            }
             if hide {
                 hidden.insert((page, id));
             } else {
@@ -356,13 +389,19 @@ pub(crate) fn apply_edit(
                 color: old,
             }
         }
-        Edit::Contents { text, .. } => {
+        Edit::Contents { text, modified, .. } => {
             let old = a.contents()?.unwrap_or_default().to_owned();
+            let old_modified = string_entry(&a, "M")?;
             a.set_contents(&text)?;
+            match &modified {
+                Some(m) => a.object().dict_put("M", PdfObject::new_string(m)?)?,
+                None => a.object().dict_delete("M")?,
+            }
             Edit::Contents {
                 page,
                 id,
                 text: old,
+                modified: old_modified,
             }
         }
     };
