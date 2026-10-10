@@ -85,7 +85,7 @@ interface) e revisão de código independente antes de entrar na `main`.
 | v4a | Editar PDF: imagens | ✅ 0.8.0 |
 | v4b | Editar PDF: texto | ✅ 0.9.0 |
 | v2c | Marca d'água, cabeçalho e rodapé, Bates | ✅ 0.10.0 |
-| v5e | Redigir e limpar documento | ✅ 0.11.1 |
+| v5e | Redigir e limpar documento | ✅ 0.11.2 |
 | — | Comparar arquivos | 🚧 próxima (rumo à 1.0.0) |
 
 O histórico de cada versão está no [CHANGELOG](CHANGELOG.md) e o plano detalhado no [ROADMAP](ROADMAP.md).

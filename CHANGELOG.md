@@ -8,6 +8,14 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 - Comparar arquivos (rumo à 1.0.0).
 
+## [0.11.2] — 2026-10-10 · Redação de desenhos
+
+### Corrigido
+- Por padrão, todo desenho que passa sob a marca (texto convertido em curvas, assinatura,
+  traços) sai inteiro ao aplicar a redação — antes, o que não estava totalmente coberto ficava
+  no arquivo, escondido sob a caixa. Nas Propriedades há a opção de preservar desenhos que só
+  tocam a marca (bordas de tabela).
+
 ## [0.11.1] — 2026-10-10 · Correções de segurança da redação
 
 ### Corrigido
@@ -114,7 +122,8 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 ### Adicionado
 - Visualizador leve: abrir, rolar, zoom, miniaturas, busca, destaque, sublinhado, notas e desenho.
 
-[Não lançado]: https://github.com/junior9283/gera-pdf-editor/compare/v0.11.1...HEAD
+[Não lançado]: https://github.com/junior9283/gera-pdf-editor/compare/v0.11.2...HEAD
+[0.11.2]: https://github.com/junior9283/gera-pdf-editor/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/junior9283/gera-pdf-editor/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/junior9283/gera-pdf-editor/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/junior9283/gera-pdf-editor/compare/v0.9.0...v0.10.0
