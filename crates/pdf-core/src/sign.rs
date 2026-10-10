@@ -535,24 +535,20 @@ fn signed_details(
     Some((get("M")?, get("Reason")?, get("Location")?))
 }
 
-/// Conteúdo de uma página que conta para "alterado": os fluxos de /Contents, /Rotate e /MediaBox.
+/// O que a página mostra, sem anotações nem campos: a imagem renderizada (meia escala). Comparar a
+/// imagem pega também a troca de um recurso (fonte, imagem, formulário) com o /Contents igual.
 fn page_fingerprint(doc: &mupdf::pdf::PdfDocument, page: i32) -> Option<Vec<u8>> {
-    let obj = doc.find_page(page).ok()?;
-    let mut out = Vec::new();
-    match obj.get_dict("Contents").ok()? {
-        Some(c) if c.is_array().ok()? => {
-            for i in 0..c.len().ok()? as i32 {
-                out.extend(c.get_array(i).ok()??.read_stream().ok()?);
-            }
-        }
-        Some(c) => out.extend(c.read_stream().ok()?),
-        None => {}
-    }
-    for key in ["Rotate", "MediaBox"] {
-        if let Some(v) = obj.get_dict_inheritable(key).ok()? {
-            out.extend(v.to_string().into_bytes());
-        }
-    }
+    let page = doc.load_page(page).ok()?;
+    let pix = page
+        .to_pixmap(
+            &mupdf::Matrix::new_scale(0.5, 0.5),
+            &mupdf::Colorspace::device_gray(),
+            false,
+            false, // sem anotações: elas são alterações permitidas
+        )
+        .ok()?;
+    let mut out = format!("{}x{}", pix.width(), pix.height()).into_bytes();
+    out.extend(sha2::Sha256::digest(pix.samples()));
     Some(out)
 }
 

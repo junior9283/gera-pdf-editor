@@ -373,3 +373,37 @@ fn the_certificate_was_valid_when_signing() {
     let s = PdfDoc::open(&path, None).unwrap().signatures().unwrap();
     assert!(s[0].cert_valid_at_signing);
 }
+
+#[test]
+fn swapping_a_page_resource_after_signing_is_not_permitted() {
+    // o /Contents fica igual, mas a fonte usada pela página é trocada numa revisão posterior
+    let (_d, path) = signed(0);
+    let doc = mupdf::pdf::PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let page = doc.find_page(0).unwrap();
+    let mut font = page
+        .get_dict_inheritable("Resources")
+        .unwrap()
+        .unwrap()
+        .get_dict("Font")
+        .unwrap()
+        .unwrap()
+        .get_dict("F1")
+        .unwrap()
+        .unwrap();
+    font.dict_put(
+        "BaseFont",
+        mupdf::pdf::PdfObject::new_name("Courier").unwrap(),
+    )
+    .unwrap();
+    let mut opts = mupdf::pdf::PdfWriteOptions::default();
+    opts.set_incremental(true);
+    let mut out = Vec::new();
+    doc.write_to_with_options(&mut out, opts).unwrap();
+    std::fs::write(&path, out).unwrap();
+    let s = PdfDoc::open(&path, None).unwrap().signatures().unwrap();
+    assert!(s[0].modified_after);
+    assert!(
+        !s[0].changes_permitted,
+        "a página mostra outra coisa: não é alteração permitida"
+    );
+}
