@@ -23,7 +23,7 @@ cp crates/pdf-core/fonts/OFL.txt "$DOCDIR/OFL-GreatVibes.txt"
 # dados de idioma do OCR (português e inglês): o app os procura em $APPDIR/usr/share/tessdata
 mkdir -p "$APPDIR/usr/share/tessdata"
 for lang in por eng; do
-  for dir in /usr/share/tesseract/tessdata /usr/share/tessdata /usr/share/tesseract-ocr/5/tessdata; do
+  for dir in /usr/share/tesseract/tessdata /usr/share/tessdata /usr/share/tesseract-ocr/*/tessdata; do
     if [ -f "$dir/$lang.traineddata" ]; then cp "$dir/$lang.traineddata" "$APPDIR/usr/share/tessdata/"; break; fi
   done
   if [ ! -f "$APPDIR/usr/share/tessdata/$lang.traineddata" ]; then
