@@ -1,0 +1,20 @@
+name: Sugerir uma funcionalidade
+description: Algo que o Acrobat Pro faz e o Gera PDF Editor ainda não
+labels: [melhoria]
+body:
+  - type: textarea
+    id: oque
+    attributes:
+      label: O que você gostaria de fazer
+    validations:
+      required: true
+  - type: textarea
+    id: acrobat
+    attributes:
+      label: Como funciona no Acrobat (se souber)
+      description: Menu, ferramenta, atalho e comportamento.
+  - type: textarea
+    id: contexto
+    attributes:
+      label: Contexto
+      description: Por que é importante para você.

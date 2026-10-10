@@ -230,10 +230,7 @@ fn raw_page(dir: &std::path::Path, content: &str) -> std::path::PathBuf {
 #[test]
 fn compact_content_without_spaces_is_not_corrupted() {
     let dir = tempfile::tempdir().unwrap();
-    let path = raw_page(
-        dir.path(),
-        "q 200 0 0 150 72 500 cm/Im0 Do 0 g Q",
-    );
+    let path = raw_page(dir.path(), "q 200 0 0 150 72 500 cm/Im0 Do 0 g Q");
     let mut d = PdfDoc::open(&path, None).unwrap();
     d.edit_image(0, "Im0", ImageEdit::Move { dx: 10.0, dy: 0.0 })
         .unwrap();

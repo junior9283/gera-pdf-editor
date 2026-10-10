@@ -651,7 +651,8 @@ mod tests {
 
     #[test]
     fn own_q_cm_do_q_blocks_are_found() {
-        let content = b"q 1 0 0 1 5 5 cm q 2 0 0 2 0 0 cm /A Do Q q 2 0 0 2 0 0 cm 0 g /B Do Q /C Do";
+        let content =
+            b"q 1 0 0 1 5 5 cm q 2 0 0 2 0 0 cm /A Do Q q 2 0 0 2 0 0 cm 0 g /B Do Q /C Do";
         let draws = scan(content).draws;
         let (range, before) = draws[0].block.clone().expect("bloco de A");
         assert_eq!(&content[range], b"q 2 0 0 2 0 0 cm /A Do Q");

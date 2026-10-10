@@ -1,0 +1,28 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  appimage:
+    runs-on: ubuntu-22.04 # glibc mais antiga: o AppImage roda em mais distribuições
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependências do sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libfontconfig1-dev libfreetype-dev \
+            tesseract-ocr-por tesseract-ocr-eng
+      - uses: dtolnay/rust-toolchain@stable
+      - run: packaging/build-appimage.sh
+      - name: Publicar o AppImage na release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "Veja o CHANGELOG.md."
+          gh release upload "$GITHUB_REF_NAME" dist/Gera_PDF_Editor-x86_64.AppImage --clobber

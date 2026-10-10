@@ -1,0 +1,35 @@
+name: Relatar um bug
+description: Algo não funciona como deveria
+labels: [bug]
+body:
+  - type: input
+    id: versao
+    attributes:
+      label: Versão
+      description: Ajuda → Sobre (ex.: 0.8.0) e forma de instalação (AppImage, compilado)
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distribuição Linux
+      placeholder: Fedora 44, Ubuntu 24.04, …
+  - type: textarea
+    id: passos
+    attributes:
+      label: Passos para reproduzir
+      placeholder: "1. Abrir o arquivo…\n2. Clicar em…"
+    validations:
+      required: true
+  - type: textarea
+    id: esperado
+    attributes:
+      label: O que esperava e o que aconteceu
+      description: Se o Acrobat faz diferente, conte como ele faz.
+    validations:
+      required: true
+  - type: textarea
+    id: anexos
+    attributes:
+      label: Arquivo de exemplo, capturas de tela ou registro
+      description: Anexe um PDF que reproduz o problema, **sem dados pessoais**.

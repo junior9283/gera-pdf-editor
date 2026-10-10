@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Falha de segurança
+    url: https://github.com/junior9283/gera-pdf-editor/security/advisories/new
+    about: Relate vulnerabilidades em sigilo, não em issue pública.
