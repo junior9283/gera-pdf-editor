@@ -267,6 +267,9 @@ struct Draw {
     name: Vec<u8>,
     range: std::ops::Range<usize>,
     ctm: Matrix,
+    /// Se o `Do` está sozinho num `q … cm /Nome Do Q`: a faixa do bloco e a matriz antes dele —
+    /// editar regrava o bloco em vez de aninhar mais um `q`.
+    block: Option<(std::ops::Range<usize>, Matrix)>,
 }
 
 /// O conteúdo lido: os `Do` e se há imagem embutida.
@@ -296,16 +299,39 @@ fn scan(content: &[u8]) -> Scan {
     let mut ctm = Matrix::IDENTITY;
     let mut stack = Vec::new();
     let mut operands: Vec<(usize, Tok)> = Vec::new();
-    let mut draws = Vec::new();
+    let mut draws: Vec<Draw> = Vec::new();
+    // `q` sem operandos (início e matriz de antes) e se já veio o `cm` logo depois dele
+    let mut open: Option<(usize, Matrix, bool)> = None;
     while let Some((start, tok)) = lx.next() {
         let Tok::Op(op) = tok else {
             operands.push((start, tok));
             continue;
         };
+        let prev = open.take();
         match op {
-            b"q" => stack.push(ctm.clone()),
-            b"Q" => ctm = stack.pop().unwrap_or(Matrix::IDENTITY),
+            b"q" => {
+                if operands.is_empty() {
+                    open = Some((start, ctm.clone(), false));
+                }
+                stack.push(ctm.clone())
+            }
+            b"Q" => {
+                ctm = stack.pop().unwrap_or(Matrix::IDENTITY);
+                // fecha `q cm Do` (marcado no Do como bloco em aberto)
+                if let (Some((q, before, true)), true, Some(d)) =
+                    (prev, operands.is_empty(), draws.last_mut())
+                {
+                    if d.range.end <= start && d.range.start > q && d.block.is_none() {
+                        d.block = Some((q..lx.i, before));
+                    }
+                }
+            }
             b"cm" => {
+                if let Some((q, before, false)) = prev {
+                    if operands.len() == 6 {
+                        open = Some((q, before, true));
+                    }
+                }
                 let n: Vec<f32> = operands
                     .iter()
                     .rev()
@@ -325,7 +351,12 @@ fn scan(content: &[u8]) -> Scan {
                         name: decode_name(name),
                         range: *at..lx.i,
                         ctm: ctm.clone(),
+                        block: None,
                     });
+                    // ainda pode fechar um bloco: o Q seguinte decide
+                    if operands.len() == 1 {
+                        open = prev.filter(|p| p.2);
+                    }
                 }
             }
             _ => {}
@@ -423,9 +454,10 @@ fn num(v: f32) -> String {
     }
 }
 
+/// Com espaço dos dois lados: o vizinho pode estar colado (`cm/Im0 Do`, válido no PDF).
 fn draw_ops(x: &Matrix, name: &str) -> String {
     let m = [x.a, x.b, x.c, x.d, x.e, x.f].map(num).join(" ");
-    format!("q {m} cm {} Do Q", encode_name(name))
+    format!(" q {m} cm {} Do Q ", encode_name(name))
 }
 
 impl PdfDoc {
@@ -563,17 +595,22 @@ impl PdfDoc {
                 (Some(upright_in(&up, &target)), new_name)
             }
         };
+        // num bloco `q cm Do Q` próprio, ele todo é regravado; senão, o Do vira um
+        let (range, base) = draw
+            .block
+            .clone()
+            .unwrap_or((draw.range.clone(), draw.ctm.clone()));
         let ops = match new_screen {
             None => String::new(),
-            // a matriz nova, relativa à que já vale onde o Do está
+            // a matriz nova, relativa à que já vale onde o bloco (ou o Do) está
             Some(s) => {
-                let x = mul(&mul(&s, &invert(&to_screen)?), &invert(&draw.ctm)?);
+                let x = mul(&mul(&s, &invert(&to_screen)?), &invert(&base)?);
                 draw_ops(&x, &new_name)
             }
         };
-        let mut out = content[..draw.range.start].to_vec();
+        let mut out = content[..range.start].to_vec();
         out.extend(ops.as_bytes());
-        out.extend(&content[draw.range.end..]);
+        out.extend(&content[range.end..]);
         let stream = self
             .inner
             .add_stream(&Buffer::from_bytes(&out)?, None, false)?;
@@ -610,6 +647,16 @@ mod tests {
         assert_eq!(e(0), (2.0, 5.0));
         assert_eq!(e(1), (1.0, 5.0));
         assert_eq!(e(2), (1.0, 0.0));
+    }
+
+    #[test]
+    fn own_q_cm_do_q_blocks_are_found() {
+        let content = b"q 1 0 0 1 5 5 cm q 2 0 0 2 0 0 cm /A Do Q q 2 0 0 2 0 0 cm 0 g /B Do Q /C Do";
+        let draws = scan(content).draws;
+        let (range, before) = draws[0].block.clone().expect("bloco de A");
+        assert_eq!(&content[range], b"q 2 0 0 2 0 0 cm /A Do Q");
+        assert_eq!(before.e, 5.0);
+        assert!(draws[1].block.is_none() && draws[2].block.is_none());
     }
 
     #[test]

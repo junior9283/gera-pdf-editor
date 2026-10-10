@@ -209,6 +209,58 @@ fn inherited_and_split(dir: &std::path::Path) -> std::path::PathBuf {
     path
 }
 
+/// Página com o conteúdo `content` e a imagem 1×1 Im0.
+fn raw_page(dir: &std::path::Path, content: &str) -> std::path::PathBuf {
+    let objs = [
+        "1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n".to_string(),
+        "2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n".into(),
+        "3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</XObject<</Im0 5 0 R>>>>/Contents 4 0 R>>endobj\n".into(),
+        format!("4 0 obj<</Length {}>>stream\n{content}\nendstream endobj\n", content.len() + 1),
+        "5 0 obj<</Type/XObject/Subtype/Image/Width 1/Height 1/ColorSpace/DeviceGray/BitsPerComponent 8/Length 1>>stream\n0\nendstream endobj\n".into(),
+    ];
+    let path = dir.join("cru.pdf");
+    std::fs::write(
+        &path,
+        format!("%PDF-1.4\n{}trailer<</Root 1 0 R>>\n", objs.concat()),
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn compact_content_without_spaces_is_not_corrupted() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = raw_page(
+        dir.path(),
+        "q 200 0 0 150 72 500 cm/Im0 Do 0 g Q",
+    );
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    d.edit_image(0, "Im0", ImageEdit::Move { dx: 10.0, dy: 0.0 })
+        .unwrap();
+    let r = d.page_images(0).unwrap()[0].rect;
+    assert!(
+        close(r.x0, 82.0) && close(r.width(), 200.0) && close(r.height(), 150.0),
+        "{r:?}"
+    );
+}
+
+#[test]
+fn repeated_edits_do_not_nest_graphics_states() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = raw_page(dir.path(), "q 200 0 0 150 72 500 cm /Im0 Do Q");
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    for _ in 0..40 {
+        d.edit_image(0, "Im0", ImageEdit::Move { dx: 1.0, dy: 1.0 })
+            .unwrap();
+    }
+    let r = d.page_images(0).unwrap()[0].rect;
+    assert!(close(r.x0, 112.0) && close(r.y0, 182.0), "{r:?}");
+    d.save(&path).unwrap();
+    let raw = std::fs::read(&path).unwrap();
+    let qs = raw.windows(2).filter(|w| w == b"q ").count();
+    assert!(qs <= 2, "{qs} níveis de q");
+}
+
 #[test]
 fn split_content_inherited_resources_and_form_images() {
     let dir = tempfile::tempdir().unwrap();
