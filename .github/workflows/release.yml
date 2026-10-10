@@ -3,6 +3,11 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag da versão (ex.: v0.8.0)
+        required: true
 
 permissions:
   contents: write
@@ -12,6 +17,8 @@ jobs:
     runs-on: ubuntu-22.04 # glibc mais antiga: o AppImage roda em mais distribuições
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - name: Dependências do sistema
         run: |
           sudo apt-get update
@@ -22,7 +29,8 @@ jobs:
       - name: Publicar o AppImage na release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "Veja o CHANGELOG.md."
-          gh release upload "$GITHUB_REF_NAME" dist/Gera_PDF_Editor-x86_64.AppImage --clobber
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title "$TAG" --notes "Veja o CHANGELOG.md."
+          gh release upload "$TAG" dist/Gera_PDF_Editor-x86_64.AppImage --clobber
