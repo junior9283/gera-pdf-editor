@@ -45,6 +45,11 @@ proteger, comprimir) → v4 (editar texto e imagens).
 4. Merge **local** na `main` (nunca `git push` sem pedido explícito), regerar o AppImage
    (`packaging/build-appimage.sh`) e atualizar a página de andamento:
    https://claude.ai/artifact/URM9Yaxf5KFppzWzXNpioc
+5. Publicar no GitHub (pedido do dono em 10/10/2026: projeto open source público em
+   https://github.com/junior9283/gera-pdf-editor): subir a versão 0.x no `Cargo.toml`, atualizar
+   `CHANGELOG.md`, `ROADMAP.md` e a tabela Andamento do `README.md`, criar a tag anotada `vX.Y.Z` e dar
+   push só da `main` e dessa tag (o workflow Release gera o AppImage). Nunca dar push em outros branches
+   (em especial `backup/historico-original`, que guarda o e-mail pessoal).
 
 ## Regras gerais do dono (valem aqui também)
 
