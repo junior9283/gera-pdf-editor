@@ -16,7 +16,7 @@ const PAD: f32 = 14.0;
 const DPI: f32 = 300.0;
 
 /// Texto num literal PDF em WinAnsi (os acentos do português cabem nele).
-fn literal(s: &str) -> String {
+pub(crate) fn literal(s: &str) -> String {
     s.chars()
         .map(|c| match c {
             '(' | ')' | '\\' => format!("\\{c}"),

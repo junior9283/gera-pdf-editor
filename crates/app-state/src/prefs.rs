@@ -13,13 +13,15 @@ pub enum LeftPanel {
     Thumbnails,
     Outline,
     Annotations,
+    Signatures,
 }
 
 impl LeftPanel {
-    pub const ALL: [LeftPanel; 3] = [
+    pub const ALL: [LeftPanel; 4] = [
         LeftPanel::Thumbnails,
         LeftPanel::Outline,
         LeftPanel::Annotations,
+        LeftPanel::Signatures,
     ];
 
     pub fn label(self) -> &'static str {
@@ -27,6 +29,7 @@ impl LeftPanel {
             LeftPanel::Thumbnails => "Miniaturas",
             LeftPanel::Outline => "Índice",
             LeftPanel::Annotations => "Anotações",
+            LeftPanel::Signatures => "Assinaturas",
         }
     }
 
@@ -35,6 +38,7 @@ impl LeftPanel {
             LeftPanel::Thumbnails => "🖹",
             LeftPanel::Outline => "☰",
             LeftPanel::Annotations => "💬",
+            LeftPanel::Signatures => "✒",
         }
     }
 }
@@ -140,6 +144,6 @@ mod tests {
     fn panels_have_distinct_labels() {
         let labels: std::collections::HashSet<_> =
             LeftPanel::ALL.iter().map(|p| p.label()).collect();
-        assert_eq!(labels.len(), 3);
+        assert_eq!(labels.len(), LeftPanel::ALL.len());
     }
 }

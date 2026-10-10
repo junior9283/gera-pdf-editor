@@ -62,6 +62,8 @@ pub enum DocEvent {
     Renamed(PathBuf),
     /// O usuário informou o nome no diálogo Identidade.
     Author(String),
+    /// Abrir este painel à esquerda (ex.: a barra azul pede o painel Assinaturas).
+    ShowPanel(LeftPanel),
 }
 
 /// Impressão esperando a cópia temporária: opções, página atual no clique e o arquivo pedido.
@@ -111,6 +113,9 @@ pub struct DocTab {
     /// Linha Preparar formulário aberta (os campos viram objetos editáveis).
     pub(crate) prepare_tools: bool,
     pub(crate) prepare: crate::prepare::PrepareState,
+    /// Linha Certificados aberta.
+    pub(crate) cert_tools: bool,
+    pub(crate) cert: crate::certificates::CertState,
     /// Pedido de foco no campo de busca (Ctrl+F ou menu).
     pub(crate) focus_search: bool,
     /// Propriedades mostradas na janela (aberta enquanto houver).
@@ -195,6 +200,8 @@ impl DocTab {
             fill_tools: false,
             prepare_tools: false,
             prepare: Default::default(),
+            cert_tools: false,
+            cert: Default::default(),
             focus_search: false,
             properties: None,
             print_dialog: None,
@@ -443,7 +450,20 @@ impl DocTab {
                 }
             };
             match response {
-                Response::Opened(summary) => self.on_opened(summary),
+                Response::Opened(summary) => {
+                    self.on_opened(summary);
+                    self.worker.send(Request::Signatures);
+                }
+                Response::Signed { summary, history } => {
+                    self.on_pages_changed(summary, history);
+                    self.status = "Documento assinado.".into();
+                    if let Some(view) = self.view.as_mut() {
+                        view.clear_cache();
+                    }
+                    self.worker.send(Request::Signatures);
+                }
+                Response::SignFailed(e) => self.status = format!("Não foi possível assinar: {e}"),
+                Response::Signatures(list) => self.cert.signatures = list,
                 Response::OpenFailed(
                     e @ (PdfError::PasswordRequired | PdfError::WrongPassword),
                 ) => {
@@ -504,6 +524,10 @@ impl DocTab {
                 Response::DocumentText { tag, text } => self.edit.on_document_text(tag, text),
                 Response::Saved { annots, history } => {
                     self.edit.saving = false;
+                    // depois de salvar, "alterado depois de assinado" muda
+                    if !self.cert.signatures.is_empty() {
+                        self.worker.send(Request::Signatures);
+                    }
                     self.annots = annots;
                     self.history = history;
                     self.status = "Salvo.".into();
@@ -728,6 +752,38 @@ impl DocTab {
         }
     }
 
+    /// Valida de novo as assinaturas (o worker relê o arquivo).
+    pub fn validate_signatures(&mut self) {
+        self.worker.send(Request::Signatures);
+        self.status = "Assinaturas validadas.".into();
+    }
+
+    /// Janela "Assinar com um ID digital": Assinar manda ao worker (que grava o arquivo).
+    fn sign_window(&mut self, ctx: &egui::Context) {
+        let Some(d) = self.cert.dialog.as_mut() else {
+            return;
+        };
+        match d.show(ctx) {
+            Some(crate::shell::sign_dialog::SignOutcome::Sign {
+                place,
+                id,
+                reason,
+                location,
+            }) => {
+                self.cert.dialog = None;
+                self.status = "Assinando…".into();
+                self.worker.send(Request::SignDigitally {
+                    place,
+                    id,
+                    reason,
+                    location,
+                });
+            }
+            Some(crate::shell::sign_dialog::SignOutcome::Cancel) => self.cert.dialog = None,
+            None => {}
+        }
+    }
+
     /// Janela Propriedades do campo (Preparar formulário): OK manda as propriedades ao worker.
     fn field_props_window(&mut self, ctx: &egui::Context) {
         let Some(w) = self.prepare.props.as_mut() else {
@@ -752,6 +808,8 @@ impl DocTab {
         self.comment_tools = id == app_state::tools_catalog::COMMENT;
         self.fill_tools = id == app_state::tools_catalog::FILL_SIGN;
         self.prepare_tools = id == app_state::tools_catalog::PREPARE_FORM;
+        self.cert_tools = id == app_state::tools_catalog::CERTIFICATES;
+        self.cert.placing = false;
         self.prepare.set_tool(None);
         self.prepare.selected = None;
         self.edit.set_fill_tool(None);
@@ -855,6 +913,15 @@ impl DocTab {
             Some(PrintChoice::Cancel) => self.print_dialog = None,
             None => {}
         }
+        if !self.cert.signatures.is_empty() && self.organize.is_none() {
+            let open = egui::Panel::top("assinaturas")
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| crate::certificates::bar(ui, &self.cert.signatures))
+                .inner;
+            if open {
+                self.events.push(DocEvent::ShowPanel(LeftPanel::Signatures));
+            }
+        }
         if !self.fields.is_empty() && self.organize.is_none() && !self.prepare_tools {
             let reset = egui::Panel::top("formulario")
                 .frame(egui::Frame::NONE)
@@ -877,6 +944,7 @@ impl DocTab {
             self.status = msg;
         }
         self.field_props_window(ui.ctx());
+        self.sign_window(ui.ctx());
         self.split_window(ui);
         self.poll_files();
         self.identity_window(ui);
@@ -889,6 +957,24 @@ impl DocTab {
 
     /// Conteúdo do painel esquerdo; clicar leva à página.
     pub fn side_panel(&mut self, ui: &mut egui::Ui, panel: LeftPanel) {
+        if panel == LeftPanel::Signatures {
+            match crate::certificates::panel(ui, &self.cert.signatures, &self.fields) {
+                Some(crate::certificates::PanelAction::Validate) => {
+                    self.worker.send(Request::Signatures)
+                }
+                Some(crate::certificates::PanelAction::GoTo(page, r)) => {
+                    if let Some(y) = self
+                        .view
+                        .as_mut()
+                        .and_then(|v| v.go_to(page, Some((r.x0, r.y0))))
+                    {
+                        self.jump_to = Some(y);
+                    }
+                }
+                None => {}
+            }
+            return;
+        }
         let Some(view) = self.view.as_mut() else {
             return;
         };
@@ -1261,6 +1347,9 @@ impl DocTab {
             (&self.worker, &mut self.edit, &self.search, &self.annots);
         let (form, fields) = (&mut self.form, &self.fields);
         let (prepare, preparing) = (&mut self.prepare, self.prepare_tools);
+        let signing = self.cert_tools && self.cert.placing;
+        let cert = &mut self.cert;
+        let mut sign_at = None;
         let mut field_actions = Vec::new();
         let mut prepare_ops = Vec::new();
         let mut open_props = None;
@@ -1275,6 +1364,18 @@ impl DocTab {
                     jump_to,
                     &mut |ui, page, rect, map: &PageMap| {
                         paint_search_hits(ui, search, page as i32, map);
+                        if signing {
+                            // Certificados > Assinar digitalmente: arrastar ou clicar no campo
+                            sign_at = sign_at.or(crate::certificates::on_page(
+                                ui,
+                                cert,
+                                fields,
+                                page as i32,
+                                rect,
+                                map,
+                            ));
+                            return;
+                        }
                         if preparing {
                             // Preparar formulário: só os campos (sem comentários nem preencher)
                             let (ops, props) = crate::prepare::on_page(
@@ -1306,6 +1407,10 @@ impl DocTab {
             // o Tab foi a um campo de outra página
             self.jump_to = view.go_to(page, Some((r.x0, r.y0)));
         }
+        if let Some(place) = sign_at {
+            let author = self.edit.author.clone();
+            self.cert.sign(place, author.as_deref());
+        }
         for op in prepare_ops {
             self.worker.send(Request::Prepare(op));
         }
@@ -1318,7 +1423,28 @@ impl DocTab {
                 crate::fields::FieldAction::Set { page, id, value } => {
                     self.worker.send(Request::SetField { page, id, value })
                 }
-                crate::fields::FieldAction::Sign { page, rect } => self.edit.sign_field(page, rect),
+                // como no Acrobat: com Preencher e assinar ativo, o campo recebe a assinatura
+                // manuscrita; senão, o campo vazio abre a assinatura com ID digital
+                crate::fields::FieldAction::Sign { page, rect, .. }
+                    if self.edit.tool == app_state::tools::Tool::Fill =>
+                {
+                    self.edit.sign_field(page, rect)
+                }
+                // campo já assinado: o Acrobat mostra a assinatura (painel), não pede outra
+                crate::fields::FieldAction::Sign { page, id, .. }
+                    if self
+                        .cert
+                        .signatures
+                        .iter()
+                        .any(|s| s.page == page && s.id == id) =>
+                {
+                    self.events.push(DocEvent::ShowPanel(LeftPanel::Signatures));
+                }
+                crate::fields::FieldAction::Sign { page, id, .. } => {
+                    let author = self.edit.author.clone();
+                    self.cert
+                        .sign(pdf_core::SignPlace::Field { page, id }, author.as_deref());
+                }
             }
         }
         let now = ui.input(|i| i.time);

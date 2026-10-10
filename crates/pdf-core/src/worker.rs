@@ -62,6 +62,15 @@ pub enum Request {
     ResetForm,
     /// Preparar formulário: criar, editar, mover ou excluir um campo.
     Prepare(crate::PrepareOp),
+    /// Assina digitalmente e grava o arquivo (Certificados).
+    SignDigitally {
+        place: crate::SignPlace,
+        id: Box<crate::DigitalId>,
+        reason: String,
+        location: String,
+    },
+    /// Assinaturas do documento, validadas.
+    Signatures,
     /// Propriedades do campo, para a janela Propriedades.
     FieldProps {
         page: i32,
@@ -169,6 +178,13 @@ pub enum Response {
         history: HistoryState,
     },
     SplitFailed(String),
+    /// Documento assinado e gravado: o resumo novo (campos, anotações) e o histórico (vazio).
+    Signed {
+        summary: DocSummary,
+        history: HistoryState,
+    },
+    SignFailed(String),
+    Signatures(Vec<crate::SignatureInfo>),
     /// Propriedades de um campo (Preparar formulário).
     FieldProps {
         page: i32,
@@ -300,6 +316,23 @@ impl State {
                 d.set_field(page, id, &value).map(|()| Changed::Fields)
             }),
             Request::ResetForm => self.edit(send, |d| d.reset_form().map(|()| Changed::Document)),
+            Request::SignDigitally {
+                place,
+                id,
+                reason,
+                location,
+            } => send(
+                match self.with_doc_mut(|d| {
+                    d.sign_digitally(place, &id, &reason, &location)?;
+                    Ok((d.summary()?, d.history_state()))
+                }) {
+                    Ok((summary, history)) => Response::Signed { summary, history },
+                    Err(e) => Response::SignFailed(e),
+                },
+            ),
+            Request::Signatures => send(Response::Signatures(
+                self.with_doc(|d| d.signatures()).unwrap_or_default(),
+            )),
             Request::FieldProps { page, id } => send(Response::FieldProps {
                 page,
                 id,
@@ -405,6 +438,14 @@ impl State {
     }
 
     /// Roda `f` no documento aberto; erros (e a falta de documento) viram texto para a UI.
+    fn with_doc_mut<T>(
+        &mut self,
+        f: impl FnOnce(&mut PdfDoc) -> crate::Result<T>,
+    ) -> Result<T, String> {
+        let doc = self.doc.as_mut().ok_or_else(|| NO_DOC.to_string())?;
+        f(doc).map_err(|e| e.to_string())
+    }
+
     fn with_doc<T>(&self, f: impl FnOnce(&PdfDoc) -> crate::Result<T>) -> Result<T, String> {
         let doc = self.doc.as_ref().ok_or_else(|| NO_DOC.to_string())?;
         f(doc).map_err(|e| e.to_string())

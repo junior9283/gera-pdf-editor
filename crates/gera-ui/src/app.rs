@@ -223,6 +223,12 @@ impl GeraApp {
                         self.remember(dest);
                     }
                     DocEvent::Author(name) => self.set_author(name),
+                    DocEvent::ShowPanel(p) => {
+                        if self.prefs.left_panel != Some(p) {
+                            self.prefs.toggle_left(p);
+                            self.prefs_dirty = true;
+                        }
+                    }
                     DocEvent::Failed(msg) => {
                         self.status = msg;
                         self.close_tab(tab);
@@ -414,6 +420,12 @@ impl GeraApp {
                 .inner
                 .or(cmd);
         }
+        if doc.cert_tools {
+            cmd = egui::Panel::top("certificados")
+                .show(ui, |ui| toolbar::cert_row(ui, doc))
+                .inner
+                .or(cmd);
+        }
         if doc.prepare_tools {
             cmd = egui::Panel::top("preparar-formulario")
                 .show(ui, |ui| toolbar::prepare_row(ui, doc))
@@ -597,6 +609,7 @@ impl GeraApp {
             tools_catalog::COMMENT => tools_catalog::COMMENT,
             tools_catalog::FILL_SIGN => tools_catalog::FILL_SIGN,
             tools_catalog::PREPARE_FORM => tools_catalog::PREPARE_FORM,
+            tools_catalog::CERTIFICATES => tools_catalog::CERTIFICATES,
             _ => return,
         };
         match self.last_doc.clone().and_then(|p| self.tabs.find(&p)) {

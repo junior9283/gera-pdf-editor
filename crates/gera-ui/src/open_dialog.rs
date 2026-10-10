@@ -69,6 +69,20 @@ impl FileDialogs {
         });
     }
 
+    /// Arquivo de ID digital (PKCS#12).
+    pub fn pick_id_file(&mut self, ctx: &egui::Context) {
+        self.spawn(ctx, || {
+            match rfd::FileDialog::new()
+                .set_title("Importar ID digital")
+                .add_filter("ID digital", &["pfx", "p12"])
+                .pick_file()
+            {
+                Some(p) => Picked::Open(vec![p]),
+                None => Picked::Cancelled,
+            }
+        });
+    }
+
     /// Imagem da assinatura (PNG ou JPEG).
     pub fn pick_image(&mut self, ctx: &egui::Context) {
         self.spawn(ctx, || {

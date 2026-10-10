@@ -1,6 +1,7 @@
 //! Estado e lógica pura do app (sem UI e sem MuPDF direto).
 pub mod annot_geom;
 pub mod cache;
+pub mod certificates;
 pub mod close;
 pub mod comments;
 pub mod fill_sign;

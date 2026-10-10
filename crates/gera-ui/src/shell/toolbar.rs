@@ -56,6 +56,31 @@ pub fn show(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     out
 }
 
+/// Linha Certificados: Assinar digitalmente, Validar todas as assinaturas e Fechar.
+pub fn cert_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
+    ui.horizontal(|ui| {
+        if ui
+            .add(egui::Button::selectable(
+                doc.cert.placing,
+                "✒ Assinar digitalmente",
+            ))
+            .on_hover_text("Arraste um retângulo na página ou clique num campo de assinatura")
+            .clicked()
+        {
+            doc.cert.placing = !doc.cert.placing;
+        }
+        if ui.button("Validar todas as assinaturas").clicked() {
+            doc.validate_signatures();
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Fechar").clicked() {
+                doc.show_row("");
+            }
+        });
+    });
+    None
+}
+
 /// Linha do Preparar formulário: Selecionar, os tipos de campo, desfazer/refazer e Fechar.
 pub fn prepare_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     let mut out = None;

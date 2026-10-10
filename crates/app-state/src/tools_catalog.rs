@@ -44,6 +44,7 @@ pub struct ToolEntry {
 pub const COMMENT: &str = "comentar";
 pub const FILL_SIGN: &str = "assinar";
 pub const PREPARE_FORM: &str = "formulario";
+pub const CERTIFICATES: &str = "certificados";
 /// Ferramentas que abrem o Organizar páginas.
 pub const ORGANIZE: &str = "organizar";
 pub const INSERT: &str = "inserir";
@@ -78,7 +79,7 @@ pub const CATALOG: &[ToolEntry] = &[
     tool(COMBINE, "Combinar arquivos", "🗐", CreateEdit, Ready, "Juntar vários PDFs em um"),
     tool(COMMENT, "Comentar", "💬", Review, Ready, "Destacar, sublinhar, notas e desenho"),
     tool(FILL_SIGN, "Preencher e assinar", "🖊", Review, Ready, "Texto, marcas, assinatura e iniciais"),
-    tool("certificados", "Certificados", "🔏", Review, Planned("v3"), "Assinatura digital com certificado"),
+    tool(CERTIFICATES, "Certificados", "🔏", Review, Ready, "Assinatura digital com certificado e validação"),
     tool("comparar", "Comparar arquivos", "⚖", Review, Planned("v5"), "Diferenças entre duas versões"),
     tool("proteger", "Proteger PDF", "🔒", Protect, Planned("v5"), "Senha e permissões"),
     tool("redigir", "Redigir", "⬛", Protect, Planned("v5"), "Apagar informações sensíveis de vez"),
@@ -145,6 +146,7 @@ mod tests {
                 COMBINE,
                 COMMENT,
                 FILL_SIGN,
+                CERTIFICATES,
                 PREPARE_FORM,
                 ORGANIZE,
                 SPLIT,
@@ -154,8 +156,8 @@ mod tests {
         );
         assert_eq!(find(COMMENT).map(badge).as_deref(), Some(""));
         assert_eq!(
-            find("certificados").map(badge).as_deref(),
-            Some("Em breve · v3")
+            find("comparar").map(badge).as_deref(),
+            Some("Em breve · v5")
         );
         assert!(find("inexistente").is_none());
         assert!(CATALOG.iter().all(|t| t.status == Status::Ready
