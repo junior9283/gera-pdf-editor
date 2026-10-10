@@ -5,6 +5,7 @@ mod comments_panel;
 mod create;
 mod doc_tab;
 mod edit;
+mod fields;
 mod open_dialog;
 mod organize;
 mod print_job;

@@ -261,3 +261,33 @@ fn a_burst_of_selection_requests_is_answered_by_the_latest() {
         tags.len()
     );
 }
+
+#[test]
+fn filling_a_field_reports_every_field_of_the_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f.pdf");
+    std::fs::write(&path, pdf_core::sample::form_pdf()).unwrap();
+    let w = Worker::spawn(|| {});
+    w.send(Request::Open {
+        path: path.clone(),
+        password: None,
+    });
+    assert!(matches!(recv(&w), Response::Opened(_)));
+    let all = pdf_core::PdfDoc::open(&path, None)
+        .unwrap()
+        .all_fields()
+        .unwrap();
+    let nome = all.iter().find(|f| f.name == "nome").unwrap();
+    w.send(Request::SetField {
+        page: 0,
+        id: nome.id,
+        value: "Bia".into(),
+    });
+    match recv(&w) {
+        Response::FieldsChanged { fields, .. } => {
+            assert_eq!(fields.len(), all.len());
+            assert!(fields.iter().any(|f| f.name == "nome" && f.value == "Bia"));
+        }
+        other => panic!("esperava FieldsChanged, veio {other:?}"),
+    }
+}

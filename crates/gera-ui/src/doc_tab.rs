@@ -93,6 +93,8 @@ pub struct DocTab {
     pub(crate) edit: EditState,
     /// Anotações visíveis do documento em memória (o worker manda a lista a cada mudança).
     pub(crate) annots: Vec<AnnotInfo>,
+    /// Campos de formulário de todas as páginas.
+    pub(crate) fields: Vec<pdf_core::FieldInfo>,
     /// Estado do histórico de edições no worker.
     history: HistoryState,
     /// O motor de PDF (thread do worker) parou; já avisado.
@@ -121,6 +123,8 @@ pub struct DocTab {
     identity_name: String,
     /// Painel Comentários (busca, filtros, ordenação e resposta em digitação).
     comments: crate::comments_panel::PanelState,
+    /// Preencher formulários: realce, campo em edição, lista aberta.
+    form: crate::fields::FormState,
     /// Diálogo Dividir documento aberto.
     split: Option<SplitDialog>,
     /// Modo Organizar páginas (a grade substitui o documento).
@@ -176,6 +180,7 @@ impl DocTab {
             search: SearchState::default(),
             edit: EditState::default(),
             annots: Vec::new(),
+            fields: Vec::new(),
             history: HistoryState::default(),
             engine_stopped: false,
             outline: Vec::new(),
@@ -191,6 +196,7 @@ impl DocTab {
             turned_at: f64::NEG_INFINITY,
             identity_name: String::new(),
             comments: Default::default(),
+            form: Default::default(),
             organize: None,
             split: None,
             files: Default::default(),
@@ -206,7 +212,19 @@ impl DocTab {
 
     /// Fechar esta aba precisa de confirmação (pendências ou salvamento em andamento)?
     pub fn needs_confirm(&self) -> bool {
-        self.is_dirty() || self.edit.saving
+        self.is_dirty() || self.edit.saving || self.form.has_draft()
+    }
+
+    /// Confirma o texto que está sendo digitado num campo (antes de salvar ou imprimir).
+    /// Devolve se havia o que gravar.
+    fn commit_field(&mut self) -> bool {
+        match self.form.commit() {
+            Some(crate::fields::FieldAction::Set { page, id, value }) => {
+                self.worker.send(Request::SetField { page, id, value });
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn run(&mut self, ctx: &egui::Context, cmd: DocCommand) {
@@ -280,7 +298,9 @@ impl DocTab {
 
     /// Salvar: só quando há o que gravar.
     pub fn save(&mut self) {
-        if let Some(view) = self.view.as_ref().filter(|_| self.history.dirty) {
+        // o worker atende em ordem: o valor do campo chega antes da gravação
+        let typed = self.commit_field();
+        if let Some(view) = self.view.as_ref().filter(|_| self.history.dirty || typed) {
             self.edit.save(&self.worker, view.path.clone());
         }
     }
@@ -309,6 +329,7 @@ impl DocTab {
     }
 
     pub fn save_as(&mut self, dest: PathBuf) {
+        self.commit_field();
         if self.view.is_some() && self.edit.save(&self.worker, dest.clone()) {
             self.save_dest = Some(dest);
         }
@@ -339,6 +360,8 @@ impl DocTab {
 
     fn on_opened(&mut self, summary: DocSummary) {
         self.annots = summary.annots;
+        self.fields = summary.fields;
+        self.form.notes = summary.form_notes;
         self.history = HistoryState::default();
         self.outline = summary.outline;
         self.password_prompt = None;
@@ -362,6 +385,8 @@ impl DocTab {
     /// O documento mudou de páginas: recarrega tudo, ficando perto da página em que estava.
     fn on_pages_changed(&mut self, summary: DocSummary, history: HistoryState) {
         self.annots = summary.annots;
+        self.fields = summary.fields;
+        self.form.notes = summary.form_notes;
         self.outline = summary.outline;
         self.history = history;
         self.edit.keep_valid_selection(&self.annots);
@@ -518,6 +543,16 @@ impl DocTab {
                         _ => "Nenhum arquivo criado.".into(),
                     };
                 }
+                Response::FieldsChanged { fields, history } => {
+                    let mut pages: Vec<i32> =
+                        self.fields.iter().chain(&fields).map(|f| f.page).collect();
+                    pages.dedup();
+                    self.fields = fields;
+                    self.history = history;
+                    if let Some(view) = self.view.as_mut() {
+                        pages.into_iter().for_each(|p| view.invalidate_page(p));
+                    }
+                }
                 Response::SplitFailed(msg) => {
                     self.status = format!("Não foi possível dividir: {msg}");
                 }
@@ -549,7 +584,7 @@ impl DocTab {
         {
             if self.organize.is_some() {
                 self.organize = None; // Esc fecha o Organizar páginas
-            } else {
+            } else if !self.form.escape() {
                 self.edit.escape();
             }
         }
@@ -632,6 +667,7 @@ impl DocTab {
 
     /// Opções escolhidas: o worker grava a cópia temporária; o envio continua em `send_to_printer`.
     fn start_print(&mut self, options: PrintOptions) {
+        self.commit_field();
         match print_job::temp_file() {
             Ok(dest) => {
                 self.worker.send(Request::ExportForPrint {
@@ -703,6 +739,15 @@ impl DocTab {
             }
             Some(PrintChoice::Cancel) => self.print_dialog = None,
             None => {}
+        }
+        if !self.fields.is_empty() && self.organize.is_none() {
+            let reset = egui::Panel::top("formulario")
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| crate::fields::bar(ui, &mut self.form))
+                .inner;
+            if reset {
+                self.worker.send(Request::ResetForm);
+            }
         }
         if self.organize.is_some() {
             egui::CentralPanel::default().show(ui, |ui| self.organize_view(ui));
@@ -1095,6 +1140,8 @@ impl DocTab {
         }
         let (worker, edit, search, annots) =
             (&self.worker, &mut self.edit, &self.search, &self.annots);
+        let (form, fields) = (&mut self.form, &self.fields);
+        let mut field_actions = Vec::new();
         let jump_to = self.jump_to.take();
         // cada aba com seu id: a área de rolagem guarda a posição de cada documento
         self.last = ui
@@ -1107,10 +1154,33 @@ impl DocTab {
                     &mut |ui, page, rect, map: &PageMap| {
                         paint_search_hits(ui, search, page as i32, map);
                         edit.on_page(ui, worker, annots, page as i32, rect, map);
+                        // depois dos gestos da página: os campos ficam por cima
+                        field_actions.extend(crate::fields::on_page(
+                            ui,
+                            form,
+                            fields,
+                            page as i32,
+                            map,
+                        ));
                     },
                 )
             })
             .inner;
+        if let Some((page, r)) = self.form.scroll_to.take() {
+            // o Tab foi a um campo de outra página
+            self.jump_to = view.go_to(page, Some((r.x0, r.y0)));
+        }
+        for action in field_actions {
+            match action {
+                crate::fields::FieldAction::Set { page, id, value } => {
+                    self.worker.send(Request::SetField { page, id, value })
+                }
+                crate::fields::FieldAction::Sign => {
+                    self.status =
+                        "Assinar campos de assinatura chega com Preencher e assinar.".into()
+                }
+            }
+        }
         let now = ui.input(|i| i.time);
         if self.last.turn != 0 && now - self.turned_at > 0.25 && view.turn(self.last.turn) {
             self.turned_at = now;

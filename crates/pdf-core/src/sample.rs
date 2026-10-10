@@ -105,3 +105,43 @@ pub fn dark_near(img: &crate::RenderedPage, x: usize, y: usize) -> bool {
         })
     })
 }
+
+/// PDF de 1 página com um formulário AcroForm: texto "nome", caixa "aceito", botões de opção
+/// "plano" (básico/completo), lista suspensa "estado" e lista "cores" (com /NeedAppearances).
+pub fn form_pdf() -> Vec<u8> {
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R 5 0 R 6 0 R 9 0 R 10 0 R] /NeedAppearances true /DA (/Helv 12 Tf 0 g) /DR << /Font << /Helv 11 0 R /ZaDb 12 0 R >> >> >> >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [4 0 R 5 0 R 7 0 R 8 0 R 9 0 R 10 0 R] /Resources << /Font << /Helv 11 0 R >> >> >>".to_owned(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (nome) /V (Ana) /Rect [100 700 300 720] /DA (/Helv 12 Tf 0 g) /P 3 0 R /F 4 >>".to_owned(),
+        "<< /Type /Annot /Subtype /Widget /FT /Btn /T (aceito) /V /Off /AS /Off /Rect [100 650 115 665] /MK << /CA (4) >> /DA (/ZaDb 0 Tf 0 g) /AP << /N << /Sim 13 0 R /Off 14 0 R >> >> /P 3 0 R /F 4 >>".to_owned(),
+        "<< /FT /Btn /Ff 49152 /T (plano) /V /Off /Kids [7 0 R 8 0 R] >>".to_owned(),
+        "<< /Type /Annot /Subtype /Widget /Parent 6 0 R /AS /Off /Rect [100 600 115 615] /MK << /CA (l) >> /DA (/ZaDb 0 Tf 0 g) /AP << /N << /basico 13 0 R /Off 14 0 R >> >> /P 3 0 R /F 4 >>".to_owned(),
+        "<< /Type /Annot /Subtype /Widget /Parent 6 0 R /AS /Off /Rect [200 600 215 615] /MK << /CA (l) >> /DA (/ZaDb 0 Tf 0 g) /AP << /N << /completo 13 0 R /Off 14 0 R >> >> /P 3 0 R /F 4 >>".to_owned(),
+        "<< /Type /Annot /Subtype /Widget /FT /Ch /Ff 131072 /T (estado) /V (SP) /Opt [(SP) (RJ) (MG)] /Rect [100 550 200 570] /DA (/Helv 12 Tf 0 g) /P 3 0 R /F 4 >>".to_owned(),
+        "<< /Type /Annot /Subtype /Widget /FT /Ch /T (cores) /Opt [[(az) (Azul)] [(vm) (Vermelho)]] /Rect [100 450 200 520] /DA (/Helv 12 Tf 0 g) /P 3 0 R /F 4 >>".to_owned(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_owned(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /ZapfDingbats >>".to_owned(),
+        "<< /Type /XObject /Subtype /Form /BBox [0 0 15 15] /Resources << /Font << /ZaDb 12 0 R >> >> /Length 34 >>\nstream\nBT /ZaDb 12 Tf 2 3 Td (4) Tj ET\nendstream".to_owned(),
+        "<< /Type /XObject /Subtype /Form /BBox [0 0 15 15] /Length 0 >>\nstream\n\nendstream".to_owned(),
+    ];
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = out.len();
+    out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for off in offsets {
+        out.extend(format!("{off:010} 00000 n \n").as_bytes());
+    }
+    out.extend(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objs.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}

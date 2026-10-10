@@ -52,6 +52,14 @@ pub enum Request {
     Redo,
     /// Autor gravado nas anotações criadas (vale também para documentos abertos depois).
     SetAuthor(Option<String>),
+    /// Preenche um campo de formulário (botão de opção: o estado dele).
+    SetField {
+        page: i32,
+        id: i32,
+        value: String,
+    },
+    /// Limpar formulário (valores padrão).
+    ResetForm,
     /// Organizar páginas (girar, excluir, mover, inserir, substituir, recortar).
     Pages(PageOp),
     /// Divide o documento em arquivos na pasta `dir`; o documento não muda.
@@ -148,6 +156,11 @@ pub enum Response {
     PagesFailed(String),
     Extracted(Vec<PathBuf>),
     Split(Vec<PathBuf>),
+    /// Campos mudaram (preencher, desfazer/refazer de um valor): todos, de todas as páginas.
+    FieldsChanged {
+        fields: Vec<crate::FieldInfo>,
+        history: HistoryState,
+    },
     SplitFailed(String),
 }
 
@@ -270,6 +283,10 @@ impl State {
                 });
             }
             Request::Annot(op) => self.edit(send, |d| d.apply(op).map(Changed::Pages)),
+            Request::SetField { page, id, value } => self.edit(send, |d| {
+                d.set_field(page, id, &value).map(|()| Changed::Fields)
+            }),
+            Request::ResetForm => self.edit(send, |d| d.reset_form().map(|()| Changed::Document)),
             Request::Pages(op) => {
                 self.edit(send, |d| d.apply_pages(op).map(|()| Changed::Document))
             }
@@ -349,6 +366,10 @@ impl State {
                     history: d.history_state(),
                 },
                 Err(e) => Response::PagesFailed(e.to_string()),
+            }),
+            Ok(Changed::Fields) => send(Response::FieldsChanged {
+                fields: d.all_fields().unwrap_or_default(),
+                history: d.history_state(),
             }),
             Ok(Changed::Pages(pages)) => send(Response::AnnotsChanged {
                 annots: pages
