@@ -120,6 +120,8 @@ pub struct DocTab {
     /// Linha Editar PDF aberta (as imagens viram objetos editáveis).
     pub(crate) edit_pdf_tools: bool,
     pub(crate) edit_pdf: crate::edit_pdf::EditPdfState,
+    /// Marca d'água / Cabeçalho e rodapé.
+    pub(crate) pagination: crate::pagination_tool::PaginationTool,
     /// Linha Certificados aberta.
     pub(crate) cert_tools: bool,
     pub(crate) cert: crate::certificates::CertState,
@@ -177,6 +179,8 @@ enum PickFor {
     Image(Option<(i32, String)>),
     /// Pasta das partes do Dividir.
     Folder,
+    /// Arquivo (imagem ou PDF) da marca d'água.
+    WatermarkFile,
     Extract {
         pages: Vec<i32>,
         separate: bool,
@@ -228,6 +232,7 @@ impl DocTab {
             prepare: Default::default(),
             edit_pdf_tools: false,
             edit_pdf: Default::default(),
+            pagination: Default::default(),
             cert_tools: false,
             cert: Default::default(),
             security: Default::default(),
@@ -446,24 +451,33 @@ impl DocTab {
         self.worker.send(Request::Open { path, password });
     }
 
-    fn on_opened(&mut self, summary: DocSummary) {
+    /// O documento todo chegou (aberto ou mudado): anotações, campos e o estado das ferramentas.
+    /// Devolve o caminho e os tamanhos das páginas, para a vista.
+    fn apply_summary(
+        &mut self,
+        summary: DocSummary,
+    ) -> (std::path::PathBuf, Vec<pdf_core::PageSize>) {
         self.security = summary.security;
         self.annots = summary.annots;
         self.fields = summary.fields;
         self.prepare.on_fields(&self.fields);
         self.edit_pdf.clear();
+        if let Some(r) = self.pagination.refresh() {
+            self.worker.send(r);
+        }
         self.form.notes = summary.form_notes;
-        self.history = HistoryState::default();
         self.outline = summary.outline;
+        (summary.path, summary.sizes)
+    }
+
+    fn on_opened(&mut self, summary: DocSummary) {
+        let (path, sizes) = self.apply_summary(summary);
+        self.history = HistoryState::default();
         self.password_prompt = None;
         self.edit.reset();
-        self.status = format!(
-            "{} — {} páginas",
-            summary.path.display(),
-            summary.sizes.len()
-        );
+        self.status = format!("{} — {} páginas", path.display(), sizes.len());
         let dark = self.dark;
-        let mut view = DocView::new(summary.path, summary.sizes);
+        let mut view = DocView::new(path, sizes);
         view.dark = dark;
         self.view = Some(view);
         self.search.text.clear(); // descarta a busca (e os destaques) do documento anterior
@@ -475,26 +489,17 @@ impl DocTab {
 
     /// O documento mudou de páginas: recarrega tudo, ficando perto da página em que estava.
     fn on_pages_changed(&mut self, summary: DocSummary, history: HistoryState) {
-        self.security = summary.security;
-        self.annots = summary.annots;
-        self.fields = summary.fields;
-        self.prepare.on_fields(&self.fields);
-        self.edit_pdf.clear();
-        self.form.notes = summary.form_notes;
-        self.outline = summary.outline;
+        let (_, sizes) = self.apply_summary(summary);
         self.history = history;
         self.edit.keep_valid_selection(&self.annots);
-        let page = self
-            .last
-            .current_page
-            .min(summary.sizes.len().saturating_sub(1));
+        let page = self.last.current_page.min(sizes.len().saturating_sub(1));
         // com páginas a mais ou a menos, a seleção antiga marcaria outras páginas
-        let same_count = self.view.as_ref().map(|v| v.sizes.len()) == Some(summary.sizes.len());
+        let same_count = self.view.as_ref().map(|v| v.sizes.len()) == Some(sizes.len());
         if let Some(org) = self.organize.as_mut().filter(|_| !same_count) {
             org.sel = Default::default();
         }
         if let Some(view) = self.view.as_mut() {
-            view.set_pages(summary.sizes);
+            view.set_pages(sizes);
             self.jump_to = view.go_to(page as i32, None);
         }
         self.search.start(&self.worker); // os resultados antigos apontam para páginas velhas
@@ -779,6 +784,11 @@ impl DocTab {
                     self.status = format!("Não foi possível fazer a alteração: {msg}");
                 }
                 Response::PageImages { page, images } => self.edit_pdf.on_images(page, images),
+                Response::PaginationState {
+                    kind,
+                    present,
+                    config,
+                } => self.pagination.on_state(kind, present, config),
                 Response::PageTextBlocks { page, blocks } => {
                     self.edit_pdf.on_text_blocks(page, blocks)
                 }
@@ -1278,6 +1288,7 @@ impl DocTab {
             tc::FILL_SIGN => (!p.annotate).then_some("preencher e assinar"),
             tc::PREPARE_FORM => (!p.modify).then_some("alterar formulários"),
             tc::EDIT_PDF => (!p.modify).then_some("editar o PDF"),
+            tc::WATERMARK | tc::HEADER_FOOTER => (!p.modify).then_some("alterar as páginas"),
             tc::CERTIFICATES => (!p.forms).then_some("assinar"),
             _ => None,
         };
@@ -1294,6 +1305,14 @@ impl DocTab {
         self.prepare.set_tool(None);
         self.prepare.selected = None;
         self.edit_pdf_tools = id == tc::EDIT_PDF;
+        let pagination = match id {
+            tc::WATERMARK => Some(pdf_core::Pagination::Watermark),
+            tc::HEADER_FOOTER => Some(pdf_core::Pagination::HeaderFooter),
+            _ => None,
+        };
+        if let Some(r) = self.pagination.set_tool(pagination) {
+            self.worker.send(r);
+        }
         if let Some(action) = self.edit_pdf.reset() {
             send_edit_action(&self.worker, &mut self.status, action);
         }
@@ -1304,6 +1323,26 @@ impl DocTab {
     pub(crate) fn edit_image(&mut self, edit: pdf_core::ImageEdit) {
         if let Some(action) = self.edit_pdf.edit_selected(edit) {
             send_edit_action(&self.worker, &mut self.status, action);
+        }
+    }
+
+    /// Marca d'água: escolhe o arquivo (imagem ou PDF) de origem.
+    pub(crate) fn pick_watermark_file(&mut self, ctx: &egui::Context) {
+        if self.files.busy() {
+            return;
+        }
+        self.picking = Some(PickFor::WatermarkFile);
+        self.files.pick_image(
+            ctx,
+            "Arquivo da marca d'água",
+            crate::shell::watermark_dialog::FILE_EXTS,
+        );
+    }
+
+    /// Marca d'água / Cabeçalho e rodapé: Remover.
+    pub(crate) fn remove_pagination(&mut self) {
+        if let Some(kind) = self.pagination.tool {
+            self.worker.send(Request::RemovePagination(kind));
         }
     }
 
@@ -1470,6 +1509,7 @@ impl DocTab {
         }
         self.field_props_window(ui.ctx());
         self.protect_windows(ui.ctx());
+        self.pagination_windows(ui.ctx());
         self.compress_window(ui.ctx());
         self.export_window(ui.ctx());
         self.ocr_window(ui.ctx());
@@ -1801,6 +1841,13 @@ impl DocTab {
                         self.status =
                             "Clique na página para colocar a imagem (Esc cancela).".into();
                     }
+                }
+            }
+            (Some(PickFor::WatermarkFile), Picked::Open(files)) => {
+                if let Some((crate::pagination_tool::PaginationWindow::Watermark(d), _)) =
+                    self.pagination.dialog.as_mut()
+                {
+                    d.path = files.into_iter().next().or(d.path.take());
                 }
             }
             (Some(PickFor::Folder), Picked::Folder(dir)) => {

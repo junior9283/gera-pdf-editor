@@ -8,7 +8,7 @@
 //! o texto antigo (formulário, fonte Type3), a edição é recusada e o documento volta como estava.
 use crate::doc::PdfDoc;
 use crate::error::{refused, Result};
-use crate::page_content::{invert, num, own_resource};
+use crate::page_content::{invert, matrix_ops, num, own_resource, rgb_ops};
 use crate::text_fit::LINE_HEIGHT;
 use crate::types::PdfRect;
 use mupdf::pdf::{
@@ -372,7 +372,7 @@ fn has_outline(font: &Font, glyph: i32) -> bool {
 }
 
 /// Avanço de um caractere; o espaço sem glifo vale um quarto de eme.
-fn advance(font: &Font, c: char, size: f32) -> Result<f32> {
+pub(crate) fn advance(font: &Font, c: char, size: f32) -> Result<f32> {
     let g = font.encode_character(c as i32)?;
     Ok(if g == 0 && c == ' ' {
         0.25 * size
@@ -381,7 +381,7 @@ fn advance(font: &Font, c: char, size: f32) -> Result<f32> {
     })
 }
 
-fn width(font: &Font, s: &str, size: f32) -> Result<f32> {
+pub(crate) fn width(font: &Font, s: &str, size: f32) -> Result<f32> {
     s.chars().map(|c| advance(font, c, size)).sum()
 }
 
@@ -432,7 +432,7 @@ fn wrap(font: &Font, text: &str, size: f32, maxw: f32, indent: f32) -> Result<Ve
 
 /// O `TJ` de uma linha: os glifos em hexadecimal (fonte Identity-H) e os espaços sem glifo como
 /// deslocamento.
-fn glyph_run(font: &Font, line: &str) -> Result<String> {
+pub(crate) fn glyph_run(font: &Font, line: &str) -> Result<String> {
     let mut out = String::from("[<");
     for c in line.chars() {
         let g = font.encode_character(c as i32)?;
@@ -672,11 +672,10 @@ impl PdfDoc {
         let mut page_obj = pdf_page.object();
         let to_screen = page_obj.page_ctm()?;
         let name = self.font_resource(&mut page_obj, &style.font)?;
-        let [r, g, b] = style.color.map(|c| num(c as f32 / 255.0));
-        let m = invert(&to_screen)?;
         let mut ops = format!(
-            " q {} cm BT {r} {g} {b} rg /{name} {} Tf {}",
-            [m.a, m.b, m.c, m.d, m.e, m.f].map(num).join(" "),
+            " q {} cm BT {} /{name} {} Tf {}",
+            matrix_ops(&invert(&to_screen)?),
+            rgb_ops(style.color),
             num(style.size),
             if style.invisible { "3 Tr " } else { "" }
         );
@@ -711,7 +710,11 @@ impl PdfDoc {
     /// A fonte nos recursos da página (como `GeraFnN`). O MuPDF já devolve o mesmo objeto para o
     /// mesmo programa de fonte acrescentado nesta sessão (pelo MD5); o nome que já aponta para ele
     /// é reaproveitado. Fontes do arquivo nunca são tomadas por "do app".
-    fn font_resource(&mut self, page_obj: &mut PdfObject, font: &Font) -> Result<String> {
+    pub(crate) fn font_resource(
+        &mut self,
+        page_obj: &mut PdfObject,
+        font: &Font,
+    ) -> Result<String> {
         let obj = self.inner.add_font(font)?;
         let num = obj.as_indirect()?;
         let ours = self.added_fonts.contains(&num);

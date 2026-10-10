@@ -210,6 +210,43 @@ pub fn edit_pdf_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     out
 }
 
+/// Linha da Marca d'água ou do Cabeçalho e rodapé: Adicionar…, Atualizar…, Remover, desfazer/refazer
+/// e Fechar (como no Acrobat).
+pub fn pagination_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
+    let mut out = None;
+    let present = doc.pagination.present;
+    let kind = doc.pagination.tool?;
+    let what = crate::pagination_tool::label(kind);
+    ui.horizontal(|ui| {
+        if ui.button("➕ Adicionar…").clicked() {
+            doc.pagination.add();
+        }
+        if ui
+            .add_enabled(present, egui::Button::new("Atualizar…"))
+            .on_disabled_hover_text(format!("O documento não tem {what}"))
+            .clicked()
+        {
+            doc.pagination.open(true);
+        }
+        if ui
+            .add_enabled(present, egui::Button::new("🗑 Remover"))
+            .on_hover_text(format!("Tira {what} de todas as páginas"))
+            .clicked()
+        {
+            doc.remove_pagination();
+        }
+        ui.label(if present {
+            format!("O documento tem {what}.")
+        } else {
+            format!("Sem {what}.")
+        });
+        ui.separator();
+        undo_redo(ui, doc, &mut out);
+        close_row(ui, doc);
+    });
+    out
+}
+
 /// Linha do Preencher e assinar: texto, tamanho, marcas, assinatura e iniciais (como no Acrobat).
 pub fn fill_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     let mut out = None;

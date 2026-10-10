@@ -130,6 +130,15 @@ pub enum Request {
         at: (f32, f32),
         text: String,
     },
+    /// Marca d'água ou cabeçalho e rodapé (`replace`: no lugar dos existentes — o Atualizar).
+    AddPagination {
+        config: Box<crate::PaginationConfig>,
+        replace: bool,
+    },
+    /// Tira as marcas d'água (ou os cabeçalhos e rodapés) de todas as páginas.
+    RemovePagination(crate::Pagination),
+    /// Há marca d'água (ou cabeçalho e rodapé)? E as escolhas gravadas, para o Atualizar.
+    PaginationState(crate::Pagination),
     /// Organizar páginas (girar, excluir, mover, inserir, substituir, recortar).
     Pages(PageOp),
     /// Divide o documento em arquivos na pasta `dir`; o documento não muda.
@@ -268,6 +277,12 @@ pub enum Response {
     PageImages {
         page: i32,
         images: Vec<crate::PageImage>,
+    },
+    /// Resposta ao `PaginationState`.
+    PaginationState {
+        kind: crate::Pagination,
+        present: bool,
+        config: Option<crate::PaginationConfig>,
     },
     /// Blocos de texto de uma página (vazio se não deu para ler).
     PageTextBlocks {
@@ -491,6 +506,23 @@ impl State {
                 d.add_text(page, at, &text)
                     .map(|()| Changed::Pages(vec![page]))
             }),
+            Request::AddPagination { config, replace } => self.edit(send, |d| {
+                d.add_pagination(&config, replace)
+                    .map(|()| Changed::Document)
+            }),
+            Request::RemovePagination(kind) => self.edit(send, |d| {
+                d.remove_pagination(kind).map(|_| Changed::Document)
+            }),
+            Request::PaginationState(kind) => {
+                let (present, config) = self
+                    .with_doc(|d| d.pagination_state(kind))
+                    .unwrap_or((false, None));
+                send(Response::PaginationState {
+                    kind,
+                    present,
+                    config,
+                })
+            }
             Request::Pages(op) => {
                 self.edit(send, |d| d.apply_pages(op).map(|()| Changed::Document))
             }

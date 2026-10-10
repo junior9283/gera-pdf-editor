@@ -49,6 +49,8 @@ pub const PROTECT: &str = "proteger";
 pub const COMPRESS: &str = "comprimir";
 pub const CREATE: &str = "criar";
 pub const EDIT_PDF: &str = "editar";
+pub const WATERMARK: &str = "marca-dagua";
+pub const HEADER_FOOTER: &str = "cabecalho";
 pub const EXPORT: &str = "exportar";
 pub const OCR: &str = "ocr";
 /// Ferramentas que abrem o Organizar páginas.
@@ -94,8 +96,8 @@ pub const CATALOG: &[ToolEntry] = &[
     tool("organizar", "Organizar páginas", "🗁", Organize, Ready, "Reordenar, girar e excluir páginas"),
     tool(SPLIT, "Dividir PDF", "✂", Organize, Ready, "Separar em vários arquivos"),
     tool("inserir", "Inserir páginas", "➕", Organize, Ready, "Trazer páginas de outro arquivo"),
-    tool("marca-dagua", "Marca d'água", "💧", Organize, Planned("v2"), "Texto ou imagem em todas as páginas"),
-    tool("cabecalho", "Cabeçalho e rodapé", "📑", Organize, Planned("v2"), "Numeração e textos nas margens"),
+    tool(WATERMARK, "Marca d'água", "💧", Organize, Ready, "Texto ou imagem em todas as páginas"),
+    tool(HEADER_FOOTER, "Cabeçalho e rodapé", "📑", Organize, Ready, "Numeração, data e Bates nas margens"),
     tool("recortar", "Recortar páginas", "⛶", Organize, Ready, "Ajustar as margens das páginas"),
 ];
 
@@ -163,6 +165,8 @@ mod tests {
                 ORGANIZE,
                 SPLIT,
                 INSERT,
+                WATERMARK,
+                HEADER_FOOTER,
                 CROP
             ]
         );

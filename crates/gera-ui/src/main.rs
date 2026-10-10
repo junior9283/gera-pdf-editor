@@ -11,6 +11,7 @@ mod fields;
 mod fill_sign;
 mod open_dialog;
 mod organize;
+mod pagination_tool;
 mod prepare;
 mod print_job;
 mod search;

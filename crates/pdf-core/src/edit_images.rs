@@ -8,7 +8,10 @@
 use crate::create_export::{oriented, UprightImage};
 use crate::doc::PdfDoc;
 use crate::error::{refused, Result};
-use crate::page_content::{invert, num, own_resource};
+use crate::page_content::{
+    decode_name, free_name, invert, is_delim, matrix_ops, mul, own_resource, page_content, Lexer,
+    Tok,
+};
 use crate::types::PdfRect;
 use mupdf::pdf::{PdfDocument, PdfObject};
 use mupdf::text_page::TextBlockType;
@@ -48,12 +51,6 @@ pub enum ImageEdit {
     },
 }
 
-fn mul(a: &Matrix, b: &Matrix) -> Matrix {
-    let mut m = a.clone();
-    m.concat(b.clone());
-    m
-}
-
 /// Caixa do quadrado unitário pela matriz.
 fn unit_bbox(m: &Matrix) -> PdfRect {
     Rect::new(0.0, 0.0, 1.0, 1.0).transform(m).into()
@@ -87,163 +84,6 @@ fn fit_in(w: f32, h: f32, r: &PdfRect) -> PdfRect {
 }
 
 // ---------- leitura do conteúdo da página ----------
-
-enum Tok<'a> {
-    Num(f32),
-    /// Nome ainda com as sequências `#xx`.
-    Name(&'a [u8]),
-    Op(&'a [u8]),
-    Other,
-}
-
-fn is_ws(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\r' | b'\n' | b'\x0c' | 0)
-}
-
-fn is_delim(c: u8) -> bool {
-    matches!(
-        c,
-        b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
-    )
-}
-
-/// Tokenizador do conteúdo: pula comentários, strings e dados de imagem embutida, para que um
-/// "Do" dentro deles não conte.
-struct Lexer<'a> {
-    s: &'a [u8],
-    i: usize,
-    /// Achou imagem embutida (BI…ID…EI).
-    inline_image: bool,
-}
-
-impl<'a> Lexer<'a> {
-    fn word(&mut self) -> &'a [u8] {
-        let s = self.s;
-        let start = self.i;
-        while self.i < s.len() && !is_ws(s[self.i]) && !is_delim(s[self.i]) {
-            self.i += 1;
-        }
-        &s[start..self.i]
-    }
-
-    /// Pula os dados depois de ID até o EI (cercado de espaço) que fecha a imagem embutida.
-    fn skip_inline_data(&mut self) {
-        self.inline_image = true;
-        let s = self.s;
-        let mut j = self.i + 1;
-        while j + 2 <= s.len() {
-            if is_ws(s[j - 1])
-                && &s[j..j + 2] == b"EI"
-                && s.get(j + 2).is_none_or(|&c| is_ws(c) || is_delim(c))
-            {
-                self.i = j + 2;
-                return;
-            }
-            j += 1;
-        }
-        self.i = s.len();
-    }
-
-    /// Próximo token e onde começa.
-    fn next(&mut self) -> Option<(usize, Tok<'a>)> {
-        let s = self.s;
-        loop {
-            while self.i < s.len() && is_ws(s[self.i]) {
-                self.i += 1;
-            }
-            if s.get(self.i) == Some(&b'%') {
-                while self.i < s.len() && !matches!(s[self.i], b'\r' | b'\n') {
-                    self.i += 1;
-                }
-                continue;
-            }
-            break;
-        }
-        let start = self.i;
-        let c = *s.get(self.i)?;
-        let tok = match c {
-            b'(' => {
-                let mut depth = 0usize;
-                while self.i < s.len() {
-                    match s[self.i] {
-                        b'\\' => self.i += 1,
-                        b'(' => depth += 1,
-                        b')' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                self.i += 1;
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                    self.i += 1;
-                }
-                Tok::Other
-            }
-            b'<' if s.get(self.i + 1) == Some(&b'<') => {
-                self.i += 2;
-                Tok::Other
-            }
-            b'<' => {
-                while self.i < s.len() && s[self.i] != b'>' {
-                    self.i += 1;
-                }
-                self.i += 1;
-                Tok::Other
-            }
-            b'>' if s.get(self.i + 1) == Some(&b'>') => {
-                self.i += 2;
-                Tok::Other
-            }
-            b'/' => {
-                self.i += 1;
-                Tok::Name(self.word())
-            }
-            _ if is_delim(c) => {
-                self.i += 1;
-                Tok::Other
-            }
-            _ => {
-                let w = self.word();
-                if w == b"ID" {
-                    self.skip_inline_data();
-                    Tok::Other
-                } else {
-                    match std::str::from_utf8(w).ok().and_then(|t| t.parse().ok()) {
-                        Some(n) => Tok::Num(n),
-                        None => Tok::Op(w),
-                    }
-                }
-            }
-        };
-        Some((start, tok))
-    }
-}
-
-/// Nome do PDF sem as sequências `#xx`.
-fn decode_name(raw: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(raw.len());
-    let mut i = 0;
-    while i < raw.len() {
-        let hex = raw
-            .get(i + 1..i + 3)
-            .filter(|_| raw[i] == b'#')
-            .and_then(|h| std::str::from_utf8(h).ok())
-            .and_then(|h| u8::from_str_radix(h, 16).ok());
-        match hex {
-            Some(b) => {
-                out.push(b);
-                i += 3;
-            }
-            None => {
-                out.push(raw[i]);
-                i += 1;
-            }
-        }
-    }
-    out
-}
 
 /// Nome do PDF com os caracteres especiais em `#xx`.
 fn encode_name(name: &str) -> String {
@@ -365,25 +205,6 @@ fn scan(content: &[u8]) -> Scan {
     }
 }
 
-/// Conteúdo da página (os fluxos de /Contents, um depois do outro).
-fn page_content(page_obj: &PdfObject) -> Result<Vec<u8>> {
-    let mut out = Vec::new();
-    let Some(contents) = page_obj.get_dict("Contents")? else {
-        return Ok(out);
-    };
-    if contents.is_array()? {
-        for i in 0..contents.len()? as i32 {
-            if let Some(s) = contents.get_array(i)? {
-                out.extend(s.read_stream()?);
-                out.push(b'\n');
-            }
-        }
-    } else {
-        out.extend(contents.read_stream()?);
-    }
-    Ok(out)
-}
-
 /// O /XObject da página (próprio ou herdado).
 fn xobjects(page_obj: &PdfObject) -> Result<Option<PdfObject>> {
     Ok(page_obj
@@ -412,18 +233,14 @@ fn add_xobject(
 ) -> Result<String> {
     let image = doc.add_image(&up.img)?;
     let mut xobjects = own_resource(doc, page_obj, "XObject")?;
-    let name = (0..)
-        .map(|n| format!("GeraIm{n}"))
-        .find(|n| xobjects.get_dict(n.as_str()).ok().flatten().is_none())
-        .expect("sempre há um nome livre");
+    let name = free_name(&xobjects, "GeraIm")?;
     xobjects.dict_put(name.as_str(), image)?;
     Ok(name)
 }
 
 /// Com espaço dos dois lados: o vizinho pode estar colado (`cm/Im0 Do`, válido no PDF).
 fn draw_ops(x: &Matrix, name: &str) -> String {
-    let m = [x.a, x.b, x.c, x.d, x.e, x.f].map(num).join(" ");
-    format!(" q {m} cm {} Do Q ", encode_name(name))
+    format!(" q {} cm {} Do Q ", matrix_ops(x), encode_name(name))
 }
 
 impl PdfDoc {
@@ -579,6 +396,7 @@ impl PdfDoc {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::page_content::num;
 
     #[test]
     fn do_inside_strings_comments_and_inline_images_is_ignored() {
