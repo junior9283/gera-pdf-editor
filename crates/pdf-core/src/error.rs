@@ -18,6 +18,8 @@ pub enum PdfError {
     InvalidPages(String),
     #[error("erro do motor PDF: {0}")]
     Engine(String),
+    #[error("assinatura digital: {0}")]
+    Signature(String),
     #[error("erro de arquivo: {0}")]
     Io(#[from] std::io::Error),
 }

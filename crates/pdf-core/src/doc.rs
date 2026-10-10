@@ -404,7 +404,7 @@ fn add_stamp(
 }
 
 /// Agora, no formato de data do PDF: `D:AAAAMMDDhhmmss+hh'mm'` (hora local).
-fn pdf_now() -> String {
+pub(crate) fn pdf_now() -> String {
     let now = chrono::Local::now();
     let offset = now.offset().local_minus_utc() / 60;
     let sign = if offset < 0 { '-' } else { '+' };
@@ -640,6 +640,19 @@ pub(crate) fn write_atomic(
     written
 }
 
+/// Grava `bytes` em `dest` como `write_atomic` (temporário, fsync, rename).
+pub(crate) fn write_bytes_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = temp_path(dest)?;
+    let written = std::fs::write(&tmp, bytes)
+        .and_then(|()| std::fs::File::open(&tmp)?.sync_all())
+        .and_then(|()| std::fs::rename(&tmp, dest))
+        .map_err(PdfError::from);
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
 fn temp_path(dest: &Path) -> Result<PathBuf> {
     let name = dest
         .file_name()
@@ -710,6 +723,11 @@ impl PdfDoc {
     }
 
     /// Volta ao arquivo do disco (com a mesma senha), sem as edições em memória.
+    pub(crate) fn reload(&mut self) -> Result<()> {
+        self.discard_changes()
+    }
+
+    /// Volta ao arquivo do disco (com a mesma senha), sem as edições em memória.
     fn discard_changes(&mut self) -> Result<()> {
         self.inner = open_authenticated(&self.path, self.password.as_deref())?;
         self.history = History::default();
@@ -724,6 +742,16 @@ impl PdfDoc {
     fn write(&mut self, dest: &Path) -> Result<()> {
         let mut opts = PdfWriteOptions::default();
         opts.set_encryption(Encryption::Keep);
+        if self.has_signatures()? {
+            // documento assinado: só gravação incremental (como o Acrobat), senão a reescrita
+            // mudaria os bytes assinados e quebraria as assinaturas
+            opts.set_incremental(true);
+            let mut bytes = Vec::new();
+            self.inner.write_to_with_options(&mut bytes, opts)?;
+            write_bytes_atomic(dest, &bytes)?;
+            self.path = dest.to_path_buf();
+            return Ok(());
+        }
         write_atomic(&self.inner, dest, opts)?;
         self.path = dest.to_path_buf();
         Ok(())

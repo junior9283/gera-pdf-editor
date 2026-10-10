@@ -2,11 +2,13 @@
 pub mod sample;
 
 mod annot_edit;
+mod digital_id;
 mod doc;
 mod error;
 mod forms;
 mod pages;
 mod prepare;
+mod sign;
 pub mod signature;
 pub(crate) mod split;
 mod stamp;
@@ -14,10 +16,12 @@ mod text_fit;
 mod types;
 mod worker;
 
+pub use digital_id::{fingerprint, DigitalId};
 pub use doc::{max_render_scale, PdfDoc};
 pub use error::{PdfError, Result};
 pub use forms::{FieldInfo, FieldKind, FormNotes};
 pub use prepare::{FieldProps, NewFieldKind, PrepareOp};
+pub use sign::{display_date, Integrity, SignPlace, SignatureInfo};
 pub use split::{combine, safe_file_name, SplitRule};
 pub use stamp::{HEIGHT as STAMP_HEIGHT, WIDTH as STAMP_WIDTH};
 pub use types::*;
