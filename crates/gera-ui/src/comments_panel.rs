@@ -10,6 +10,8 @@ pub struct PanelState {
     pub filter: CommentFilter,
     pub sort: SortBy,
     reply: String,
+    /// "Responder" no menu: o campo de resposta pega o foco no próximo quadro.
+    focus_reply: bool,
     /// Seleção do quadro anterior: quando muda, o cartão rola até ficar visível.
     last_selected: Option<(i32, i32)>,
 }
@@ -56,15 +58,16 @@ fn set_state(t: &Thread, model: StateModel, state: &str) -> PanelAction {
 }
 
 /// Ações do comentário (botão ⋯ e clique direito).
-fn card_menu(ui: &mut egui::Ui, t: &Thread, out: &mut Vec<PanelAction>) {
+fn card_menu(ui: &mut egui::Ui, t: &Thread, out: &mut Vec<PanelAction>, focus_reply: &mut bool) {
     let (page, id) = (t.root.page, t.root.id);
     if ui.button("Responder").clicked() {
         out.push(select(t));
+        *focus_reply = true;
     }
     ui.menu_button("Definir status", |ui| {
         for s in ReviewState::ALL {
             let current = t.status() == s;
-            if ui.radio(current, s.label()).clicked() {
+            if ui.radio(current, s.label()).clicked() && !current {
                 out.push(set_state(t, StateModel::Review, s.pdf_name()));
             }
         }
@@ -131,15 +134,22 @@ fn card(
     let resp = frame
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
+            let header = ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(crate::sidebar::label_of(&t.root)).small());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.menu_button("···", |ui| card_menu(ui, t, out));
+                    ui.menu_button("···", |ui| card_menu(ui, t, out, &mut st.focus_reply));
                     if t.checked {
                         ui.label(egui::RichText::new("Visto").small().strong());
                     }
                 });
             });
+            if selected {
+                // no cartão aberto o clique direito fica no cabeçalho (o resto tem o campo)
+                header
+                    .response
+                    .interact(egui::Sense::click())
+                    .context_menu(|ui| card_menu(ui, t, out, &mut st.focus_reply));
+            }
             byline(ui, &t.root);
             if !t.root.contents.is_empty() {
                 let text = if selected {
@@ -180,6 +190,9 @@ fn card(
                         .desired_rows(2)
                         .desired_width(f32::INFINITY),
                 );
+                if std::mem::take(&mut st.focus_reply) {
+                    field.request_focus();
+                }
                 let send_keys = field.has_focus()
                     && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
                 ui.horizontal(|ui| {
@@ -208,7 +221,7 @@ fn card(
             st.reply.clear();
             out.push(select(t));
         }
-        resp.context_menu(|ui| card_menu(ui, t, out));
+        resp.context_menu(|ui| card_menu(ui, t, out, &mut st.focus_reply));
     }
 }
 
@@ -253,8 +266,10 @@ fn filter_menu(ui: &mut egui::Ui, f: &mut CommentFilter, all: &[Thread]) {
         if !kinds.contains(&t.root.kind) {
             kinds.push(t.root.kind);
         }
-        if !t.root.author.is_empty() && !authors.contains(&t.root.author) {
-            authors.push(t.root.author.clone());
+        for a in std::iter::once(&t.root).chain(&t.replies) {
+            if !a.author.is_empty() && !authors.contains(&a.author) {
+                authors.push(a.author.clone());
+            }
         }
     }
     ui.menu_button("Tipo", |ui| {
@@ -307,6 +322,9 @@ pub fn show(
     }
     // um cartão selecionado na página que ainda não estava: rola até ele
     let scroll_to = (selected != st.last_selected).then_some(selected).flatten();
+    if selected != st.last_selected {
+        st.reply.clear(); // o rascunho é do comentário que estava aberto
+    }
     st.last_selected = selected;
     egui::ScrollArea::vertical()
         .auto_shrink(false)

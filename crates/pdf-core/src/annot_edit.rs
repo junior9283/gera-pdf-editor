@@ -188,6 +188,19 @@ fn geometry(a: &PdfAnnotation) -> Result<(PdfRect, Option<Strokes>)> {
     }
 }
 
+/// Comentário de que `a` é resposta ou status (/IRT), como o Acrobat: só com /RT ausente ou /R
+/// (/RT /Group é uma anotação visível agrupada, não resposta).
+pub(crate) fn reply_of(a: &PdfAnnotation) -> Result<Option<i32>> {
+    let parent = match a.object().get_dict("IRT")? {
+        Some(o) if o.is_indirect()? => o.as_indirect()?,
+        _ => return Ok(None),
+    };
+    Ok(match name_entry(a, "RT")?.as_deref() {
+        None | Some("R") => Some(parent),
+        Some(_) => None,
+    })
+}
+
 /// Texto de uma entrada do dicionário da anotação (`None` se não existe).
 pub(crate) fn string_entry(a: &PdfAnnotation, key: &str) -> Result<Option<String>> {
     Ok(match a.object().get_dict(key)? {
@@ -275,9 +288,13 @@ pub(crate) fn apply_edit(
     let inverse = match edit {
         Edit::Batch(_) => unreachable!("tratado acima"),
         Edit::Visibility { hidden: hide, .. } => {
-            let mut flags = a.flags()?;
-            flags.set(AnnotationFlags::IS_HIDDEN, hide);
-            a.set_flags(flags)?;
+            // respostas e status já são invisíveis na página (NoView ou Hidden, como o Acrobat
+            // grava): apagar só os tira da lista; mexer na flag os faria aparecer ao desfazer
+            if reply_of(&a)?.is_none() {
+                let mut flags = a.flags()?;
+                flags.set(AnnotationFlags::IS_HIDDEN, hide);
+                a.set_flags(flags)?;
+            }
             if hide {
                 hidden.insert((page, id));
             } else {

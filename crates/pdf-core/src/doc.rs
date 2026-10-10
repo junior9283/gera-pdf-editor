@@ -1,4 +1,4 @@
-use crate::annot_edit::{self, ColorEdit, Edit, History};
+use crate::annot_edit::{self, reply_of, ColorEdit, Edit, History};
 use crate::error::{PdfError, Result};
 use crate::stamp;
 use crate::text_fit;
@@ -396,6 +396,25 @@ fn pdf_now() -> String {
     )
 }
 
+/// Respostas e status de `root`, inclusive respostas de respostas (em qualquer profundidade).
+fn descendants(annots: &[AnnotInfo], root: i32) -> Vec<i32> {
+    let mut found = vec![root];
+    let mut n = 0;
+    while n < found.len() {
+        let parent = found[n];
+        found.extend(
+            annots
+                .iter()
+                .filter(|a| a.reply_to == Some(parent) && !found.contains(&a.id))
+                .map(|a| a.id)
+                .collect::<Vec<_>>(),
+        );
+        n += 1;
+    }
+    found.remove(0);
+    found
+}
+
 /// Junta à edição o crescimento da caixa de texto, quando `fit` = (atual, necessário) difere.
 fn with_fit(edit: Edit, page: i32, id: i32, fit: Option<(PdfRect, PdfRect)>) -> Edit {
     match fit {
@@ -500,10 +519,7 @@ pub(crate) fn annot_info(annot: &PdfAnnotation, page: i32) -> Result<AnnotInfo> 
         font,
         arrow: kind == AnnotKind::Line && annot.line_ending_styles()?.1 != LineEndingStyle::None,
         author: annot.author()?.unwrap_or_default().to_owned(),
-        reply_to: match annot.object().get_dict("IRT")? {
-            Some(o) if o.is_indirect()? => Some(o.as_indirect()?),
-            _ => None,
-        },
+        reply_to: reply_of(annot)?,
         state: match annot_edit::name_entry(annot, "State")? {
             Some(state) => {
                 let model = match annot_edit::name_entry(annot, "StateModel")?.as_deref() {
@@ -534,9 +550,19 @@ impl PdfDoc {
         self.check_page(page)?;
         let page_ref = self.inner.load_pdf_page(page)?;
         let mut out = Vec::new();
-        for annot in page_ref.annotations() {
-            if annot.flags()?.contains(AnnotationFlags::IS_HIDDEN) {
-                continue; // apagada (até salvar) ou escondida de fábrica: invisível, fora da lista
+        for mut annot in page_ref.annotations() {
+            if self.history.hidden.contains(&(page, annot_id(&annot)?)) {
+                continue; // apagada por nós (sai do arquivo ao salvar)
+            }
+            let flags = annot.flags()?;
+            if reply_of(&annot)?.is_some() {
+                // resposta/status: vai para o painel Comentários; na página não aparece (o Acrobat
+                // as esconde pelo /IRT; o MuPDF só respeita as flags)
+                if !flags.intersects(AnnotationFlags::IS_HIDDEN | AnnotationFlags::NO_VIEW) {
+                    annot.set_flags(flags | AnnotationFlags::NO_VIEW)?;
+                }
+            } else if flags.contains(AnnotationFlags::IS_HIDDEN) {
+                continue; // escondida de fábrica: invisível, fora da lista
             }
             out.push(annot_info(&annot, page)?);
         }
@@ -745,11 +771,9 @@ impl PdfDoc {
                     id,
                     hidden: true,
                 };
-                let children: Vec<Edit> = self
-                    .annotations(page)?
-                    .iter()
-                    .filter(|a| a.reply_to == Some(id))
-                    .map(|a| hide(a.id))
+                let children: Vec<Edit> = descendants(&self.annotations(page)?, id)
+                    .into_iter()
+                    .map(hide)
                     .collect();
                 if children.is_empty() {
                     hide(id)
@@ -828,7 +852,8 @@ impl PdfDoc {
                 obj.dict_put("State", PdfObject::new_name(name)?)?;
             }
         }
-        let flags = child.flags()? | AnnotationFlags::NO_VIEW;
+        // fora da tela e da impressão: a conversa fica no painel Comentários
+        let flags = (child.flags()? | AnnotationFlags::NO_VIEW) - AnnotationFlags::IS_PRINT;
         child.set_flags(flags)?;
         self.sign(&mut child)?;
         child.update()?;

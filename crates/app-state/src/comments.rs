@@ -20,9 +20,56 @@ impl Thread {
     }
 }
 
-/// Ordem cronológica de anotações: data de modificação e, no empate, o id (a mais nova vence).
-fn chrono_key(a: &AnnotInfo) -> (&str, i32) {
-    (a.modified.as_str(), a.id)
+/// Data do PDF (`D:AAAAMMDDhhmmss` com fuso `Z`, `+hh'mm'` ou `-hh'mm'`) em segundos UTC, para
+/// comparar datas de programas e fusos diferentes. Inválida: o menor valor.
+pub fn utc_key(raw: &str) -> i64 {
+    let s = raw.trim().strip_prefix("D:").unwrap_or(raw.trim());
+    let num = |a: usize, b: usize, default: i64| -> Option<i64> {
+        match s.get(a..b) {
+            Some(t) if t.bytes().all(|c| c.is_ascii_digit()) && !t.is_empty() => t.parse().ok(),
+            Some(_) => None,
+            None => Some(default),
+        }
+    };
+    let parsed = (|| {
+        let y = num(0, 4, -1).filter(|y| *y >= 0)?;
+        let (mo, d) = (num(4, 6, 1)?, num(6, 8, 1)?);
+        let (h, mi, se) = (num(8, 10, 0)?, num(10, 12, 0)?, num(12, 14, 0)?);
+        let tz = s.get(14..).unwrap_or("");
+        let offset = match tz.chars().next() {
+            Some(sign @ ('+' | '-')) => {
+                let digits: String = tz[1..].chars().filter(char::is_ascii_digit).collect();
+                let oh: i64 = digits.get(0..2).and_then(|t| t.parse().ok()).unwrap_or(0);
+                let om: i64 = digits.get(2..4).and_then(|t| t.parse().ok()).unwrap_or(0);
+                let m = oh * 60 + om;
+                if sign == '-' {
+                    -m
+                } else {
+                    m
+                }
+            }
+            _ => 0,
+        };
+        // dias desde 1970-01-01 (algoritmo civil de Howard Hinnant)
+        let (yy, mm) = if mo <= 2 {
+            (y - 1, mo + 9)
+        } else {
+            (y, mo - 3)
+        };
+        let era = yy.div_euclid(400);
+        let yoe = yy - era * 400;
+        let doy = (153 * mm + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era * 146_097 + doe - 719_468;
+        Some(days * 86_400 + h * 3600 + mi * 60 + se - offset * 60)
+    })();
+    parsed.unwrap_or(i64::MIN)
+}
+
+/// Ordem cronológica de anotações: data de modificação em UTC e, no empate, o id (a mais nova
+/// vence).
+fn chrono_key(a: &AnnotInfo) -> (i64, i32) {
+    (utc_key(&a.modified), a.id)
 }
 
 /// Monta as conversas: só os comentários (sem `reply_to`) viram linhas; respostas e status ficam
@@ -44,14 +91,31 @@ pub fn threads(annots: &[AnnotInfo]) -> Vec<Thread> {
         .map(|(n, t)| (t.root.id, n))
         .collect();
     let mut children: Vec<&AnnotInfo> = annots.iter().filter(|a| a.is_reply()).collect();
-    children.sort_by(|x, y| chrono_key(x).cmp(&chrono_key(y)));
+    children.sort_by_cached_key(|a| chrono_key(a));
+    let parent_of: HashMap<i32, i32> = annots
+        .iter()
+        .filter_map(|a| Some((a.id, a.reply_to?)))
+        .collect();
+    // a raiz de uma resposta (respostas de respostas sobem até o comentário)
+    let root_of = |mut id: i32| -> Option<usize> {
+        for _ in 0..64 {
+            match index.get(&id) {
+                Some(&n) => return Some(n),
+                None => id = *parent_of.get(&id)?,
+            }
+        }
+        None
+    };
     for child in children {
-        let Some(&n) = child.reply_to.and_then(|p| index.get(&p)) else {
+        let Some(n) = child.reply_to.and_then(root_of) else {
             continue;
         };
         let t = &mut out[n];
+        let on_root = child.reply_to == Some(t.root.id);
         match &child.state {
             None => t.replies.push(child.clone()),
+            // status de uma resposta não é o do comentário
+            Some(_) if !on_root => {}
             Some((StateModel::Review, s)) => {
                 t.review = ReviewState::from_pdf(s).map(|r| (r, child.author.clone()));
             }
@@ -102,7 +166,10 @@ impl CommentFilter {
                 .any(|a| fold(&a.contents).contains(&query) || fold(&a.author).contains(&query));
         found
             && (self.kinds.is_empty() || self.kinds.contains(&t.root.kind))
-            && (self.authors.is_empty() || self.authors.contains(&t.root.author))
+            && (self.authors.is_empty()
+                || std::iter::once(&t.root)
+                    .chain(&t.replies)
+                    .any(|a| self.authors.contains(&a.author)))
             && (self.statuses.is_empty() || self.statuses.contains(&t.status()))
             && self.checked.is_none_or(|c| c == t.checked)
     }
@@ -140,7 +207,7 @@ pub fn sorted(mut threads: Vec<Thread>, by: SortBy) -> Vec<Thread> {
     match by {
         SortBy::Page => threads.sort_by_key(|t| place(&t.root)),
         SortBy::Author => threads.sort_by_cached_key(|t| (fold(&t.root.author), place(&t.root))),
-        SortBy::Date => threads.sort_by(|x, y| chrono_key(&x.root).cmp(&chrono_key(&y.root))),
+        SortBy::Date => threads.sort_by_cached_key(|t| chrono_key(&t.root)),
         SortBy::Kind => threads.sort_by_key(|t| (t.root.kind as u8, place(&t.root))),
     }
     threads
@@ -356,5 +423,30 @@ mod tests {
         assert_eq!(ids(SortBy::Page), [2, 3, 1]);
         assert_eq!(ids(SortBy::Author), [2, 3, 1], "sem diferenciar maiúsculas");
         assert_eq!(ids(SortBy::Date), [1, 3, 2]);
+    }
+
+    #[test]
+    fn replies_of_replies_join_the_root_thread() {
+        let all = vec![
+            a(1, 0, "Ana", "D:20261009100000", "pai"),
+            reply(2, 1, "Bia", "D:20261009110000", "filha"),
+            reply(3, 2, "Caio", "D:20261009120000", "neta"),
+        ];
+        let t = threads(&all);
+        assert_eq!(t.len(), 1);
+        let texts: Vec<_> = t[0].replies.iter().map(|r| r.contents.as_str()).collect();
+        assert_eq!(texts, ["filha", "neta"]);
+    }
+
+    #[test]
+    fn dates_compare_in_utc() {
+        // 10:00 em São Paulo (-03) é depois de 12:00 em UTC
+        assert!(utc_key("D:20261009100000-03'00'") > utc_key("D:20261009120000Z"));
+        assert!(utc_key("D:20261009100000") < utc_key("D:20261009100001"));
+        assert_eq!(
+            utc_key(""),
+            utc_key("lixo"),
+            "datas inválidas ficam juntas no começo"
+        );
     }
 }
