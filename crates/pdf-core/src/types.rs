@@ -406,6 +406,38 @@ pub enum LinkTarget {
     Blocked(String),
 }
 
+/// Visualização inicial pedida pelo arquivo (`/PageMode`, `/PageLayout`, `/OpenAction`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct InitialView {
+    pub panel: Option<InitialPanel>,
+    pub full_screen: bool,
+    pub layout: Option<InitialLayout>,
+    pub page: Option<i32>,
+    pub zoom: Option<InitialZoom>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitialPanel {
+    Bookmarks,
+    Thumbnails,
+}
+
+/// `cover`: a primeira página sozinha (variantes `…Right`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitialLayout {
+    Single,
+    OneColumn,
+    TwoColumn { cover: bool },
+    TwoPage { cover: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum InitialZoom {
+    FitPage,
+    FitWidth,
+    Factor(f32),
+}
+
 #[derive(Debug, Clone)]
 pub struct DocSummary {
     pub path: PathBuf,
@@ -414,6 +446,7 @@ pub struct DocSummary {
     pub annots: Vec<AnnotInfo>,
     /// Links de todas as páginas.
     pub links: Vec<LinkInfo>,
+    pub initial_view: InitialView,
     /// Campos de formulário de todas as páginas.
     pub fields: Vec<crate::FieldInfo>,
     pub form_notes: crate::FormNotes,

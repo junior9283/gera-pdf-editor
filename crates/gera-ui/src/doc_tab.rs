@@ -704,6 +704,7 @@ impl DocTab {
                         self.events.push(DocEvent::Failed(msg));
                     }
                 }
+                Response::Tile { .. } | Response::ContentBox { .. } => {} // Tarefa 6
                 Response::Rendered {
                     page,
                     scale,

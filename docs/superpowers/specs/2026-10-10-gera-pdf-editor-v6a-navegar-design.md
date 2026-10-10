@@ -67,8 +67,9 @@ Fontes: o documento de avaliação (helpx `keyboard-shortcuts`, `navigation`, `a
        a: <url>", os botões **Permitir** e **Bloquear** e a caixa "Lembrar desta ação para este site".
        A escolha lembrada fica em `prefs.link_sites` (host → permitir/bloquear) e vale para todos os PDFs.
        A URL abre no navegador padrão (`ctx.open_url`).
-     - **File:** se existir, abre numa aba (ou ativa a aba, se já estiver aberto) e vai à página. Se não
-       existir, a barra de status diz "Arquivo não encontrado: <nome>".
+     - **File:** o mesmo aviso, com o texto "O documento está tentando abrir o arquivo: <caminho>" e sem a
+       caixa de lembrar. Com Permitir, abre numa aba (ou ativa a aba, se já estiver aberto) e vai à
+       página. Se o arquivo não existir, a barra de status diz "Arquivo não encontrado: <nome>".
      - **Blocked:** a barra de status diz "Este link tenta abrir um programa ou endereço não permitido e
        foi bloqueado."
 3. **Histórico de vistas** (`app_state::view_history`).
@@ -155,8 +156,9 @@ Fontes: o documento de avaliação (helpx `keyboard-shortcuts`, `navigation`, `a
 - Uma URL só abre depois do aviso, ou da escolha lembrada para o host. Esquemas fora da lista branca nunca
   abrem.
 - `Launch` de programa é sempre bloqueado.
-- Um arquivo de `GoToR` só abre se for `.pdf` e existir, e passa pelo mesmo caminho de abertura dos outros
-  documentos (senha, permissões).
+- Um arquivo de `GoToR` ou `Launch` só abre se for `.pdf` (senão vira `Blocked`) e existir, depois do aviso.
+  Ele passa pelo mesmo caminho de abertura dos outros documentos (senha, permissões). O caminho vem do PDF,
+  que não é confiável, e por isso o aviso mostra o caminho absoluto.
 - O host lembrado é comparado em minúsculas e sem porta. Uma URL sem host (`mailto:`) é lembrada pelo
   esquema.
 

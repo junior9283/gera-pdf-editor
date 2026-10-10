@@ -1,4 +1,4 @@
-use pdf_core::{LinkTarget, PdfDoc};
+use pdf_core::{InitialLayout, InitialPanel, InitialZoom, LinkTarget, PdfDoc};
 use std::path::{Path, PathBuf};
 
 /// Escreve um PDF a partir dos corpos dos objetos (o objeto `i` é `objs[i - 1]`), com xref.
@@ -187,3 +187,39 @@ fn summary_carries_links() {
     assert!(s.links.iter().all(|l| l.page == 0));
 }
 
+
+fn initial(catalog_extra: &str) -> pdf_core::InitialView {
+    let dir = tempfile::tempdir().unwrap();
+    let path = links_pdf(dir.path(), &[], catalog_extra);
+    PdfDoc::open(&path, None).unwrap().summary().unwrap().initial_view
+}
+
+#[test]
+fn initial_view_reads_mode_layout_and_open_action() {
+    let v = initial("/PageMode/UseOutlines/PageLayout/TwoPageRight/OpenAction[4 0 R/FitH 500]");
+    assert_eq!(v.panel, Some(InitialPanel::Bookmarks));
+    assert!(!v.full_screen);
+    assert_eq!(v.layout, Some(InitialLayout::TwoPage { cover: true }));
+    assert_eq!(v.page, Some(1));
+    assert_eq!(v.zoom, Some(InitialZoom::FitWidth));
+
+    let v = initial("/PageMode/FullScreen/PageLayout/OneColumn/OpenAction<</S/GoTo/D[3 0 R/XYZ 0 792 1.5]>>");
+    assert!(v.full_screen);
+    assert_eq!(v.layout, Some(InitialLayout::OneColumn));
+    assert_eq!((v.page, v.zoom), (Some(0), Some(InitialZoom::Factor(1.5))));
+
+    let v = initial("/PageMode/UseThumbs/PageLayout/TwoColumnLeft/OpenAction[3 0 R/Fit]");
+    assert_eq!(v.panel, Some(InitialPanel::Thumbnails));
+    assert_eq!(v.layout, Some(InitialLayout::TwoColumn { cover: false }));
+    assert_eq!(v.zoom, Some(InitialZoom::FitPage));
+
+    let v = initial("/PageLayout/SinglePage/OpenAction(cap1)");
+    assert_eq!((v.layout, v.page), (Some(InitialLayout::Single), Some(1)));
+}
+
+#[test]
+fn initial_view_ignores_junk() {
+    let v = initial("/PageMode 3/PageLayout/Nada/OpenAction[99 0 R/XYZ 0 0 -2]");
+    assert_eq!(v, pdf_core::InitialView::default());
+    assert_eq!(initial("/OpenAction<</S/JavaScript/JS(app.alert(1))>>"), pdf_core::InitialView::default());
+}

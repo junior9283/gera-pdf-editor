@@ -1,8 +1,10 @@
 //! Links das páginas: para onde cada um leva, já filtrado pelo que é seguro seguir.
 use crate::doc::PdfDoc;
 use crate::error::Result;
-use crate::types::{LinkInfo, LinkTarget, PdfRect};
-use mupdf::pdf::{FileSpec, LinkAction, PdfAction, PdfDestination};
+use crate::types::{
+    InitialLayout, InitialPanel, InitialView, InitialZoom, LinkInfo, LinkTarget, PdfRect,
+};
+use mupdf::pdf::{FileSpec, LinkAction, PdfAction, PdfDestination, PdfObject};
 use mupdf::DestinationKind;
 use std::path::{Component, Path, PathBuf};
 
@@ -37,6 +39,89 @@ impl PdfDoc {
     }
 }
 
+impl PdfDoc {
+    /// Como o arquivo pede para ser aberto. O que não se entende é ignorado.
+    pub(crate) fn initial_view(&self) -> InitialView {
+        let Ok(catalog) = self.inner.catalog() else {
+            return InitialView::default();
+        };
+        let name = |key: &str| -> Option<Vec<u8>> {
+            let o = catalog.get_dict(key).ok().flatten()?;
+            o.is_name().ok()?.then(|| o.as_name().ok()).flatten()
+        };
+        let mode = name("PageMode");
+        let mut view = InitialView {
+            panel: match mode.as_deref() {
+                Some(b"UseOutlines") => Some(InitialPanel::Bookmarks),
+                Some(b"UseThumbs") => Some(InitialPanel::Thumbnails),
+                _ => None,
+            },
+            full_screen: mode.as_deref() == Some(b"FullScreen"),
+            layout: match name("PageLayout").as_deref() {
+                Some(b"SinglePage") => Some(InitialLayout::Single),
+                Some(b"OneColumn") => Some(InitialLayout::OneColumn),
+                Some(b"TwoColumnLeft") => Some(InitialLayout::TwoColumn { cover: false }),
+                Some(b"TwoColumnRight") => Some(InitialLayout::TwoColumn { cover: true }),
+                Some(b"TwoPageLeft") => Some(InitialLayout::TwoPage { cover: false }),
+                Some(b"TwoPageRight") => Some(InitialLayout::TwoPage { cover: true }),
+                _ => None,
+            },
+            ..InitialView::default()
+        };
+        if let Some((page, zoom)) = catalog
+            .get_dict("OpenAction")
+            .ok()
+            .flatten()
+            .and_then(|a| self.open_action(&a))
+        {
+            view.page = Some(page);
+            view.zoom = zoom;
+        }
+        view
+    }
+
+    /// Página e ampliação de `/OpenAction` (destino, ou ação GoTo). Outras ações (JavaScript…)
+    /// são ignoradas.
+    fn open_action(&self, action: &PdfObject) -> Option<(i32, Option<InitialZoom>)> {
+        let dest = if action.is_dict().ok()? {
+            let kind = action.get_dict("S").ok()??;
+            (kind.as_name().ok()? == b"GoTo").then_some(())?;
+            action.get_dict("D").ok()??
+        } else {
+            action.clone()
+        };
+        let count = self.page_count().ok()?;
+        if dest.is_string().ok()? || dest.is_name().ok()? {
+            let name = if dest.is_string().ok()? {
+                dest.as_string().ok()?.to_string()
+            } else {
+                String::from_utf8_lossy(&dest.as_name().ok()?).into_owned()
+            };
+            let d = self.inner.resolve_link(&format!("#nameddest={name}")).ok()??;
+            let page = i32::try_from(d.loc.page_number).ok().filter(|p| *p < count)?;
+            return Some((page, None));
+        }
+        (dest.is_array().ok()? && dest.len().ok()? >= 2).then_some(())?;
+        let page_obj = dest.get_array(0).ok()??;
+        let page = self.inner.lookup_page_number(&page_obj).ok()?;
+        (0..count).contains(&page).then_some(())?;
+        let kind = dest.get_array(1).ok()??.as_name().ok()?;
+        let zoom = match kind.as_slice() {
+            b"Fit" | b"FitB" => Some(InitialZoom::FitPage),
+            b"FitH" | b"FitBH" => Some(InitialZoom::FitWidth),
+            b"XYZ" => dest
+                .get_array(4)
+                .ok()
+                .flatten()
+                .and_then(|z| z.as_float().ok())
+                .filter(|z| z.is_finite() && *z > 0.0)
+                .map(InitialZoom::Factor),
+            _ => None,
+        };
+        Some((page, zoom))
+    }
+}
+
 fn target_of(action: LinkAction, page_count: i32, dir: &Path) -> Option<LinkTarget> {
     let action = match action {
         LinkAction::Action(a) => a,
@@ -57,10 +142,11 @@ fn target_of(action: LinkAction, page_count: i32, dir: &Path) -> Option<LinkTarg
                 PdfDestination::Named(_) => None,
             };
             Some(match file {
-                FileSpec::Path(p) => LinkTarget::File {
+                FileSpec::Path(p) if is_pdf(&p) => LinkTarget::File {
                     path: absolute(dir, &p),
                     page,
                 },
+                FileSpec::Path(p) => LinkTarget::Blocked(p),
                 FileSpec::Url(u) => web(u),
             })
         }
@@ -134,6 +220,21 @@ mod tests {
             PathBuf::from("/a/c/d.pdf")
         );
         assert_eq!(absolute(Path::new("/a"), "/x.pdf"), PathBuf::from("/x.pdf"));
+    }
+
+    #[test]
+    fn remote_target_must_be_a_pdf() {
+        let goto_r = |p: &str| PdfAction::GoToR {
+            file: FileSpec::Path(p.into()),
+            dest: PdfDestination::Page {
+                page: 0,
+                kind: DestinationKind::Fit,
+            },
+        };
+        let t = target_of(LinkAction::Action(goto_r("../../bin/sh")), 1, Path::new("/a"));
+        assert!(matches!(t, Some(LinkTarget::Blocked(_))), "{t:?}");
+        let t = target_of(LinkAction::Action(goto_r("x.PDF")), 1, Path::new("/a"));
+        assert!(matches!(t, Some(LinkTarget::File { .. })), "{t:?}");
     }
 
     #[test]
