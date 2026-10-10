@@ -6,7 +6,21 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 ## [Não lançado]
 
-- Redigir e Comparar arquivos (rumo à 1.0.0).
+- Comparar arquivos (rumo à 1.0.0).
+
+## [0.11.0] — 2026-10-10 · Redigir (v5e)
+
+### Adicionado
+- **Redigir**: marcar texto (arrastando) ou área; **Localizar texto e redigir** por frase ou
+  padrões (CPF e CNPJ com dígito verificador, telefone, e-mail, cartão de crédito com Luhn, CEP,
+  data); propriedades (cor da caixa e texto sobreposto).
+- **Aplicar** (com confirmação) apaga de vez o texto, os pixels das imagens e os desenhos cobertos,
+  e também o que repetiria o conteúdo: campos de formulário e comentários sob as marcas, texto
+  alternativo (/ActualText), miniatura e dados privados da página. Marcas desfeitas não são
+  aplicadas; salvar com marcas pendentes pergunta antes, e "Aplicar e salvar" só grava se a
+  redação der certo.
+- **Limpar documento**: metadados (do documento e das páginas), anexos, scripts e ações,
+  comentários.
 
 ## [0.10.0] — 2026-10-10 · Marca d'água e Cabeçalho e rodapé (v2c)
 
@@ -92,7 +106,8 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 ### Adicionado
 - Visualizador leve: abrir, rolar, zoom, miniaturas, busca, destaque, sublinhado, notas e desenho.
 
-[Não lançado]: https://github.com/junior9283/gera-pdf-editor/compare/v0.10.0...HEAD
+[Não lançado]: https://github.com/junior9283/gera-pdf-editor/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/junior9283/gera-pdf-editor/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/junior9283/gera-pdf-editor/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/junior9283/gera-pdf-editor/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/junior9283/gera-pdf-editor/compare/v0.7.0...v0.8.0
