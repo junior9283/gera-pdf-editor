@@ -502,6 +502,12 @@ impl GeraApp {
                 .inner
                 .or(cmd);
         }
+        if doc.redact.open {
+            cmd = egui::Panel::top("redigir")
+                .show(ui, |ui| toolbar::redact_row(ui, doc))
+                .inner
+                .or(cmd);
+        }
         if doc.protect_tools {
             cmd = egui::Panel::top("proteger")
                 .show(ui, |ui| toolbar::protect_row(ui, doc))
@@ -754,6 +760,7 @@ impl GeraApp {
             tools_catalog::CERTIFICATES => tools_catalog::CERTIFICATES,
             tools_catalog::PROTECT => tools_catalog::PROTECT,
             tools_catalog::WATERMARK => tools_catalog::WATERMARK,
+            tools_catalog::REDACT => tools_catalog::REDACT,
             tools_catalog::HEADER_FOOTER => tools_catalog::HEADER_FOOTER,
             _ => return,
         };

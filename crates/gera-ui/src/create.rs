@@ -45,6 +45,10 @@ impl EditState {
                 rect: rect_from_drag(a, b, shift),
                 ellipse: tool == Tool::Ellipse,
             },
+            Tool::RedactArea => NewAnnot::Redact {
+                page,
+                rects: vec![rect_from_drag(a, b, false)],
+            },
             Tool::Line | Tool::Arrow => NewAnnot::Line {
                 page,
                 a,
@@ -243,7 +247,7 @@ impl EditState {
         };
         let stroke = egui::Stroke::new(1.5, color32(COMMENT_RED));
         match self.tool {
-            Tool::Rect | Tool::TextBox => {
+            Tool::Rect | Tool::TextBox | Tool::RedactArea => {
                 let r = screen_rect(
                     &rect_from_drag(d.from, d.to, d.shift && self.tool == Tool::Rect),
                     map,

@@ -210,6 +210,47 @@ pub fn edit_pdf_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     out
 }
 
+/// Linha do Redigir (como no Acrobat): marcar texto ou área, Localizar texto e redigir,
+/// Propriedades, Aplicar, Limpar documento, desfazer/refazer e Fechar.
+pub fn redact_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
+    use app_state::tools::Tool;
+    let mut out = None;
+    ui.horizontal(|ui| {
+        for (tool, label) in [
+            (Tool::RedactText, "⬛ Marcar texto"),
+            (Tool::RedactArea, "⬚ Marcar área"),
+        ] {
+            ui.selectable_value(&mut doc.edit.tool, tool, label)
+                .on_hover_text(tool.label());
+        }
+        if ui.button("🔍 Localizar texto…").clicked() {
+            doc.redact.find = Some(Default::default());
+        }
+        if ui.button("Propriedades…").clicked() {
+            doc.redact.open_props();
+        }
+        let marks = doc
+            .annots
+            .iter()
+            .filter(|a| a.kind == pdf_core::AnnotKind::Redact)
+            .count();
+        if ui
+            .add_enabled(marks > 0, egui::Button::new(format!("Aplicar ({marks})")))
+            .on_hover_text("Apaga de vez o que está sob as marcas")
+            .clicked()
+        {
+            doc.redact.confirm = true;
+        }
+        if ui.button("Limpar documento…").clicked() {
+            doc.redact.sanitize = Some(Default::default());
+        }
+        ui.separator();
+        undo_redo(ui, doc, &mut out);
+        close_row(ui, doc);
+    });
+    out
+}
+
 /// Linha da Marca d'água ou do Cabeçalho e rodapé: Adicionar…, Atualizar…, Remover, desfazer/refazer
 /// e Fechar (como no Acrobat).
 pub fn pagination_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {

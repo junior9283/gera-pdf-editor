@@ -50,6 +50,7 @@ pub const COMPRESS: &str = "comprimir";
 pub const CREATE: &str = "criar";
 pub const EDIT_PDF: &str = "editar";
 pub const WATERMARK: &str = "marca-dagua";
+pub const REDACT: &str = "redigir";
 pub const HEADER_FOOTER: &str = "cabecalho";
 pub const EXPORT: &str = "exportar";
 pub const OCR: &str = "ocr";
@@ -90,7 +91,7 @@ pub const CATALOG: &[ToolEntry] = &[
     tool(CERTIFICATES, "Certificados", "🔏", Review, Ready, "Assinatura digital com certificado e validação"),
     tool("comparar", "Comparar arquivos", "⚖", Review, Planned("v5"), "Diferenças entre duas versões"),
     tool(PROTECT, "Proteger PDF", "🔒", Protect, Ready, "Senha e permissões"),
-    tool("redigir", "Redigir", "⬛", Protect, Planned("v5"), "Apagar informações sensíveis de vez"),
+    tool(REDACT, "Redigir", "⬛", Protect, Ready, "Apagar informações sensíveis de vez"),
     tool(COMPRESS, "Comprimir PDF", "⛃", Protect, Ready, "Reduzir o tamanho do arquivo"),
     tool(PREPARE_FORM, "Preparar formulário", "🗋", Protect, Ready, "Criar e editar campos de formulário"),
     tool("organizar", "Organizar páginas", "🗁", Organize, Ready, "Reordenar, girar e excluir páginas"),
@@ -160,6 +161,7 @@ mod tests {
                 FILL_SIGN,
                 CERTIFICATES,
                 PROTECT,
+                REDACT,
                 COMPRESS,
                 PREPARE_FORM,
                 ORGANIZE,

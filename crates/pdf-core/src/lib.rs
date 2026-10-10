@@ -16,6 +16,7 @@ mod page_content;
 mod pages;
 mod pagination;
 mod prepare;
+mod redact;
 mod security;
 mod sign;
 pub mod signature;
@@ -39,6 +40,7 @@ pub use pagination::{
     StdFont, TextLook, Watermark, WatermarkSource,
 };
 pub use prepare::{FieldProps, NewFieldKind, PrepareOp};
+pub use redact::{RedactHit, RedactLook, RedactPattern, RedactQuery, SanitizeOptions};
 pub use security::{Permissions, Protection, SecurityInfo};
 pub use sign::{display_date, Integrity, SignPlace, SignatureInfo};
 pub use split::{combine, safe_file_name, SplitRule};

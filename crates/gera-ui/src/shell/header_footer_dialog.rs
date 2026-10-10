@@ -1,6 +1,7 @@
 //! Janela "Adicionar cabeçalho e rodapé" (como no Acrobat): seis caixas, fonte, margens, número da
 //! página, data e numeração Bates, páginas e prévia.
-use crate::shell::watermark_dialog::{look_editor, ok_cancel_window, preview_page, Pages};
+use crate::shell::dialog::ok_cancel_window;
+use crate::shell::watermark_dialog::{look_editor, preview_page, Pages};
 use pdf_core::{Bates, DateFormat, HeaderFooter, StdFont, TextLook};
 
 const BOXES: [&str; 6] = [

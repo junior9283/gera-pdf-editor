@@ -16,6 +16,9 @@ pub enum Tool {
     /// Uma ferramenta do Preencher e assinar (qual, fica no estado de edição); fora de `ALL`,
     /// que é a linha Comentar.
     Fill,
+    /// Redigir: marcar texto (arrastando sobre ele) ou uma área (retângulo); fora de `ALL`.
+    RedactText,
+    RedactArea,
 }
 
 impl Tool {
@@ -47,6 +50,8 @@ impl Tool {
             Tool::Arrow => "Seta",
             Tool::Stamp => "Carimbo",
             Tool::Fill => "Preencher e assinar",
+            Tool::RedactText => "Marcar texto para redação",
+            Tool::RedactArea => "Marcar área para redação",
         }
     }
 }

@@ -129,6 +129,8 @@ pub struct DocTab {
     pub(crate) security: pdf_core::SecurityInfo,
     /// Linha Proteger PDF aberta.
     pub(crate) protect_tools: bool,
+    /// Ferramenta Redigir (aberta ou não) e o estado dela.
+    pub(crate) redact: crate::redact_tool::RedactTool,
     pub(crate) protect: Option<crate::shell::protect_dialog::ProtectDialog>,
     /// Pedido da senha de permissões (Desbloquear).
     pub(crate) unlock: Option<String>,
@@ -237,6 +239,7 @@ impl DocTab {
             cert: Default::default(),
             security: Default::default(),
             protect_tools: false,
+            redact: Default::default(),
             protect: None,
             unlock: None,
             compress: None,
@@ -382,8 +385,21 @@ impl DocTab {
         }
     }
 
-    /// Salvar: só quando há o que gravar.
+    /// Salvar: com marcas de redação não aplicadas, pergunta antes (como o Acrobat).
     pub fn save(&mut self) {
+        if self
+            .annots
+            .iter()
+            .any(|a| a.kind == pdf_core::AnnotKind::Redact)
+        {
+            self.redact.pending_save = true;
+            return;
+        }
+        self.save_now();
+    }
+
+    /// Salvar de fato: só quando há o que gravar.
+    pub(crate) fn save_now(&mut self) {
         // o worker atende em ordem: o valor do campo chega antes da gravação
         let typed = self.commit_field();
         if let Some(view) = self.view.as_ref().filter(|_| self.history.dirty || typed) {
@@ -726,7 +742,8 @@ impl DocTab {
                     }
                 }
                 Response::PagesChanged { summary, history } => {
-                    self.on_pages_changed(summary, history)
+                    self.on_pages_changed(summary, history);
+                    self.on_redaction_outcome(true);
                 }
                 Response::PagesFailed(msg) => {
                     self.delete_after_extract = None;
@@ -782,8 +799,14 @@ impl DocTab {
                 }
                 Response::EditFailed(msg) => {
                     self.status = format!("Não foi possível fazer a alteração: {msg}");
+                    self.on_redaction_outcome(false);
                 }
                 Response::PageImages { page, images } => self.edit_pdf.on_images(page, images),
+                Response::RedactHits(hits) => {
+                    if let Some(find) = self.redact.find.as_mut() {
+                        find.on_hits(hits);
+                    }
+                }
                 Response::PaginationState {
                     kind,
                     present,
@@ -1290,6 +1313,7 @@ impl DocTab {
             tc::EDIT_PDF => (!p.modify).then_some("editar o PDF"),
             tc::WATERMARK | tc::HEADER_FOOTER => (!p.modify).then_some("alterar as páginas"),
             tc::CERTIFICATES => (!p.forms).then_some("assinar"),
+            tc::REDACT => (!p.modify).then_some("redigir"),
             _ => None,
         };
         if let Some(what) = denied {
@@ -1317,6 +1341,13 @@ impl DocTab {
             send_edit_action(&self.worker, &mut self.status, action);
         }
         self.edit.set_fill_tool(None);
+        self.redact.set_open(id == tc::REDACT);
+        // a ferramenta com que a linha abre (o Redigir já marcando texto)
+        self.edit.tool = if self.redact.open {
+            app_state::tools::Tool::RedactText
+        } else {
+            app_state::tools::Tool::Select
+        };
     }
 
     /// Editar PDF: aplica `edit` à imagem selecionada.
@@ -1510,6 +1541,7 @@ impl DocTab {
         self.field_props_window(ui.ctx());
         self.protect_windows(ui.ctx());
         self.pagination_windows(ui.ctx());
+        self.redact_windows(ui.ctx());
         self.compress_window(ui.ctx());
         self.export_window(ui.ctx());
         self.ocr_window(ui.ctx());
@@ -2211,6 +2243,45 @@ mod tests {
         tab.edit_pdf.editing.as_mut().unwrap().buffer = "Oi".into();
         assert!(tab.commit_field(), "o texto em edição vai antes de gravar");
         assert!(tab.edit_pdf.editing.is_none());
+    }
+
+    #[test]
+    fn opening_redact_marks_text_and_closing_it_goes_back_to_select() {
+        use app_state::tools::Tool;
+        let ctx = egui::Context::default();
+        let mut tab = DocTab::new(&ctx, PathBuf::from("/a.pdf"), false);
+        tab.show_row(app_state::tools_catalog::REDACT);
+        assert!(tab.redact.open);
+        assert_eq!(tab.edit.tool, Tool::RedactText);
+        tab.show_row("");
+        assert_eq!(tab.edit.tool, Tool::Select);
+    }
+
+    /// Como o Acrobat: salvar com marcas de redação não aplicadas pergunta antes (o arquivo sairia
+    /// com o texto intacto sob as marcas).
+    #[test]
+    fn saving_with_unapplied_redaction_marks_asks_first() {
+        let ctx = egui::Context::default();
+        let mut tab = DocTab::new(&ctx, PathBuf::from("/a.pdf"), false);
+        tab.annots.push(pdf_core::AnnotInfo {
+            kind: pdf_core::AnnotKind::Redact,
+            ..Default::default()
+        });
+        tab.save();
+        assert!(tab.redact.pending_save, "pergunta antes de salvar");
+    }
+
+    /// Aplicar e salvar falha fechado: grava só depois que a redação foi aplicada; se ela falhar,
+    /// nada é salvo (o arquivo sairia com o conteúdo sob as marcas).
+    #[test]
+    fn apply_and_save_waits_for_the_redaction_and_saves_nothing_if_it_fails() {
+        let ctx = egui::Context::default();
+        let mut tab = DocTab::new(&ctx, PathBuf::from("/a.pdf"), false);
+        tab.answer_save(crate::redact_tool::SaveChoice::ApplyAndSave);
+        assert!(tab.redact.save_after_apply, "espera o resultado da redação");
+        tab.on_redaction_outcome(false);
+        assert!(!tab.redact.save_after_apply);
+        assert!(tab.status.contains("não foi salvo"), "{}", tab.status);
     }
 
     #[test]

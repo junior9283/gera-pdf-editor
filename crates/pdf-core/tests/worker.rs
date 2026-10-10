@@ -522,3 +522,30 @@ fn watermark_through_the_worker() {
         Response::PaginationState { present: false, .. }
     ));
 }
+
+#[test]
+fn redaction_through_the_worker() {
+    let (_d, w, _) = opened(1);
+    w.send(Request::FindRedactions(pdf_core::RedactQuery::Phrase(
+        "hello".into(),
+    )));
+    let rect = match recv(&w) {
+        Response::RedactHits(hits) => hits[0].rects[0],
+        other => panic!("esperava RedactHits, veio {other:?}"),
+    };
+    w.send(Request::Annot(AnnotOp::Create(NewAnnot::Redact {
+        page: 0,
+        rects: vec![rect],
+    })));
+    assert!(matches!(recv(&w), Response::AnnotsChanged { .. }));
+    w.send(Request::ApplyRedactions(pdf_core::RedactLook {
+        fill: [0, 0, 0],
+        overlay: String::new(),
+        overlay_color: [255, 255, 255],
+    }));
+    assert!(matches!(recv(&w), Response::PagesChanged { .. }));
+    w.send(Request::FindRedactions(pdf_core::RedactQuery::Phrase(
+        "hello".into(),
+    )));
+    assert!(matches!(recv(&w), Response::RedactHits(h) if h.is_empty()));
+}

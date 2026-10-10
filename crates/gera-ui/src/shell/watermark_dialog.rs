@@ -1,6 +1,7 @@
 //! Janela "Adicionar marca d'água" (como no Acrobat): origem (texto ou arquivo), aparência
 //! (rotação, opacidade, escala, atrás/na frente), posição e páginas, com prévia. Também as peças
 //! comuns às janelas de marca d'água e de cabeçalho e rodapé.
+use crate::shell::dialog::ok_cancel_window;
 use pdf_core::{Align, PageSet, StdFont, TextLook, Watermark, WatermarkSource};
 use std::path::PathBuf;
 
@@ -148,41 +149,6 @@ pub fn look_editor(ui: &mut egui::Ui, id: &str, look: &mut TextLook, max_size: f
         );
         ui.color_edit_button_srgb(&mut look.color);
     });
-}
-
-/// Janela com OK e Cancelar (OK desligado enquanto `body` devolve um problema, mostrado embaixo).
-/// `Some(Some(_))`: OK; `Some(None)`: cancelou ou fechou.
-pub fn ok_cancel_window<T>(
-    ctx: &egui::Context,
-    title: &str,
-    body: impl FnOnce(&mut egui::Ui) -> Result<T, String>,
-) -> Option<Option<T>> {
-    let mut out = None;
-    let mut open = true;
-    egui::Window::new(title)
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .show(ctx, |ui| {
-            let result = body(ui);
-            ui.separator();
-            if let Err(p) = &result {
-                ui.colored_label(ui.visuals().weak_text_color(), p);
-            }
-            let ok = result.is_ok();
-            ui.horizontal(|ui| {
-                if ui.add_enabled(ok, egui::Button::new("OK")).clicked() {
-                    out = result.ok().map(Some);
-                }
-                if ui.button("Cancelar").clicked() {
-                    out = Some(None);
-                }
-            });
-        });
-    if !open {
-        return Some(None);
-    }
-    out
 }
 
 /// A página em miniatura para a prévia (altura `h`): o pintor, o retângulo e a escala pt → px.
