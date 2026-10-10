@@ -1,11 +1,11 @@
-use crate::annot_edit::{self, reply_of, ColorEdit, Edit, History};
+use crate::annot_edit::{self, reply_of, ColorEdit, Edit, History, Snapshot, Step};
 use crate::error::{PdfError, Result};
 use crate::stamp;
 use crate::text_fit;
 use crate::types::{
-    AnnotInfo, AnnotKind, AnnotOp, DocProperties, DocSummary, HistoryState, LineEnd, NewAnnot,
-    OutlineItem, PageSize, PdfRect, RenderedPage, Rotation, StateModel, TextSelection, Word,
-    COMMENT_RED,
+    AnnotInfo, AnnotKind, AnnotOp, Changed, DocProperties, DocSummary, HistoryState, LineEnd,
+    NewAnnot, OutlineItem, PageSize, PdfRect, RenderedPage, Rotation, StateModel, TextSelection,
+    Word, COMMENT_RED,
 };
 use mupdf::color::AnnotationColor;
 use mupdf::pdf::{
@@ -43,7 +43,7 @@ pub struct PdfDoc {
     /// Guardada só em memória, para reabrir o arquivo (`save_with` descarta as mudanças em erro).
     pub(crate) password: Option<String>,
     /// Desfazer/refazer das edições de anotação desde a última gravação.
-    history: History,
+    pub(crate) history: History,
     /// Edições que sobreviveram a uma gravação que falhou (o histórico delas já se perdeu).
     unsaved: bool,
     /// Nome gravado como autor (/T) nas anotações criadas.
@@ -608,7 +608,7 @@ impl PdfDoc {
         Ok(())
     }
 
-    fn purge_hidden(&mut self) -> Result<()> {
+    pub(crate) fn purge_hidden(&mut self) -> Result<()> {
         for &(page, id) in &self.history.hidden {
             if let Ok((mut page_ref, a)) = annot_edit::find(&self.inner, page, id) {
                 page_ref.delete_annotation(a)?;
@@ -801,12 +801,90 @@ impl PdfDoc {
     }
 
     /// Desfaz a última operação; devolve as páginas mudadas (vazio se não havia o que desfazer).
-    pub fn undo(&mut self) -> Result<Vec<i32>> {
-        Ok(self.history.undo(&self.inner)?.into_iter().collect())
+    pub fn undo(&mut self) -> Result<Changed> {
+        self.step(true)
     }
 
-    pub fn redo(&mut self) -> Result<Vec<i32>> {
-        Ok(self.history.redo(&self.inner)?.into_iter().collect())
+    pub fn redo(&mut self) -> Result<Changed> {
+        self.step(false)
+    }
+
+    /// Desfaz (`back`) ou refaz um passo; o passo contrário vai para a outra pilha. Em erro,
+    /// nada muda.
+    fn step(&mut self, back: bool) -> Result<Changed> {
+        let popped = if back {
+            self.history.undo.pop()
+        } else {
+            self.history.redo.pop()
+        };
+        let Some(step) = popped else {
+            return Ok(Changed::Pages(Vec::new()));
+        };
+        let result = match &step {
+            Step::Annot(edit) => {
+                let page = edit.page();
+                annot_edit::apply_edit(&self.inner, &mut self.history.hidden, edit.clone())
+                    .map(|inverse| (Step::Annot(inverse), Changed::Pages(vec![page])))
+            }
+            Step::Snapshot(snap) => self.snapshot().and_then(|now| {
+                self.restore(snap)?;
+                Ok((Step::Snapshot(now), Changed::Document))
+            }),
+        };
+        let (from, to) = if back {
+            (&mut self.history.undo, &mut self.history.redo)
+        } else {
+            (&mut self.history.redo, &mut self.history.undo)
+        };
+        match result {
+            Ok((other, changed)) => {
+                to.push(other);
+                Ok(changed)
+            }
+            Err(e) => {
+                from.push(step);
+                Err(e)
+            }
+        }
+    }
+
+    /// O documento em memória como está agora (com as apagadas pendentes), para desfazer.
+    pub(crate) fn snapshot(&self) -> Result<Snapshot> {
+        let mut bytes = Vec::new();
+        let mut keep = PdfWriteOptions::default();
+        keep.set_encryption(Encryption::Keep);
+        self.inner.write_to_with_options(&mut bytes, keep)?;
+        Ok(Snapshot {
+            bytes,
+            hidden: self.history.hidden.clone(),
+        })
+    }
+
+    /// Volta o documento ao instantâneo (com a mesma senha).
+    pub(crate) fn restore(&mut self, snap: &Snapshot) -> Result<()> {
+        let mut inner = PdfDocument::from_bytes(&snap.bytes)?;
+        if let Some(p) = self.password.as_deref() {
+            if inner.needs_password()? {
+                inner.authenticate(p)?;
+            }
+        }
+        self.inner = inner;
+        self.history.hidden = snap.hidden.clone();
+        Ok(())
+    }
+
+    /// Texto de uma página.
+    pub fn page_text(&self, page: i32) -> Result<String> {
+        Ok(self
+            .load(page)?
+            .to_text_page(TextPageFlags::empty())?
+            .to_text()?)
+    }
+
+    /// Rotação gravada na página (/Rotate), em graus.
+    pub fn page_rotation(&self, page: i32) -> Result<i32> {
+        self.check_page(page)?;
+        Ok(self.inner.load_pdf_page(page)?.rotation()?)
     }
 
     pub fn can_undo(&self) -> bool {

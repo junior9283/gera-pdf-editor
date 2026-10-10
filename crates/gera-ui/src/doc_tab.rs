@@ -301,6 +301,23 @@ impl DocTab {
         self.events.push(DocEvent::Opened);
     }
 
+    /// O documento mudou de páginas: recarrega tudo, ficando perto da página em que estava.
+    fn on_pages_changed(&mut self, summary: DocSummary, history: HistoryState) {
+        self.annots = summary.annots;
+        self.outline = summary.outline;
+        self.history = history;
+        self.edit.keep_valid_selection(&self.annots);
+        let page = self
+            .last
+            .current_page
+            .min(summary.sizes.len().saturating_sub(1));
+        if let Some(view) = self.view.as_mut() {
+            view.set_pages(summary.sizes);
+            self.jump_to = view.go_to(page as i32, None);
+        }
+        self.search.start(&self.worker); // os resultados antigos apontam para páginas velhas
+    }
+
     pub fn poll(&mut self, ctx: &egui::Context, mut bench: Option<&mut Bench>) {
         if let Some(msg) = self.print_jobs.poll().pop() {
             self.status = msg;
@@ -423,6 +440,18 @@ impl DocTab {
                             view.invalidate_page(page);
                         }
                     }
+                }
+                Response::PagesChanged { summary, history } => {
+                    self.on_pages_changed(summary, history)
+                }
+                Response::PagesFailed(msg) => {
+                    self.status = format!("Não foi possível organizar as páginas: {msg}");
+                }
+                Response::Extracted(files) => {
+                    self.status = match files.as_slice() {
+                        [one] => format!("Páginas extraídas para {}", one.display()),
+                        many => format!("{} arquivos extraídos", many.len()),
+                    };
                 }
                 Response::AnnotFailed(msg) => {
                     self.status = format!("Não foi possível alterar a anotação: {msg}");

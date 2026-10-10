@@ -463,3 +463,39 @@ pub struct HistoryState {
     /// Há edições ainda não gravadas no arquivo.
     pub dirty: bool,
 }
+
+/// Operação na organização das páginas (índices a partir de 0). Desfazer volta um instantâneo.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PageOp {
+    /// Gira as páginas em quartos de volta (positivo: horário).
+    Rotate { pages: Vec<i32>, quarter_turns: i32 },
+    /// Exclui as páginas (nunca todas).
+    Delete { pages: Vec<i32> },
+    /// Leva as páginas (na ordem em que estão) para antes da página `to` (`to` = total: fim).
+    Move { pages: Vec<i32>, to: i32 },
+    /// Página em branco antes de `at`, com o tamanho em pontos.
+    InsertBlank { at: i32, size: (f32, f32) },
+    /// Páginas de outro PDF antes de `at` (`range` = primeira e última, a partir de 0).
+    InsertFrom {
+        at: i32,
+        path: PathBuf,
+        password: Option<String>,
+        range: Option<(i32, i32)>,
+    },
+    /// Troca cada página de `pages` pela página `from + k` do outro PDF.
+    Replace {
+        pages: Vec<i32>,
+        path: PathBuf,
+        password: Option<String>,
+        from: i32,
+    },
+    /// Recorta (CropBox) as margens em pontos: cima, baixo, esquerda, direita.
+    Crop { pages: Vec<i32>, margins: [f32; 4] },
+}
+
+/// O que um desfazer/refazer mudou: anotações destas páginas, ou o documento inteiro (páginas).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Changed {
+    Pages(Vec<i32>),
+    Document,
+}

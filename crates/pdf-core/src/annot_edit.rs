@@ -91,11 +91,27 @@ impl Edit {
     }
 }
 
-/// Inversas para desfazer, mudanças para refazer e as anotações escondidas por nós.
+/// O documento inteiro guardado em memória (desfazer de operações de página) e as anotações
+/// que estavam apagadas naquele momento.
+pub(crate) struct Snapshot {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) hidden: HashSet<(i32, i32)>,
+}
+
+/// Um passo do desfazer/refazer: edição de anotação (com a inversa) ou instantâneo do documento.
+pub(crate) enum Step {
+    Annot(Edit),
+    Snapshot(Snapshot),
+}
+
+/// Memória máxima dos instantâneos; acima disso os passos mais antigos saem.
+pub(crate) const SNAPSHOT_BUDGET: usize = 512 * 1024 * 1024;
+
+/// Passos para desfazer e refazer e as anotações escondidas por nós.
 #[derive(Default)]
 pub(crate) struct History {
-    undo: Vec<Edit>,
-    redo: Vec<Edit>,
+    pub(crate) undo: Vec<Step>,
+    pub(crate) redo: Vec<Step>,
     /// (página, id) das apagadas e das criações desfeitas: saem do arquivo ao salvar.
     pub(crate) hidden: HashSet<(i32, i32)>,
 }
@@ -103,8 +119,31 @@ pub(crate) struct History {
 impl History {
     /// Uma operação nova do usuário: guarda a inversa e esquece o que dava para refazer.
     pub(crate) fn record(&mut self, inverse: Edit) {
-        self.undo.push(inverse);
+        self.undo.push(Step::Annot(inverse));
         self.redo.clear();
+    }
+
+    /// Uma operação de página nova: guarda o documento de antes, dentro do orçamento de memória.
+    pub(crate) fn record_snapshot(&mut self, before: Snapshot, budget: usize) {
+        self.undo.push(Step::Snapshot(before));
+        self.redo.clear();
+        let size = |s: &Step| match s {
+            Step::Snapshot(snap) => snap.bytes.len(),
+            Step::Annot(_) => 0,
+        };
+        while self.undo.iter().map(size).sum::<usize>() > budget {
+            // o passo mais antigo que pesa sai, com tudo o que vem antes dele
+            match self
+                .undo
+                .iter()
+                .position(|s| matches!(s, Step::Snapshot(_)))
+            {
+                Some(oldest) if oldest + 1 < self.undo.len() => {
+                    self.undo.drain(..=oldest);
+                }
+                _ => break,
+            }
+        }
     }
 
     pub(crate) fn can_undo(&self) -> bool {
@@ -113,38 +152,6 @@ impl History {
 
     pub(crate) fn can_redo(&self) -> bool {
         !self.redo.is_empty()
-    }
-
-    /// Desfaz o último passo; devolve a página mudada (`None` se não havia o que desfazer).
-    pub(crate) fn undo(&mut self, doc: &PdfDocument) -> Result<Option<i32>> {
-        step(doc, &mut self.hidden, &mut self.undo, &mut self.redo)
-    }
-
-    pub(crate) fn redo(&mut self, doc: &PdfDocument) -> Result<Option<i32>> {
-        step(doc, &mut self.hidden, &mut self.redo, &mut self.undo)
-    }
-}
-
-/// Aplica o topo de `from` e guarda a inversa em `to`; em erro, nada muda.
-fn step(
-    doc: &PdfDocument,
-    hidden: &mut HashSet<(i32, i32)>,
-    from: &mut Vec<Edit>,
-    to: &mut Vec<Edit>,
-) -> Result<Option<i32>> {
-    let Some(edit) = from.pop() else {
-        return Ok(None);
-    };
-    let page = edit.page();
-    match apply_edit(doc, hidden, edit.clone()) {
-        Ok(inverse) => {
-            to.push(inverse);
-            Ok(Some(page))
-        }
-        Err(e) => {
-            from.push(edit);
-            Err(e)
-        }
     }
 }
 
@@ -478,4 +485,35 @@ pub(crate) fn scaled(from: PdfRect, to: PdfRect, ink: Option<Strokes>) -> Option
             })
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snap(size: usize) -> Snapshot {
+        Snapshot {
+            bytes: vec![0; size],
+            hidden: HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn snapshots_respect_the_memory_limit() {
+        let mut h = History::default();
+        h.record(Edit::Visibility {
+            page: 0,
+            id: 1,
+            hidden: false,
+        });
+        h.record_snapshot(snap(60), 100);
+        h.record_snapshot(snap(60), 100);
+        assert_eq!(
+            h.undo.len(),
+            1,
+            "o passo mais antigo (e o que vinha antes) saiu"
+        );
+        h.record_snapshot(snap(500), 100);
+        assert_eq!(h.undo.len(), 1, "o mais novo fica mesmo acima do limite");
+    }
 }

@@ -4,6 +4,7 @@ pub mod sample;
 mod annot_edit;
 mod doc;
 mod error;
+mod pages;
 mod stamp;
 mod text_fit;
 mod types;

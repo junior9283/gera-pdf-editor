@@ -79,6 +79,13 @@ impl DocView {
         view
     }
 
+    /// As páginas mudaram (organizar ou desfazer): tamanhos novos, sem nada do cache antigo.
+    pub fn set_pages(&mut self, sizes: Vec<PageSize>) {
+        self.sizes = sizes;
+        self.clear_cache();
+        self.reshape();
+    }
+
     /// Rotação, modo ou capa mudaram: refaz as dimensões giradas e a base dos ajustes.
     fn reshape(&mut self) {
         self.dims = self
