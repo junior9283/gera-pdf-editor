@@ -161,7 +161,11 @@ impl SignatureDialog {
             Tab::Image => {
                 ui.horizontal(|ui| {
                     if ui.button("Escolher imagem…").clicked() {
-                        self.dialogs.pick_image(ui.ctx());
+                        self.dialogs.pick_image(
+                            ui.ctx(),
+                            "Escolher imagem da assinatura",
+                            &["png", "jpg", "jpeg"],
+                        );
                     }
                     if let Some(f) = &self.image {
                         ui.label(

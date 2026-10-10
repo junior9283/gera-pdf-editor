@@ -1,5 +1,7 @@
-use crate::annot_edit::{self, reply_of, ColorEdit, Edit, History, Snapshot, Step};
-use crate::error::{PdfError, Result};
+use crate::annot_edit::{
+    self, reply_of, ColorEdit, Edit, History, Snapshot, Step, SNAPSHOT_BUDGET,
+};
+use crate::error::{refused, PdfError, Result};
 use crate::stamp;
 use crate::text_fit;
 use crate::types::{
@@ -105,6 +107,38 @@ impl PdfDoc {
     pub(crate) fn check_page(&self, page: i32) -> Result<()> {
         if page < 0 || page >= self.page_count()? {
             return Err(PdfError::PageOutOfRange(page));
+        }
+        Ok(())
+    }
+
+    /// Executa `f` com instantâneo no histórico (desfazer volta tudo); se falhar, o documento volta
+    /// como estava.
+    pub(crate) fn with_snapshot<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let before = self.snapshot()?;
+        match f(self) {
+            Ok(v) => {
+                if self.history.record_snapshot(before, SNAPSHOT_BUDGET) {
+                    self.mark_unsaved();
+                }
+                Ok(v)
+            }
+            Err(e) => {
+                self.restore(&before)?;
+                Err(e)
+            }
+        }
+    }
+
+    /// Recusa alterar o conteúdo de um documento assinado (`action` invalidaria as assinaturas)
+    /// ou que não permite alterações.
+    pub(crate) fn require_modifiable(&self, action: &str) -> Result<()> {
+        if self.signed_on_disk || self.has_signatures()? {
+            return Err(refused(format!(
+                "o documento está assinado: {action} alteraria as assinaturas"
+            )));
+        }
+        if !self.security()?.permissions.modify {
+            return Err(refused("o documento não permite alterações"));
         }
         Ok(())
     }

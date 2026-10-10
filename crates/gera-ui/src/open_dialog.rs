@@ -19,6 +19,9 @@ pub enum Picked {
     Failed,
 }
 
+/// Imagens que o MuPDF lê (Criar PDF, Editar PDF).
+pub const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "tif", "tiff", "bmp", "gif"];
+
 /// "Salvar como" de PDF partindo de `suggested` (pasta e nome); sem extensão, ganha ".pdf".
 fn save_dialog(suggested: &std::path::Path) -> Option<PathBuf> {
     let mut dialog = rfd::FileDialog::new()
@@ -74,10 +77,7 @@ impl FileDialogs {
         self.spawn(ctx, || {
             match rfd::FileDialog::new()
                 .set_title("Criar PDF a partir de imagens")
-                .add_filter(
-                    "Imagens",
-                    &["jpg", "jpeg", "png", "tif", "tiff", "bmp", "gif"],
-                )
+                .add_filter("Imagens", IMAGE_EXTS)
                 .pick_files()
             {
                 Some(p) if !p.is_empty() => Picked::Open(p),
@@ -100,12 +100,17 @@ impl FileDialogs {
         });
     }
 
-    /// Imagem da assinatura (PNG ou JPEG).
-    pub fn pick_image(&mut self, ctx: &egui::Context) {
-        self.spawn(ctx, || {
+    /// Uma imagem (assinatura: PNG ou JPEG; Editar PDF: os formatos que o Criar PDF aceita).
+    pub fn pick_image(
+        &mut self,
+        ctx: &egui::Context,
+        title: &'static str,
+        exts: &'static [&'static str],
+    ) {
+        self.spawn(ctx, move || {
             match rfd::FileDialog::new()
-                .set_title("Escolher imagem da assinatura")
-                .add_filter("Imagem", &["png", "jpg", "jpeg"])
+                .set_title(title)
+                .add_filter("Imagem", exts)
                 .pick_file()
             {
                 Some(p) => Picked::Open(vec![p]),

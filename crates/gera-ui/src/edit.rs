@@ -258,6 +258,18 @@ fn find(annots: &[AnnotInfo], (page, id): (i32, i32)) -> Option<&AnnotInfo> {
 const SELECTED: egui::Color32 = egui::Color32::from_rgb(30, 110, 230);
 
 /// Retângulo da página (pontos) -> retângulo na tela.
+/// Alça de redimensionar (quadrado branco com contorno) centrada em `c`.
+pub(crate) fn paint_handle(painter: &egui::Painter, c: egui::Pos2, color: egui::Color32) {
+    let square = egui::Rect::from_center_size(c, egui::vec2(7.0, 7.0));
+    painter.rect_filled(square, 0.0, egui::Color32::WHITE);
+    painter.rect_stroke(
+        square,
+        0.0,
+        egui::Stroke::new(1.0, color),
+        egui::StrokeKind::Inside,
+    );
+}
+
 pub(crate) fn screen_rect(r: &PdfRect, map: &PageMap) -> egui::Rect {
     let (min, max) = map.rect_to_screen(r);
     egui::Rect::from_min_max(min.into(), max.into())
@@ -696,17 +708,7 @@ impl EditState {
         else {
             return;
         };
-        let handle = |c: (f32, f32)| {
-            let square =
-                egui::Rect::from_center_size(map.to_screen(c).into(), egui::vec2(7.0, 7.0));
-            painter.rect_filled(square, 0.0, egui::Color32::WHITE);
-            painter.rect_stroke(
-                square,
-                0.0,
-                egui::Stroke::new(1.0, SELECTED),
-                egui::StrokeKind::Inside,
-            );
-        };
+        let handle = |c: (f32, f32)| paint_handle(painter, map.to_screen(c).into(), SELECTED);
         if let Some((s, e)) = a.line {
             // linha selecionada: alças nas duas pontas, como no Acrobat
             handle(s);

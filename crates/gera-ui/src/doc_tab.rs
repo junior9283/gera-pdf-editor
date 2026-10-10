@@ -117,6 +117,9 @@ pub struct DocTab {
     /// Linha Preparar formulário aberta (os campos viram objetos editáveis).
     pub(crate) prepare_tools: bool,
     pub(crate) prepare: crate::prepare::PrepareState,
+    /// Linha Editar PDF aberta (as imagens viram objetos editáveis).
+    pub(crate) edit_pdf_tools: bool,
+    pub(crate) edit_pdf: crate::edit_pdf::EditPdfState,
     /// Linha Certificados aberta.
     pub(crate) cert_tools: bool,
     pub(crate) cert: crate::certificates::CertState,
@@ -170,6 +173,8 @@ pub struct DocTab {
 /// O que fazer com o arquivo escolhido no seletor (modo Organizar).
 enum PickFor {
     File(crate::organize::Purpose),
+    /// Editar PDF: imagem para substituir a selecionada (ou, sem nome, para acrescentar).
+    Image(Option<(i32, String)>),
     /// Pasta das partes do Dividir.
     Folder,
     Extract {
@@ -221,6 +226,8 @@ impl DocTab {
             fill_tools: false,
             prepare_tools: false,
             prepare: Default::default(),
+            edit_pdf_tools: false,
+            edit_pdf: Default::default(),
             cert_tools: false,
             cert: Default::default(),
             security: Default::default(),
@@ -311,6 +318,11 @@ impl DocTab {
                 if let Some((page, id)) = self.prepare.selected.take() {
                     self.worker
                         .send(Request::Prepare(pdf_core::PrepareOp::Delete { page, id }));
+                }
+            }
+            DocCommand::Delete if self.edit_pdf_tools => {
+                if let Some(action) = self.edit_pdf.delete_selected() {
+                    send_image_action(&self.worker, &mut self.status, action);
                 }
             }
             DocCommand::Delete => self.edit.delete_selected(),
@@ -426,6 +438,7 @@ impl DocTab {
         self.annots = summary.annots;
         self.fields = summary.fields;
         self.prepare.on_fields(&self.fields);
+        self.edit_pdf.clear();
         self.form.notes = summary.form_notes;
         self.history = HistoryState::default();
         self.outline = summary.outline;
@@ -453,6 +466,7 @@ impl DocTab {
         self.annots = summary.annots;
         self.fields = summary.fields;
         self.prepare.on_fields(&self.fields);
+        self.edit_pdf.clear();
         self.form.notes = summary.form_notes;
         self.outline = summary.outline;
         self.history = history;
@@ -685,6 +699,7 @@ impl DocTab {
                 } => {
                     replace_pages(&mut self.annots, &pages, annots);
                     self.edit.keep_valid_selection(&self.annots);
+                    self.edit_pdf.invalidate(&pages);
                     self.history = history;
                     if let Some(view) = self.view.as_mut() {
                         for page in pages {
@@ -747,9 +762,10 @@ impl DocTab {
                         many => format!("{} arquivos extraídos", many.len()),
                     };
                 }
-                Response::AnnotFailed(msg) => {
-                    self.status = format!("Não foi possível alterar a anotação: {msg}");
+                Response::EditFailed(msg) => {
+                    self.status = format!("Não foi possível fazer a alteração: {msg}");
                 }
+                Response::PageImages { page, images } => self.edit_pdf.on_images(page, images),
             }
         }
     }
@@ -767,6 +783,8 @@ impl DocTab {
                 self.organize = None; // Esc fecha o Organizar páginas
             } else if self.prepare_tools && self.prepare.escape() {
                 // Preparar formulário: solta a ferramenta, depois a seleção
+            } else if self.edit_pdf_tools && self.edit_pdf.escape() {
+                // Editar PDF: solta a imagem a colocar, depois a seleção
             } else if self.edit.fill.dialog.take().is_some() {
                 // Esc fecha a janela de assinatura (como Cancelar)
                 self.edit.fill.into_field = None;
@@ -832,56 +850,53 @@ impl DocTab {
 
     /// Setas movem a anotação selecionada (1 pt; Shift, 10 pt), como no Acrobat.
     fn nudge_selected(&mut self, ctx: &egui::Context) {
-        // com a janela de assinatura aberta, as setas são dela; no Preparar, movem o campo
+        // com a janela de assinatura aberta, as setas são dela; no Preparar, movem o campo; no
+        // Editar PDF, só a imagem
+        let image = self.edit_pdf.selected.is_some();
         let field = self.prepare.selected.filter(|_| self.prepare_tools);
-        let Some((page, id)) = field
+        let target = field
             .or(self.edit.selected)
-            .filter(|_| self.edit.fill.dialog.is_none() && self.prepare.props.is_none())
-        else {
+            .filter(|_| self.edit.fill.dialog.is_none() && self.prepare.props.is_none());
+        if !(if self.edit_pdf_tools {
+            image
+        } else {
+            target.is_some()
+        }) {
+            return;
+        }
+        let Some((dir, shift)) = arrow_pressed(ctx) else {
             return;
         };
-        let arrows = [
-            (egui::Key::ArrowLeft, (-1, 0)),
-            (egui::Key::ArrowRight, (1, 0)),
-            (egui::Key::ArrowUp, (0, -1)),
-            (egui::Key::ArrowDown, (0, 1)),
-        ];
-        let pressed = ctx.input_mut(|i| {
-            arrows.into_iter().find_map(|(k, dir)| {
-                if i.consume_key(egui::Modifiers::SHIFT, k) {
-                    Some((dir, true))
-                } else {
-                    i.consume_key(egui::Modifiers::NONE, k)
-                        .then_some((dir, false))
-                }
-            })
+        let rotation = self
+            .view
+            .as_ref()
+            .map_or_else(Default::default, |v| v.rotation);
+        let (dx, dy) = app_state::fill_sign::nudge(dir, shift, rotation);
+        if self.edit_pdf_tools {
+            self.edit_image(pdf_core::ImageEdit::Move { dx, dy });
+            return;
+        }
+        let Some((page, id)) = target else {
+            return;
+        };
+        let rect = field.and_then(|_| {
+            self.fields
+                .iter()
+                .find(|f| f.page == page && f.id == id)
+                .map(|f| f.rect.translated(dx, dy))
         });
-        if let Some((dir, shift)) = pressed {
-            let rotation = self
-                .view
-                .as_ref()
-                .map_or_else(Default::default, |v| v.rotation);
-            let (dx, dy) = app_state::fill_sign::nudge(dir, shift, rotation);
-            let rect = field.and_then(|_| {
-                self.fields
-                    .iter()
-                    .find(|f| f.page == page && f.id == id)
-                    .map(|f| f.rect.translated(dx, dy))
-            });
-            match rect {
-                Some(rect) => self
-                    .worker
-                    .send(Request::Prepare(pdf_core::PrepareOp::Move {
-                        page,
-                        id,
-                        rect,
-                    })),
-                None if !self.security.permissions.annotate => self.deny("mover comentários"),
-                None => {
-                    self.worker
-                        .send(Request::Annot(pdf_core::AnnotOp::Move { page, id, dx, dy }))
-                }
-            }
+        match rect {
+            Some(rect) => self
+                .worker
+                .send(Request::Prepare(pdf_core::PrepareOp::Move {
+                    page,
+                    id,
+                    rect,
+                })),
+            None if !self.security.permissions.annotate => self.deny("mover comentários"),
+            None => self
+                .worker
+                .send(Request::Annot(pdf_core::AnnotOp::Move { page, id, dx, dy })),
         }
     }
 
@@ -1246,6 +1261,7 @@ impl DocTab {
             tc::COMMENT => (!p.annotate).then_some("comentar"),
             tc::FILL_SIGN => (!p.annotate).then_some("preencher e assinar"),
             tc::PREPARE_FORM => (!p.modify).then_some("alterar formulários"),
+            tc::EDIT_PDF => (!p.modify).then_some("editar o PDF"),
             tc::CERTIFICATES => (!p.forms).then_some("assinar"),
             _ => None,
         };
@@ -1261,7 +1277,34 @@ impl DocTab {
         self.cert.placing = false;
         self.prepare.set_tool(None);
         self.prepare.selected = None;
+        self.edit_pdf_tools = id == tc::EDIT_PDF;
+        self.edit_pdf.reset();
         self.edit.set_fill_tool(None);
+    }
+
+    /// Editar PDF: aplica `edit` à imagem selecionada.
+    pub(crate) fn edit_image(&mut self, edit: pdf_core::ImageEdit) {
+        if let Some(action) = self.edit_pdf.edit_selected(edit) {
+            send_image_action(&self.worker, &mut self.status, action);
+        }
+    }
+
+    /// Editar PDF: escolhe a imagem para substituir a selecionada (`replace`) ou para acrescentar.
+    pub(crate) fn pick_image(&mut self, ctx: &egui::Context, replace: bool) {
+        if self.files.busy() {
+            return;
+        }
+        let (target, title) = if replace {
+            let Some(sel) = self.edit_pdf.selected.clone() else {
+                return;
+            };
+            (Some(sel), "Substituir imagem")
+        } else {
+            (None, "Adicionar imagem")
+        };
+        self.picking = Some(PickFor::Image(target));
+        self.files
+            .pick_image(ctx, title, crate::open_dialog::IMAGE_EXTS);
     }
 
     /// Permissão negada pela proteção do documento: explica na barra de status.
@@ -1725,6 +1768,27 @@ impl DocTab {
                 // só exclui depois que a extração deu certo (resposta Extracted)
                 self.delete_after_extract = delete_after.then_some(pages);
             }
+            (Some(PickFor::Image(target)), Picked::Open(files)) => {
+                let Some(path) = files.into_iter().next() else {
+                    return;
+                };
+                match target {
+                    Some((page, name)) => send_image_action(
+                        &self.worker,
+                        &mut self.status,
+                        crate::edit_pdf::ImageAction::Edit {
+                            page,
+                            name,
+                            edit: pdf_core::ImageEdit::Replace { path },
+                        },
+                    ),
+                    None => {
+                        self.edit_pdf.placing = Some(path);
+                        self.status =
+                            "Clique na página para colocar a imagem (Esc cancela).".into();
+                    }
+                }
+            }
             (Some(PickFor::Folder), Picked::Folder(dir)) => {
                 if let Some(split) = self.split.as_mut() {
                     split.dir = dir;
@@ -1823,6 +1887,8 @@ impl DocTab {
             (&self.worker, &mut self.edit, &self.search, &self.annots);
         let (form, fields) = (&mut self.form, &self.fields);
         let (prepare, preparing) = (&mut self.prepare, self.prepare_tools);
+        let (edit_pdf, editing_pdf) = (&mut self.edit_pdf, self.edit_pdf_tools);
+        let mut image_actions = Vec::new();
         let signing = self.cert_tools && self.cert.placing;
         let cert = &mut self.cert;
         let mut sign_at = None;
@@ -1847,6 +1913,18 @@ impl DocTab {
                                 ui,
                                 cert,
                                 fields,
+                                page as i32,
+                                rect,
+                                map,
+                            ));
+                            return;
+                        }
+                        if editing_pdf {
+                            // Editar PDF: só as imagens (sem comentários nem campos)
+                            image_actions.extend(crate::edit_pdf::on_page(
+                                ui,
+                                edit_pdf,
+                                worker,
                                 page as i32,
                                 rect,
                                 map,
@@ -1894,6 +1972,9 @@ impl DocTab {
         }
         for op in prepare_ops {
             self.worker.send(Request::Prepare(op));
+        }
+        for action in image_actions {
+            send_image_action(&self.worker, &mut self.status, action);
         }
         if let Some((page, id)) = open_props {
             self.prepare.props_for = Some((page, id));
@@ -2005,6 +2086,40 @@ impl Drop for DocTab {
             c.cancel();
         }
     }
+}
+
+/// Editar PDF: a edição vai ao worker; os avisos, para a barra de status.
+fn send_image_action(worker: &Worker, status: &mut String, action: crate::edit_pdf::ImageAction) {
+    use crate::edit_pdf::ImageAction;
+    match action {
+        ImageAction::Edit { page, name, edit } => {
+            worker.send(Request::EditImage { page, name, edit })
+        }
+        ImageAction::Add { page, path, center } => {
+            worker.send(Request::AddImage { page, path, center })
+        }
+        ImageAction::Notice(msg) => *status = msg,
+    }
+}
+
+/// Seta apertada (sem modificador ou com Shift): (direção, com Shift).
+fn arrow_pressed(ctx: &egui::Context) -> Option<((i8, i8), bool)> {
+    let arrows = [
+        (egui::Key::ArrowLeft, (-1, 0)),
+        (egui::Key::ArrowRight, (1, 0)),
+        (egui::Key::ArrowUp, (0, -1)),
+        (egui::Key::ArrowDown, (0, 1)),
+    ];
+    ctx.input_mut(|i| {
+        arrows.into_iter().find_map(|(k, dir)| {
+            if i.consume_key(egui::Modifiers::SHIFT, k) {
+                Some((dir, true))
+            } else {
+                i.consume_key(egui::Modifiers::NONE, k)
+                    .then_some((dir, false))
+            }
+        })
+    })
 }
 
 #[cfg(test)]

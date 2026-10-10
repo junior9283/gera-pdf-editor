@@ -98,6 +98,22 @@ pub enum Request {
         page: i32,
         id: i32,
     },
+    /// Imagens da página (Editar PDF).
+    PageImages {
+        page: i32,
+    },
+    /// Editar PDF: mover, redimensionar, girar, excluir ou substituir uma imagem.
+    EditImage {
+        page: i32,
+        name: String,
+        edit: crate::ImageEdit,
+    },
+    /// Editar PDF: acrescenta a imagem do arquivo centrada em `center` (pontos da página).
+    AddImage {
+        page: i32,
+        path: PathBuf,
+        center: (f32, f32),
+    },
     /// Organizar páginas (girar, excluir, mover, inserir, substituir, recortar).
     Pages(PageOp),
     /// Divide o documento em arquivos na pasta `dir`; o documento não muda.
@@ -184,7 +200,7 @@ pub enum Response {
         annots: Vec<AnnotInfo>,
         history: HistoryState,
     },
-    AnnotFailed(String),
+    EditFailed(String),
     /// As páginas mudaram (organizar, ou desfazer/refazer de uma operação de página): o resumo
     /// novo do documento inteiro.
     PagesChanged {
@@ -232,6 +248,11 @@ pub enum Response {
     /// Arquivos criados pelo Exportar PDF.
     ExportedTo(Vec<PathBuf>),
     ExportToFailed(String),
+    /// Imagens de uma página (vazio se não deu para ler).
+    PageImages {
+        page: i32,
+        images: Vec<crate::PageImage>,
+    },
     /// Propriedades de um campo (Preparar formulário).
     FieldProps {
         page: i32,
@@ -423,6 +444,18 @@ impl State {
                     .map_err(|e| e.to_string()),
             }),
             Request::Prepare(op) => self.edit(send, |d| d.prepare(op).map(|()| Changed::Fields)),
+            Request::PageImages { page } => send(Response::PageImages {
+                page,
+                images: self.with_doc(|d| d.page_images(page)).unwrap_or_default(),
+            }),
+            Request::EditImage { page, name, edit } => self.edit(send, |d| {
+                d.edit_image(page, &name, edit)
+                    .map(|()| Changed::Pages(vec![page]))
+            }),
+            Request::AddImage { page, path, center } => self.edit(send, |d| {
+                d.add_image(page, &path, center)
+                    .map(|()| Changed::Pages(vec![page]))
+            }),
             Request::Pages(op) => {
                 self.edit(send, |d| d.apply_pages(op).map(|()| Changed::Document))
             }
@@ -492,7 +525,7 @@ impl State {
         f: impl FnOnce(&mut PdfDoc) -> crate::Result<Changed>,
     ) {
         let Some(d) = self.doc.as_mut() else {
-            send(Response::AnnotFailed(NO_DOC.into()));
+            send(Response::EditFailed(NO_DOC.into()));
             return;
         };
         match f(d) {
@@ -515,7 +548,7 @@ impl State {
                 pages,
                 history: d.history_state(),
             }),
-            Err(e) => send(Response::AnnotFailed(e.to_string())),
+            Err(e) => send(Response::EditFailed(e.to_string())),
         }
     }
 

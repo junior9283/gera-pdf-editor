@@ -141,7 +141,7 @@ fn annotation_edits_through_the_worker() {
         page: 0,
         id: id + 1000,
     }));
-    assert!(matches!(recv(&w), Response::AnnotFailed(_)));
+    assert!(matches!(recv(&w), Response::EditFailed(_)));
 }
 
 #[test]
@@ -314,10 +314,7 @@ fn preparing_a_form_reports_the_new_fields() {
         kind: pdf_core::NewFieldKind::Text,
         name: "Nome".into(),
     }));
-    assert!(
-        matches!(recv(&w), Response::AnnotFailed(_)),
-        "nome repetido"
-    );
+    assert!(matches!(recv(&w), Response::EditFailed(_)), "nome repetido");
 }
 
 #[test]

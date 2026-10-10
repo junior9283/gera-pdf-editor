@@ -48,6 +48,7 @@ pub const CERTIFICATES: &str = "certificados";
 pub const PROTECT: &str = "proteger";
 pub const COMPRESS: &str = "comprimir";
 pub const CREATE: &str = "criar";
+pub const EDIT_PDF: &str = "editar";
 pub const EXPORT: &str = "exportar";
 pub const OCR: &str = "ocr";
 /// Ferramentas que abrem o Organizar páginas.
@@ -78,7 +79,7 @@ const fn tool(
 #[rustfmt::skip]
 pub const CATALOG: &[ToolEntry] = &[
     tool(CREATE, "Criar PDF", "📄", CreateEdit, Ready, "PDF a partir de imagens"),
-    tool("editar", "Editar PDF", "✏", CreateEdit, Planned("v4"), "Alterar texto e imagens"),
+    tool(EDIT_PDF, "Editar PDF", "✏", CreateEdit, Ready, "Mover, redimensionar e trocar imagens"),
     tool(EXPORT, "Exportar PDF", "📤", CreateEdit, Ready, "Converter para Word, texto ou imagens"),
     tool(OCR, "Digitalizar e OCR", "🔎", CreateEdit, Ready, "Reconhecer texto em páginas escaneadas"),
     tool(COMBINE, "Combinar arquivos", "🗐", CreateEdit, Ready, "Juntar vários PDFs em um"),
@@ -149,6 +150,7 @@ mod tests {
             ready,
             [
                 CREATE,
+                EDIT_PDF,
                 EXPORT,
                 OCR,
                 COMBINE,

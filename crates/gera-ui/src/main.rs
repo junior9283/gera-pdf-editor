@@ -6,6 +6,7 @@ mod comments_panel;
 mod create;
 mod doc_tab;
 mod edit;
+mod edit_pdf;
 mod fields;
 mod fill_sign;
 mod open_dialog;

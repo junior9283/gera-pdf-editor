@@ -257,15 +257,7 @@ fn paint_fields(
                 egui::StrokeKind::Outside,
             );
             for h in Handle::ALL {
-                let c: egui::Pos2 = map.to_screen(h.point(rect)).into();
-                let square = egui::Rect::from_center_size(c, egui::vec2(7.0, 7.0));
-                painter.rect_filled(square, 0.0, egui::Color32::WHITE);
-                painter.rect_stroke(
-                    square,
-                    0.0,
-                    egui::Stroke::new(1.0, OUTLINE),
-                    egui::StrokeKind::Inside,
-                );
+                crate::edit::paint_handle(painter, map.to_screen(h.point(rect)).into(), OUTLINE);
             }
         }
     }

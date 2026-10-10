@@ -1,6 +1,5 @@
 //! Preparar formulário (como no Acrobat): criar, editar, mover e excluir campos AcroForm. Cada
 //! alteração entra no histórico como instantâneo, como Limpar formulário.
-use crate::annot_edit::SNAPSHOT_BUDGET;
 use crate::doc::{annot_id, PdfDoc};
 use crate::error::{PdfError, Result};
 use crate::forms::{field_head, kids_of, on_state, options_of};
@@ -286,24 +285,6 @@ fn next_choice(head: &PdfObject) -> Result<String> {
 }
 
 impl PdfDoc {
-    /// Executa `f` com instantâneo no histórico (desfazer volta tudo); se falhar, o documento volta
-    /// como estava.
-    fn edit_form<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
-        let before = self.snapshot()?;
-        match f(self) {
-            Ok(v) => {
-                if self.history.record_snapshot(before, SNAPSHOT_BUDGET) {
-                    self.mark_unsaved();
-                }
-                Ok(v)
-            }
-            Err(e) => {
-                self.restore(&before)?;
-                Err(e)
-            }
-        }
-    }
-
     /// Nomes completos de todos os campos (inclusive ocultos e de outros programas).
     fn field_names(&self) -> Result<Vec<String>> {
         let mut out = Vec::new();
@@ -397,7 +378,7 @@ impl PdfDoc {
             }
             (Some(_), _) => return Err(invalid("já existe um campo com esse nome")),
         };
-        self.edit_form(|d| d.create_field(page, rect, kind, name, group))
+        self.with_snapshot(|d| d.create_field(page, rect, kind, name, group))
     }
 
     fn create_field(
@@ -578,7 +559,7 @@ impl PdfDoc {
                 "o valor de exportação não pode ter espaço nem barra",
             ));
         }
-        self.edit_form(|d| d.write_props(page, id, p, &name, target))
+        self.with_snapshot(|d| d.write_props(page, id, p, &name, target))
     }
 
     fn write_props(
@@ -790,7 +771,7 @@ impl PdfDoc {
     /// Move ou redimensiona o campo `id`.
     pub fn move_field(&mut self, page: i32, id: i32, rect: PdfRect) -> Result<()> {
         self.widget(page, id)?;
-        self.edit_form(|d| {
+        self.with_snapshot(|d| {
             let mut a = d.widget(page, id)?.into_annotation();
             a.set_rect(Rect::from(rect))?;
             a.update()?;
@@ -801,7 +782,7 @@ impl PdfDoc {
     /// Exclui o campo `id` (o grupo de opção some junto com o último botão).
     pub fn delete_field(&mut self, page: i32, id: i32) -> Result<()> {
         self.widget(page, id)?;
-        self.edit_form(|d| {
+        self.with_snapshot(|d| {
             let w = d.widget(page, id)?;
             let obj = w.annotation().object();
             let head = field_head(&obj)?;
