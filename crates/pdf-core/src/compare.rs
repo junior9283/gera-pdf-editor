@@ -135,6 +135,8 @@ pub enum CompareStage {
 pub(crate) struct Limits {
     /// Palavras de cada lado.
     pub max_words: usize,
+    /// Letras de cada lado (uma "palavra" sem espaços pode ter milhões).
+    pub max_chars: usize,
     /// Imagens de cada lado (as seguintes ficam de fora da comparação).
     pub max_images: usize,
     /// Bytes de pixels decodificados de cada lado; depois, as imagens valem só pelas dimensões.
@@ -147,6 +149,7 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             max_words: 3_000_000,
+            max_chars: 30_000_000,
             max_images: 50_000,
             decode_bytes: 512_000_000,
             content_bytes: 1_000_000_000,
@@ -250,6 +253,13 @@ pub(crate) fn read_side(
     let mut bounds = Vec::with_capacity(pages.len());
     let mut fonts: HashMap<String, Arc<str>> = HashMap::new();
     let mut decode_left = limits.decode_bytes;
+    let mut chars = 0usize;
+    let too_much = || {
+        refused(format!(
+            "o arquivo tem texto demais para comparar (mais de {} palavras ou {} letras)",
+            limits.max_words, limits.max_chars
+        ))
+    };
     let flags = if images {
         TextPageFlags::PRESERVE_IMAGES
     } else {
@@ -296,7 +306,14 @@ pub(crate) fn read_side(
                     let c = ch.char().unwrap_or('\u{FFFD}');
                     if c.is_whitespace() {
                         words.extend(cur.take());
+                        if words.len() > limits.max_words {
+                            return Err(too_much());
+                        }
                         continue;
+                    }
+                    chars += 1;
+                    if chars > limits.max_chars {
+                        return Err(too_much());
                     }
                     let r: PdfRect = Rect::from(ch.quad()).into();
                     match &mut cur {
@@ -328,10 +345,7 @@ pub(crate) fn read_side(
                 }
                 words.extend(cur);
                 if words.len() > limits.max_words {
-                    return Err(refused(format!(
-                        "o arquivo tem texto demais para comparar (mais de {} palavras)",
-                        limits.max_words
-                    )));
+                    return Err(too_much());
                 }
             }
         }
@@ -363,10 +377,11 @@ fn rare_weights(old: &Side, new: &Side) -> HashMap<(usize, usize), u32> {
             .map(|w| (Token::Word(&w.text), w.page))
             .chain(s.images.iter().map(|i| (Token::Image(i.hash), i.page)));
         for (t, page) in tokens {
+            // em ordem de página: só a última entrada pode ser desta página (tempo linear)
             let list = &mut index.entry(t).or_default()[side];
-            match list.iter_mut().find(|(p, _)| *p == page) {
-                Some((_, n)) => *n += 1,
-                None => list.push((page, 1)),
+            match list.last_mut() {
+                Some((p, n)) if *p == page => *n += 1,
+                _ => list.push((page, 1)),
             }
         }
     }
@@ -926,6 +941,68 @@ mod tests {
         )
         .unwrap();
         assert_eq!(few.images.len(), 1);
+    }
+
+    fn word(text: &str, page: usize) -> WordAt {
+        WordAt {
+            text: text.into(),
+            rect: PdfRect::default(),
+            style: Style {
+                font: Arc::from(""),
+                half_points: 24,
+                argb: 0,
+            },
+            page,
+        }
+    }
+
+    /// Uma palavra comum repetida em todas as 20 mil páginas não pode custar páginas × ocorrências.
+    #[test]
+    fn common_words_are_counted_in_linear_time() {
+        let pages = MAX_PAGES;
+        let side = || Side {
+            pages: (0..pages as i32).collect(),
+            bounds: vec![PdfRect::default(); pages],
+            words: (0..pages)
+                .flat_map(|p| (0..10).map(move |_| word("comum", p)))
+                .collect(),
+            images: Vec::new(),
+        };
+        let (a, b) = (side(), side());
+        let t = std::time::Instant::now();
+        assert!(rare_weights(&a, &b).is_empty());
+        assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+    }
+
+    /// Uma "palavra" sem espaços com milhões de letras também conta para o teto.
+    #[test]
+    fn giant_words_count_against_the_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = "x".repeat(5000);
+        let ops = format!("BT /F1 1 Tf 0 700 Td ({text}) Tj ET");
+        let pdf = format!(
+            "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 4 0 R>>>>/Contents 5 0 R>>endobj\n4 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\n5 0 obj<</Length {}>>stream\n{ops}\nendstream endobj\ntrailer<</Root 1 0 R>>\n",
+            ops.len() + 1
+        );
+        let path = dir.path().join("palavra.pdf");
+        std::fs::write(&path, pdf).unwrap();
+        let input = CompareInput {
+            path,
+            password: None,
+            pages: None,
+        };
+        let limits = Limits {
+            max_chars: 1000,
+            ..Limits::default()
+        };
+        let r = read_side(
+            &input,
+            false,
+            &limits,
+            &mut |_| true,
+            CompareStage::ReadingOld,
+        );
+        assert!(matches!(r, Err(PdfError::Refused(m)) if m.contains("texto demais")));
     }
 
     #[test]
