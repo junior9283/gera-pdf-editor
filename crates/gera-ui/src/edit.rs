@@ -226,7 +226,8 @@ fn hit_at(annots: &[AnnotInfo], page: i32, p: (f32, f32), map: &PageMap) -> Opti
     annots
         .iter()
         .rev()
-        .filter(|a| a.page == page)
+        // respostas e status ficam no painel Comentários, não na página
+        .filter(|a| a.page == page && a.reply_to.is_none())
         .find(|a| match a.line {
             Some((s, e)) => dist_to_segment(p, s, e) <= tol + a.width.unwrap_or(1.0) / 2.0,
             None => annot_hit(&[(a.id, a.rect)], p, tol).is_some(),
@@ -285,6 +286,12 @@ impl EditState {
         if !any_button_down {
             self.annot_drag = None;
         }
+    }
+
+    /// Abre a janela de propriedades da anotação (menu do painel Comentários).
+    pub fn open_props(&mut self, annots: &[AnnotInfo], target: (i32, i32)) {
+        self.selected = Some(target);
+        self.props = find(annots, target).map(PropsDraft::new);
     }
 
     /// Esc (como no Acrobat): volta para Selecionar, tira a seleção e cancela gestos em andamento.
@@ -1123,5 +1130,19 @@ mod tests {
         assert_eq!(e.tool, Tool::Select);
         assert!(e.selected.is_none() && e.annot_drag.is_none());
         assert!(e.take_ops().is_empty(), "cancelar não manda edição");
+    }
+
+    #[test]
+    fn hit_ignores_replies() {
+        let map = PageMap {
+            origin: (0.0, 0.0),
+            zoom: 1.0,
+            size: (612.0, 792.0),
+            rotation: pdf_core::Rotation::R0,
+        };
+        let parent = info(0, 1);
+        let mut reply = info(0, 2);
+        reply.reply_to = Some(1);
+        assert_eq!(hit_at(&[parent, reply], 0, (5.0, 5.0), &map), Some((0, 1)));
     }
 }

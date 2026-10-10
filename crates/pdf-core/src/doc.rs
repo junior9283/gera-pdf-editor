@@ -498,6 +498,7 @@ pub(crate) fn annot_info(annot: &PdfAnnotation, page: i32) -> Result<AnnotInfo> 
             .transpose()?
             .map(|(p, q)| ((p.x, p.y), (q.x, q.y))),
         font,
+        arrow: kind == AnnotKind::Line && annot.line_ending_styles()?.1 != LineEndingStyle::None,
         author: annot.author()?.unwrap_or_default().to_owned(),
         reply_to: match annot.object().get_dict("IRT")? {
             Some(o) if o.is_indirect()? => Some(o.as_indirect()?),

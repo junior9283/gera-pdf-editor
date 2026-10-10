@@ -1,6 +1,7 @@
 mod app;
 mod bench;
 mod canvas;
+mod comments_panel;
 mod create;
 mod doc_tab;
 mod edit;

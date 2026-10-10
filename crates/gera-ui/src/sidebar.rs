@@ -31,7 +31,16 @@ fn thumb_height(size: &PageSize, rotation: Rotation) -> f32 {
     THUMB_WIDTH * h / w
 }
 
-fn kind_label(kind: AnnotKind) -> &'static str {
+/// Nome do tipo da anotação, como o Acrobat mostra (a linha com ponta é "Seta").
+pub(crate) fn label_of(a: &AnnotInfo) -> &'static str {
+    if a.arrow {
+        "Seta"
+    } else {
+        kind_label(a.kind)
+    }
+}
+
+pub(crate) fn kind_label(kind: AnnotKind) -> &'static str {
     match kind {
         AnnotKind::Highlight => "Destaque",
         AnnotKind::Underline => "Sublinhado",
@@ -48,7 +57,7 @@ fn kind_label(kind: AnnotKind) -> &'static str {
 }
 
 fn annot_label(a: &AnnotInfo) -> String {
-    let mut label = format!("{} — p. {}", kind_label(a.kind), a.page + 1);
+    let mut label = format!("{} — p. {}", label_of(a), a.page + 1);
     if !a.contents.is_empty() {
         label.push_str(&format!(": {}", a.contents));
     }
@@ -153,10 +162,12 @@ fn annotation_list(ui: &mut egui::Ui, annots: &[AnnotInfo]) -> SidebarAction {
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
-            if annots.is_empty() {
+            // respostas e status aparecem dentro do comentário, no painel Comentários
+            let mut roots = annots.iter().filter(|a| a.reply_to.is_none()).peekable();
+            if roots.peek().is_none() {
                 ui.label("Nenhuma anotação.");
             }
-            for a in annots {
+            for a in roots {
                 if ui.button(annot_label(a)).clicked() {
                     action = SidebarAction::SelectAnnot {
                         page: a.page,

@@ -119,6 +119,8 @@ pub struct DocTab {
     turned_at: f64,
     /// Nome sendo digitado no diálogo Identidade.
     identity_name: String,
+    /// Painel Comentários (busca, filtros, ordenação e resposta em digitação).
+    comments: crate::comments_panel::PanelState,
 }
 
 impl DocTab {
@@ -152,6 +154,7 @@ impl DocTab {
             print_jobs: PrintJobs::default(),
             turned_at: f64::NEG_INFINITY,
             identity_name: String::new(),
+            comments: Default::default(),
         }
     }
 
@@ -677,6 +680,26 @@ impl DocTab {
 
     pub fn zoom_percent(&self) -> Option<f32> {
         self.view.as_ref().map(|v| v.zoom * 100.0)
+    }
+
+    /// Painel Comentários (na direita, com "Comentar" ligado).
+    pub fn comments_panel(&mut self, ui: &mut egui::Ui) {
+        use crate::comments_panel::{show, PanelAction};
+        for action in show(ui, &mut self.comments, &self.annots, self.edit.selected) {
+            match action {
+                PanelAction::Select { page, id, at } => {
+                    self.edit.selected = Some((page, id));
+                    if let Some(y) = self.view.as_mut().and_then(|v| v.go_to(page, Some(at))) {
+                        self.jump_to = Some(y);
+                    }
+                }
+                PanelAction::Op(op) => self.edit.push_op(op),
+                PanelAction::Properties { page, id } => {
+                    self.edit.open_props(&self.annots, (page, id))
+                }
+            }
+        }
+        self.send_edits();
     }
 
     /// Nome do usuário: vai para os carimbos dinâmicos e, no worker, como autor das anotações.

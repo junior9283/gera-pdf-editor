@@ -147,6 +147,8 @@ pub struct AnnotInfo {
     pub fill: Option<[f32; 3]>,
     /// Pontos de início e fim (linha e seta).
     pub line: Option<Segment>,
+    /// Linha com ponta de seta.
+    pub arrow: bool,
     /// Tamanho e cor do texto (caixa de texto).
     pub font: Option<(f32, [f32; 3])>,
     /// Autor (/T); vazio quando não há.
