@@ -63,6 +63,8 @@ impl Command {
                 DocCommand::Fit(Fit::Width) => "Ajustar à largura",
                 DocCommand::Fit(Fit::Page) => "Ajustar à página",
                 DocCommand::Fit(Fit::None) => "Zoom livre",
+                DocCommand::Fit(Fit::Height) => "Ajustar à altura",
+                DocCommand::Fit(Fit::Visible) => "Ajustar ao conteúdo visível",
                 DocCommand::Mode(m) => return m.label().into(),
                 DocCommand::ToggleCover => "Mostrar capa sozinha",
                 DocCommand::Copy => "Copiar",

@@ -1,5 +1,7 @@
 //! Preferências da interface, guardadas entre sessões.
+use crate::link_policy::{site_key, LinkDecision, MAX_SITES};
 use crate::store;
+use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -54,6 +56,8 @@ pub struct Prefs {
     pub tools_width: f32,
     /// Nome do usuário (Identidade): autor das anotações e linha dos carimbos dinâmicos.
     pub author: Option<String>,
+    /// Escolhas lembradas no aviso de segurança dos links (site → permitir/bloquear).
+    pub link_sites: BTreeMap<String, LinkDecision>,
 }
 
 impl Default for Prefs {
@@ -65,6 +69,7 @@ impl Default for Prefs {
             tools_panel: true,
             tools_width: 200.0,
             author: None,
+            link_sites: BTreeMap::new(),
         }
     }
 }
@@ -95,6 +100,12 @@ impl Prefs {
         };
         self.left_width = fix(self.left_width, defaults.left_width);
         self.tools_width = fix(self.tools_width, defaults.tools_width);
+        // só chaves de site bem formadas, até o teto (arquivo editado à mão ou corrompido)
+        self.link_sites = std::mem::take(&mut self.link_sites)
+            .into_iter()
+            .filter(|(k, _)| site_key(k).as_deref() == Some(k.as_str()))
+            .take(MAX_SITES)
+            .collect();
         self
     }
 }
@@ -102,6 +113,16 @@ impl Prefs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bad_link_sites_are_dropped() {
+        let mut p = Prefs::default();
+        p.link_sites.insert("https://ex.com".into(), LinkDecision::Allow);
+        p.link_sites.insert("HTTPS://Ex.com/x".into(), LinkDecision::Allow);
+        p.link_sites.insert("lixo".into(), LinkDecision::Block);
+        let p = p.sanitized();
+        assert_eq!(p.link_sites.keys().collect::<Vec<_>>(), ["https://ex.com"]);
+    }
 
     #[test]
     fn missing_file_gives_the_defaults() {

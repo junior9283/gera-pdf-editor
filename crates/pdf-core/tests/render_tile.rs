@@ -88,3 +88,26 @@ fn blank_page_has_no_content_box() {
     let d = PdfDoc::open(&path, None).unwrap();
     assert_eq!(d.content_box(0).unwrap(), None);
 }
+
+#[test]
+fn content_box_of_a_giant_page_does_not_allocate_the_page() {
+    // 14 400 × 14 400 pt é o maior tamanho válido; com /UserUnit 75 chega a 1 milhão de pontos
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("g.pdf");
+    let content = b"BT /F1 2000 Tf 100 100 Td (X) Tj ET";
+    let pdf = format!(
+        "%PDF-1.6\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n\
+         3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 14400 14400]/UserUnit 75/Contents 4 0 R\
+         /Resources<</Font<</F1 5 0 R>>>>>>endobj\n4 0 obj<</Length {}>>stream\n{}\nendstream endobj\n\
+         5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n",
+        content.len(),
+        String::from_utf8_lossy(content)
+    );
+    std::fs::write(&path, pdf).unwrap();
+    let d = PdfDoc::open(&path, None).unwrap();
+    let size = d.page_size(0).unwrap();
+    let t = std::time::Instant::now();
+    let r = d.content_box(0).unwrap();
+    assert!(t.elapsed().as_secs_f32() < 2.0, "{:?} para {size:?}", t.elapsed());
+    assert!(r.is_some(), "o X aparece mesmo na escala reduzida");
+}

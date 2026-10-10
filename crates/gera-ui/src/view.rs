@@ -130,6 +130,8 @@ impl DocView {
             Fit::None => return None,
             Fit::Width => zoom::fit_width(self.base.0, avail_w),
             Fit::Page => zoom::fit_page(self.base, (avail_w, avail_h)),
+            Fit::Height => zoom::fit_height(self.base.1, avail_h),
+            Fit::Visible => return None, // Tarefa 6: largura da caixa de conteúdo
         };
         (zoom::quantize(z) != zoom::quantize(self.zoom)).then(|| self.set_zoom(z))
     }

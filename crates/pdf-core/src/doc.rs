@@ -233,10 +233,15 @@ impl PdfDoc {
     /// Caixa da tinta da página (sem anotações), em coordenadas do MuPDF, para "Ajustar ao
     /// conteúdo visível". `None` numa página em branco.
     pub fn content_box(&self, page: i32) -> Result<Option<PdfRect>> {
-        const SCALE: f32 = 0.25;
         let page = self.load(page)?;
         let bounds = page.bounds()?;
-        let ctm = Matrix::new_scale(SCALE, SCALE);
+        // 0,25, mas o lado maior nunca passa de 2048 px (página gigante, /UserUnit)
+        let side = (bounds.x1 - bounds.x0).max(bounds.y1 - bounds.y0).max(1.0);
+        let scale = 0.25f32.min(2048.0 / side);
+        if !scale.is_finite() || scale <= 0.0 {
+            return Ok(None);
+        }
+        let ctm = Matrix::new_scale(scale, scale);
         let pix = page.to_pixmap(&ctm, &Colorspace::device_rgb(), false, false)?;
         let img = packed_rgb(&pix, false);
         let (w, h) = (img.width as usize, img.height as usize);
@@ -251,7 +256,7 @@ impl PdfDoc {
         if x0 >= x1 {
             return Ok(None);
         }
-        let to_pt = |v: usize, origin: f32| v as f32 / SCALE + origin;
+        let to_pt = |v: usize, origin: f32| v as f32 / scale + origin;
         Ok(Some(PdfRect {
             x0: to_pt(x0, bounds.x0),
             y0: to_pt(y0, bounds.y0),

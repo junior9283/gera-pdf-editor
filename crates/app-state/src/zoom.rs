@@ -1,5 +1,11 @@
-pub const MIN_ZOOM: f32 = 0.1;
-pub const MAX_ZOOM: f32 = 8.0;
+pub const MIN_ZOOM: f32 = 0.0833;
+pub const MAX_ZOOM: f32 = 64.0;
+
+/// Níveis de ampliação do Acrobat (lista do campo de zoom e passos de Ampliar/Reduzir).
+pub const LEVELS: [f32; 20] = [
+    MIN_ZOOM, 0.125, 0.25, 0.3333, 0.5, 0.6667, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0,
+    16.0, 24.0, 32.0, MAX_ZOOM,
+];
 pub const DEFAULT_ZOOM: f32 = 1.0;
 
 /// `Some(v)` se `v` é finito e maior que zero.
@@ -15,12 +21,36 @@ pub fn clamp_zoom(z: f32) -> f32 {
     }
 }
 
+/// Próximo nível da lista acima de `z`.
 pub fn zoom_in(z: f32) -> f32 {
-    clamp_zoom(z * 1.25)
+    let z = clamp_zoom(z);
+    LEVELS
+        .into_iter()
+        .find(|l| *l > z * 1.001)
+        .unwrap_or(MAX_ZOOM)
 }
 
+/// Nível da lista logo abaixo de `z`.
 pub fn zoom_out(z: f32) -> f32 {
-    clamp_zoom(z / 1.25)
+    let z = clamp_zoom(z);
+    LEVELS
+        .into_iter()
+        .rev()
+        .find(|l| *l < z / 1.001)
+        .unwrap_or(MIN_ZOOM)
+}
+
+/// Porcentagem digitada no campo de zoom ("150", "150%", "66,67"), como fator. Fora dos
+/// limites, o limite; texto que não é número positivo, `None`.
+pub fn parse_zoom(text: &str) -> Option<f32> {
+    let t = text.trim().trim_end_matches('%').trim().replace(',', ".");
+    let pct: f32 = t.parse().ok()?;
+    (pct.is_finite() && pct > 0.0).then(|| clamp_zoom(pct / 100.0))
+}
+
+/// Zoom em que a altura da página cabe em `avail_h`.
+pub fn fit_height(page_h: f32, avail_h: f32) -> f32 {
+    fit_width(page_h, avail_h)
 }
 
 pub fn fit_width(page_w: f32, avail_w: f32) -> f32 {
@@ -38,6 +68,9 @@ pub enum Fit {
     #[default]
     Width,
     Page,
+    Height,
+    /// Largura do conteúdo (sem as margens brancas) da página atual.
+    Visible,
 }
 
 /// Zoom em que `page` (largura, altura em pontos) cabe inteira em `avail`.
@@ -73,6 +106,37 @@ mod tests {
         assert!((zoom_out(1.25) - 1.0).abs() < 1e-6);
         assert_eq!(zoom_in(MAX_ZOOM), MAX_ZOOM);
         assert_eq!(zoom_out(MIN_ZOOM), MIN_ZOOM);
+    }
+
+    #[test]
+    fn zoom_steps_follow_acrobat_levels() {
+        assert_eq!(zoom_in(1.0), 1.25);
+        assert_eq!(zoom_in(1.1), 1.25);
+        assert_eq!(zoom_in(8.0), 12.0);
+        assert_eq!(zoom_in(32.0), 64.0);
+        assert_eq!(zoom_out(1.0), 0.75);
+        assert_eq!(zoom_out(0.7), 0.6667);
+        assert_eq!(zoom_out(0.125), MIN_ZOOM);
+        assert_eq!(zoom_out(f32::NAN), 0.75, "NaN vira 100 %");
+        assert!(LEVELS.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn parse_zoom_accepts_percent_and_comma() {
+        assert_eq!(parse_zoom("150"), Some(1.5));
+        assert_eq!(parse_zoom(" 150 % "), Some(1.5));
+        assert!((parse_zoom("66,67").unwrap() - 0.6667).abs() < 1e-4);
+        assert_eq!(parse_zoom("99999"), Some(MAX_ZOOM));
+        assert_eq!(parse_zoom("1"), Some(MIN_ZOOM));
+        for bad in ["", "abc", "0", "-5", "NaN", "inf"] {
+            assert_eq!(parse_zoom(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn fit_height_uses_the_page_height() {
+        assert!((fit_height(800.0, 400.0) - 0.5).abs() < 1e-6);
+        assert_eq!(fit_height(0.0, 400.0), DEFAULT_ZOOM);
     }
 
     #[test]
