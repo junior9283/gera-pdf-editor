@@ -6,7 +6,20 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 ## [Não lançado]
 
-- Comparar arquivos, redigir, marca d'água, cabeçalho e rodapé (rumo à 1.0.0).
+- Redigir e Comparar arquivos (rumo à 1.0.0).
+
+## [0.10.0] — 2026-10-10 · Marca d'água e Cabeçalho e rodapé (v2c)
+
+### Adicionado
+- **Marca d'água**: texto (fonte, negrito, tamanho, cor), imagem ou página de outro PDF; rotação,
+  opacidade, escala relativa à página, atrás ou na frente do conteúdo, posição e páginas (todas,
+  intervalo, pares, ímpares), com prévia. Adicionar (pergunta se substitui a existente),
+  Atualizar e Remover — remove também as marcas feitas pelo Acrobat.
+- **Cabeçalho e rodapé**: seis caixas, fonte e margens, número da página ("1", "1 de n",
+  "Página 1 de n"), data e **numeração Bates** (prefixo, sufixo, dígitos, início), com prévia,
+  Atualizar e Remover.
+- A marca é um único objeto no arquivo, desenhado em todas as páginas; o caminho do arquivo de
+  origem não é gravado no PDF.
 
 ## [0.9.0] — 2026-10-10 · Editar PDF: texto (v4b)
 
@@ -79,7 +92,8 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 ### Adicionado
 - Visualizador leve: abrir, rolar, zoom, miniaturas, busca, destaque, sublinhado, notas e desenho.
 
-[Não lançado]: https://github.com/junior9283/gera-pdf-editor/compare/v0.9.0...HEAD
+[Não lançado]: https://github.com/junior9283/gera-pdf-editor/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/junior9283/gera-pdf-editor/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/junior9283/gera-pdf-editor/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/junior9283/gera-pdf-editor/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/junior9283/gera-pdf-editor/compare/v0.6.0...v0.7.0

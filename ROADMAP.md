@@ -14,6 +14,7 @@ A meta da versão **1.0.0**: todas as ferramentas do Adobe Acrobat Pro, com qual
 - [x] v5 — proteger, comprimir, criar/exportar, OCR (0.7.0)
 - [x] v4a — editar imagens (0.8.0)
 - [x] v4b — editar texto (0.9.0)
+- [x] v2c — marca d'água, cabeçalho e rodapé, Bates (0.10.0)
 
 ## Em andamento
 
@@ -23,7 +24,6 @@ A meta da versão **1.0.0**: todas as ferramentas do Adobe Acrobat Pro, com qual
 
 - [ ] Comparar arquivos (diferenças de texto e imagem entre duas versões)
 - [ ] Redigir (apagar de vez informações sensíveis, com busca por padrões)
-- [ ] Marca d'água, cabeçalho e rodapé, numeração Bates
 - [ ] Melhorias pendentes:
   - progresso do Exportar;
   - object streams no Comprimir;
