@@ -313,19 +313,20 @@ fn check(file: &[u8], byte_range: &[i64]) -> (Integrity, usize, Vec<Certificate>
     let Some(si) = sd.signer_infos.0.iter().next() else {
         return broken("assinatura sem assinante");
     };
-    let leaf = certs.iter().position(|cert| match &si.sid {
+    let leaf = certs.iter().find(|cert| match &si.sid {
         SignerIdentifier::IssuerAndSerialNumber(is) => {
             cert.tbs_certificate.issuer == is.issuer
                 && cert.tbs_certificate.serial_number == is.serial_number
         }
-        SignerIdentifier::SubjectKeyIdentifier(_) => true,
+        SignerIdentifier::SubjectKeyIdentifier(ski) => {
+            ski_of(cert).as_deref() == Some(ski.0.as_bytes())
+        }
     });
     let Some(leaf) = leaf else {
         return broken("certificado do assinante ausente");
     };
-    let mut ordered = certs.clone();
-    let leaf_cert = ordered.remove(leaf);
-    ordered.insert(0, leaf_cert);
+    // só a cadeia de emissão verificada conta (um certificado qualquer embutido não)
+    let ordered = verified_chain(leaf.clone(), &certs);
     let parts = [&file[..a], &file[b..b + c]];
     let Some(digest) = digest_with(&si.digest_alg.oid, &parts) else {
         return (
@@ -366,6 +367,79 @@ fn check(file: &[u8], byte_range: &[i64]) -> (Integrity, usize, Vec<Certificate>
         .map_or_else(Integrity::Broken, |()| Integrity::Intact),
     };
     (integrity, b + c, ordered)
+}
+
+/// SubjectKeyIdentifier (extensão 2.5.29.14) do certificado.
+fn ski_of(cert: &Certificate) -> Option<Vec<u8>> {
+    cert.tbs_certificate
+        .extensions
+        .as_ref()?
+        .iter()
+        .find(|e| e.extn_id == const_oid::db::rfc5280::ID_CE_SUBJECT_KEY_IDENTIFIER)
+        .and_then(|e| {
+            der::asn1::OctetStringRef::from_der(e.extn_value.as_bytes())
+                .ok()
+                .map(|o| o.as_bytes().to_vec())
+        })
+}
+
+/// `child` foi emitido (assinado) por `issuer`?
+fn issued_by(child: &Certificate, issuer: &Certificate) -> bool {
+    use const_oid::db::rfc5912::*;
+    if child.tbs_certificate.issuer != issuer.tbs_certificate.subject {
+        return false;
+    }
+    let digest = match child.signature_algorithm.oid {
+        SHA_1_WITH_RSA_ENCRYPTION => ID_SHA_1,
+        SHA_256_WITH_RSA_ENCRYPTION | ECDSA_WITH_SHA_256 => ID_SHA_256,
+        SHA_384_WITH_RSA_ENCRYPTION | ECDSA_WITH_SHA_384 => ID_SHA_384,
+        SHA_512_WITH_RSA_ENCRYPTION | ECDSA_WITH_SHA_512 => ID_SHA_512,
+        _ => return false,
+    };
+    let (Ok(tbs), Some(sig)) = (child.tbs_certificate.to_der(), child.signature.as_bytes()) else {
+        return false;
+    };
+    verify_with_cert(issuer, &digest, &tbs, sig).is_ok()
+}
+
+/// Cadeia a partir do titular, só com emissores cuja assinatura confere (até 8 níveis).
+fn verified_chain(leaf: Certificate, pool: &[Certificate]) -> Vec<Certificate> {
+    let mut chain = vec![leaf];
+    for _ in 0..8 {
+        let cur = chain.last().expect("começa com o titular");
+        if cur.tbs_certificate.issuer == cur.tbs_certificate.subject {
+            break; // raiz (autoassinado)
+        }
+        match pool
+            .iter()
+            .find(|p| !chain.contains(p) && issued_by(cur, p))
+        {
+            Some(issuer) => chain.push(issuer.clone()),
+            None => break,
+        }
+    }
+    chain
+}
+
+/// Motivo, local e data da versão assinada (uma revisão posterior pode tê-los trocado).
+fn signed_details(
+    file: &[u8],
+    end: usize,
+    password: Option<&str>,
+    page: i32,
+    field: &str,
+) -> Option<(String, String, String)> {
+    let mut doc = mupdf::pdf::PdfDocument::from_bytes(file.get(..end)?).ok()?;
+    if let Some(p) = password {
+        doc.authenticate(p).ok()?;
+    }
+    let page = doc.load_pdf_page(page).ok()?;
+    let w = page
+        .widgets()
+        .find(|w| w.name().ok().flatten().as_deref() == Some(field))?;
+    let v = w.annotation().object().get_dict_inheritable("V").ok()??;
+    let get = |k: &str| text_of(v.get_dict(k).ok().flatten()).ok();
+    Some((get("M")?, get("Reason")?, get("Location")?))
 }
 
 fn text_of(o: Option<PdfObject>) -> Result<String> {
@@ -412,22 +486,32 @@ impl PdfDoc {
                     }
                 }
                 let (integrity, end, certs) = check(&file, &br);
-                let (signer, email) = certs.first().map(subject_of).unwrap_or_else(|| {
-                    (
-                        text_of(v.get_dict("Name").ok().flatten()).unwrap_or_default(),
-                        String::new(),
-                    )
-                });
+                // titular só do certificado (o /Name do dicionário não é verificado)
+                let (signer, email) = certs.first().map(subject_of).unwrap_or_default();
+                let field = w.name().ok().flatten().unwrap_or_default();
+                let modified_after = integrity == Integrity::Intact && end < trimmed_len(&file);
+                let current = || -> Result<(String, String, String)> {
+                    Ok((
+                        text_of(v.get_dict("M")?)?,
+                        text_of(v.get_dict("Reason")?)?,
+                        text_of(v.get_dict("Location")?)?,
+                    ))
+                };
+                let (signed_at, reason, location) = match modified_after {
+                    true => signed_details(&file, end, self.password.as_deref(), page, &field)
+                        .map_or_else(current, Ok)?,
+                    false => current()?,
+                };
                 out.push(SignatureInfo {
-                    field: w.name().ok().flatten().unwrap_or_default(),
+                    field,
                     page,
                     id: annot_id(w.annotation())?,
                     signer,
                     email,
-                    signed_at: text_of(v.get_dict("M")?)?,
-                    reason: text_of(v.get_dict("Reason")?)?,
-                    location: text_of(v.get_dict("Location")?)?,
-                    modified_after: integrity == Integrity::Intact && end < trimmed_len(&file),
+                    signed_at,
+                    reason,
+                    location,
+                    modified_after,
                     integrity,
                     fingerprints: certs
                         .iter()

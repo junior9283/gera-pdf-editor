@@ -81,7 +81,12 @@ pub enum SigStatus {
 pub fn status(sig: &SignatureInfo, trusted: &TrustedCerts) -> SigStatus {
     match sig.integrity {
         Integrity::Broken(_) => SigStatus::Invalid,
-        Integrity::Intact if sig.fingerprints.iter().any(|f| trusted.trusts(f)) => SigStatus::Valid,
+        // confiável e sem revisões depois; alterado depois de assinado fica com ressalva
+        Integrity::Intact
+            if !sig.modified_after && sig.fingerprints.iter().any(|f| trusted.trusts(f)) =>
+        {
+            SigStatus::Valid
+        }
         Integrity::Intact => SigStatus::Unknown,
     }
 }
@@ -143,6 +148,10 @@ mod tests {
             status(&sig(Integrity::Broken("x".into()), "aa"), &t),
             SigStatus::Invalid
         );
+        // confiável, mas o documento mudou depois: não é "válida" sem ressalva
+        let mut later = ok.clone();
+        later.modified_after = true;
+        assert_eq!(status(&later, &t), SigStatus::Unknown);
     }
 
     #[test]
@@ -150,9 +159,9 @@ mod tests {
         let mut t = TrustedCerts::default();
         assert!(bar_text(&[], &t).is_none());
         let a = sig(Integrity::Intact, "aa");
-        assert_eq!(bar_text(&[a.clone()], &t).unwrap().0, SigStatus::Unknown);
+        assert_eq!(bar_text(std::slice::from_ref(&a), &t).unwrap().0, SigStatus::Unknown);
         t.trust("aa");
-        assert_eq!(bar_text(&[a.clone()], &t).unwrap().0, SigStatus::Valid);
+        assert_eq!(bar_text(std::slice::from_ref(&a), &t).unwrap().0, SigStatus::Valid);
         let bad = sig(Integrity::Broken("x".into()), "aa");
         assert_eq!(bar_text(&[a, bad], &t).unwrap().0, SigStatus::Invalid);
     }

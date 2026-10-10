@@ -189,3 +189,50 @@ fn signature_on_a_rotated_page_is_drawn_upright() {
     let d = PdfDoc::open(&path, None).unwrap();
     assert_eq!(d.signatures().unwrap()[0].integrity, Integrity::Intact);
 }
+
+#[test]
+fn an_unrelated_certificate_in_the_signature_is_not_part_of_the_chain() {
+    // um certificado confiável qualquer, embutido sem ter emitido o do titular, não conta
+    let dir = tempfile::tempdir().unwrap();
+    let other =
+        DigitalId::create_self_signed("Outro", "", "", "x", &dir.path().join("o.pfx")).unwrap();
+    let mut forged = id().clone();
+    forged.chain = vec![other.cert_der.clone()];
+    let path = write_sample(&dir, "a.pdf", 1, 0);
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    d.sign_digitally(
+        SignPlace::New {
+            page: 0,
+            rect: PdfRect::new(100.0, 100.0, 300.0, 150.0),
+        },
+        &forged,
+        "",
+        "",
+    )
+    .unwrap();
+    let s = PdfDoc::open(&path, None).unwrap().signatures().unwrap();
+    assert_eq!(s[0].fingerprints, vec![id().fingerprint()]);
+}
+
+#[test]
+fn details_changed_after_signing_show_the_signed_ones() {
+    let (_d, path) = signed(0);
+    // revisão posterior trocando o motivo no dicionário da assinatura
+    let doc = mupdf::pdf::PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let page = doc.load_pdf_page(0).unwrap();
+    let w = page.widgets().next().unwrap();
+    let mut v = w.annotation().object().get_dict("V").unwrap().unwrap();
+    v.dict_put(
+        "Reason",
+        mupdf::pdf::PdfObject::new_string("Forjado").unwrap(),
+    )
+    .unwrap();
+    let mut opts = mupdf::pdf::PdfWriteOptions::default();
+    opts.set_incremental(true);
+    let mut out = Vec::new();
+    doc.write_to_with_options(&mut out, opts).unwrap();
+    std::fs::write(&path, out).unwrap();
+    let s = PdfDoc::open(&path, None).unwrap().signatures().unwrap();
+    assert!(s[0].modified_after);
+    assert_eq!(s[0].reason, "Aprovado", "o motivo assinado, não o forjado");
+}
