@@ -9,9 +9,7 @@ pub fn order(spots: &[Spot]) -> Vec<usize> {
     idx.sort_by(|&a, &b| {
         let (pa, ya, xa) = spots[a];
         let (pb, yb, xb) = spots[b];
-        pa.cmp(&pb)
-            .then(ya.total_cmp(&yb))
-            .then(xa.total_cmp(&xb))
+        pa.cmp(&pb).then(ya.total_cmp(&yb)).then(xa.total_cmp(&xb))
     });
     idx
 }
@@ -36,7 +34,12 @@ mod tests {
 
     #[test]
     fn reading_order() {
-        let spots = [(1, 50.0, 10.0), (0, 300.0, 10.0), (1, 50.0, 5.0), (0, 20.0, 400.0)];
+        let spots = [
+            (1, 50.0, 10.0),
+            (0, 300.0, 10.0),
+            (1, 50.0, 5.0),
+            (0, 20.0, 400.0),
+        ];
         assert_eq!(order(&spots), vec![3, 1, 2, 0]);
     }
 

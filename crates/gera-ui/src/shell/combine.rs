@@ -31,7 +31,7 @@ impl Entry {
         e
     }
 
-    fn probe(&mut self) {
+    pub fn probe(&mut self) {
         let pw = (!self.password.is_empty()).then_some(self.password.as_str());
         match PdfDoc::open(&self.path, pw).and_then(|d| d.page_count()) {
             Ok(n) => {

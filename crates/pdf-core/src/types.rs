@@ -386,6 +386,8 @@ pub struct DocSummary {
     pub form_notes: crate::FormNotes,
     /// Proteção e permissões de quem abriu.
     pub security: crate::SecurityInfo,
+    /// Resultado do Comparar arquivos (`/Info /GeraCompare`): a aba abre a linha Comparação.
+    pub is_comparison: bool,
 }
 
 /// Rotação da vista, no sentido horário. Só muda a tela, nunca o arquivo.

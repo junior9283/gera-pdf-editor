@@ -3,6 +3,7 @@ pub mod annot_props;
 pub mod close;
 pub mod combine;
 pub mod commands;
+pub mod compare;
 pub mod dialog;
 pub mod field_props;
 pub mod header_footer_dialog;

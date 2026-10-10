@@ -490,3 +490,25 @@ fn destination_cannot_be_an_input() {
     assert!(matches!(r, Err(PdfError::Refused(_))), "{r:?}");
     assert_eq!(std::fs::read(&a).unwrap(), before);
 }
+
+#[test]
+fn result_is_recognized_when_opened() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = text_pdf(dir.path(), "a.pdf", &[pg(&["um"])], 0);
+    let b = text_pdf(dir.path(), "b.pdf", &[pg(&["dois"])], 0);
+    let (_, dest) = report(dir.path(), &opts(&a, &b));
+    assert!(
+        PdfDoc::open(&dest, None)
+            .unwrap()
+            .summary()
+            .unwrap()
+            .is_comparison
+    );
+    assert!(
+        !PdfDoc::open(&a, None)
+            .unwrap()
+            .summary()
+            .unwrap()
+            .is_comparison
+    );
+}

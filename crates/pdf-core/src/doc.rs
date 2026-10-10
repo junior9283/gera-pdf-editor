@@ -1193,7 +1193,22 @@ impl PdfDoc {
             fields: self.all_fields().unwrap_or_default(),
             form_notes: self.form_notes().unwrap_or_default(),
             security: self.security()?,
+            is_comparison: self.is_comparison(),
         })
+    }
+
+    /// Se o documento é um resultado do Comparar arquivos.
+    fn is_comparison(&self) -> bool {
+        let flag = || -> Result<bool> {
+            Ok(match self.inner.trailer()?.get_dict("Info")? {
+                Some(info) => match info.get_dict("GeraCompare")? {
+                    Some(v) => v.as_bool()?,
+                    None => false,
+                },
+                None => false,
+            })
+        };
+        flag().unwrap_or(false)
     }
 }
 
