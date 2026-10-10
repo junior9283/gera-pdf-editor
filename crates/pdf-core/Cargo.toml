@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 chrono = { version = "0.4.38", default-features = false, features = ["clock"] }
-mupdf = { version = "0.8", default-features = false, features = ["base14-fonts", "system-fonts", "docx-output"] }
+mupdf = { version = "0.8", default-features = false, features = ["base14-fonts", "system-fonts", "docx-output", "tesseract"] }
 thiserror = "2"
 # assinatura digital (v3d): CMS/PKCS#7, X.509, PKCS#12 — RustCrypto, MIT/Apache
 aes = "0.8"
