@@ -216,31 +216,18 @@ pub fn redact_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     use app_state::tools::Tool;
     let mut out = None;
     ui.horizontal(|ui| {
-        for (tool, label, tip) in [
-            (
-                Tool::RedactText,
-                "⬛ Marcar texto",
-                "Arraste sobre o texto a redigir",
-            ),
-            (
-                Tool::RedactArea,
-                "⬚ Marcar área",
-                "Desenhe um retângulo sobre a área",
-            ),
+        for (tool, label) in [
+            (Tool::RedactText, "⬛ Marcar texto"),
+            (Tool::RedactArea, "⬚ Marcar área"),
         ] {
-            if ui
-                .add(egui::Button::selectable(doc.edit.tool == tool, label))
-                .on_hover_text(tip)
-                .clicked()
-            {
-                doc.edit.tool = tool;
-            }
+            ui.selectable_value(&mut doc.edit.tool, tool, label)
+                .on_hover_text(tool.label());
         }
         if ui.button("🔍 Localizar texto…").clicked() {
             doc.redact.find = Some(Default::default());
         }
         if ui.button("Propriedades…").clicked() {
-            doc.redact.props = Some(doc.redact.look.clone());
+            doc.redact.open_props();
         }
         let marks = doc
             .annots
@@ -255,12 +242,7 @@ pub fn redact_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
             doc.redact.confirm = true;
         }
         if ui.button("Limpar documento…").clicked() {
-            doc.redact.sanitize = Some(pdf_core::SanitizeOptions {
-                metadata: true,
-                attachments: true,
-                scripts: true,
-                comments: false,
-            });
+            doc.redact.sanitize = Some(Default::default());
         }
         ui.separator();
         undo_redo(ui, doc, &mut out);

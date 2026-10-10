@@ -502,7 +502,7 @@ impl GeraApp {
                 .inner
                 .or(cmd);
         }
-        if doc.redact_tools {
+        if doc.redact.open {
             cmd = egui::Panel::top("redigir")
                 .show(ui, |ui| toolbar::redact_row(ui, doc))
                 .inner

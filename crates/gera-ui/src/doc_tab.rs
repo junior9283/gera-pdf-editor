@@ -129,8 +129,7 @@ pub struct DocTab {
     pub(crate) security: pdf_core::SecurityInfo,
     /// Linha Proteger PDF aberta.
     pub(crate) protect_tools: bool,
-    /// Ferramenta Redigir aberta e o estado dela.
-    pub(crate) redact_tools: bool,
+    /// Ferramenta Redigir (aberta ou não) e o estado dela.
     pub(crate) redact: crate::redact_tool::RedactTool,
     pub(crate) protect: Option<crate::shell::protect_dialog::ProtectDialog>,
     /// Pedido da senha de permissões (Desbloquear).
@@ -240,7 +239,6 @@ impl DocTab {
             cert: Default::default(),
             security: Default::default(),
             protect_tools: false,
-            redact_tools: false,
             redact: Default::default(),
             protect: None,
             unlock: None,
@@ -1328,11 +1326,13 @@ impl DocTab {
             send_edit_action(&self.worker, &mut self.status, action);
         }
         self.edit.set_fill_tool(None);
-        // Redigir: abre marcando texto (depois do Preencher, que volta a Selecionar)
-        self.redact_tools = id == tc::REDACT;
-        if self.redact_tools {
-            self.edit.tool = app_state::tools::Tool::RedactText;
-        }
+        self.redact.set_open(id == tc::REDACT);
+        // a ferramenta com que a linha abre (o Redigir já marcando texto)
+        self.edit.tool = if self.redact.open {
+            app_state::tools::Tool::RedactText
+        } else {
+            app_state::tools::Tool::Select
+        };
     }
 
     /// Editar PDF: aplica `edit` à imagem selecionada.
@@ -2236,7 +2236,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut tab = DocTab::new(&ctx, PathBuf::from("/a.pdf"), false);
         tab.show_row(app_state::tools_catalog::REDACT);
-        assert!(tab.redact_tools);
+        assert!(tab.redact.open);
         assert_eq!(tab.edit.tool, Tool::RedactText);
         tab.show_row("");
         assert_eq!(tab.edit.tool, Tool::Select);

@@ -43,11 +43,7 @@ fn open() -> (tempfile::TempDir, PdfDoc) {
 }
 
 fn look() -> RedactLook {
-    RedactLook {
-        fill: [0, 0, 0],
-        overlay: String::new(),
-        overlay_color: [255, 0, 0],
-    }
+    RedactLook::default()
 }
 
 /// Cor do pixel (x, y) da página 0 desenhada a 1:1.

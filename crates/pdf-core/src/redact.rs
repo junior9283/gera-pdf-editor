@@ -73,10 +73,12 @@ impl RedactPattern {
             .iter()
             .rev()
             .enumerate()
-            .map(|(i, &d)| match (i % 2 == 1, d * 2) {
-                (true, dd) if dd > 9 => dd - 9,
-                (true, dd) => dd,
-                (false, _) => d,
+            .map(|(i, &d)| {
+                if i % 2 == 1 {
+                    (d * 2) % 10 + d * 2 / 10
+                } else {
+                    d
+                }
             })
             .sum();
         sum.is_multiple_of(10)
@@ -107,6 +109,17 @@ pub struct RedactLook {
     pub overlay_color: [u8; 3],
 }
 
+impl Default for RedactLook {
+    /// Como o Acrobat: caixa preta, sem texto sobreposto (vermelho quando houver).
+    fn default() -> Self {
+        Self {
+            fill: [0, 0, 0],
+            overlay: String::new(),
+            overlay_color: [255, 0, 0],
+        }
+    }
+}
+
 /// O que o Limpar documento tira.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SanitizeOptions {
@@ -120,22 +133,70 @@ pub struct SanitizeOptions {
     pub comments: bool,
 }
 
+impl Default for SanitizeOptions {
+    /// Como o Acrobat sugere: tudo menos os comentários.
+    fn default() -> Self {
+        Self {
+            metadata: true,
+            attachments: true,
+            scripts: true,
+            comments: false,
+        }
+    }
+}
+
+impl SanitizeOptions {
+    /// Alguma coisa a tirar?
+    pub fn any(&self) -> bool {
+        self.metadata || self.attachments || self.scripts || self.comments
+    }
+}
+
+/// O texto sobreposto já preparado (fonte, largura a 1 pt e glifos), igual em todas as caixas.
+struct Overlay {
+    font: Font,
+    unit: f32,
+    run: String,
+}
+
+impl Overlay {
+    fn new(look: &RedactLook) -> Result<Option<Self>> {
+        let text = look.overlay.trim();
+        if text.is_empty() {
+            return Ok(None);
+        }
+        let font = Font::new("Helvetica-Bold")?;
+        Ok(Some(Self {
+            unit: width(&font, text, 1.0)?.max(0.01),
+            run: glyph_run(&font, text)?,
+            font,
+        }))
+    }
+}
+
 impl PdfDoc {
     /// Os trechos de todas as páginas que combinam com a consulta, na ordem do documento.
     pub fn find_redactions(&self, query: &RedactQuery) -> Result<Vec<RedactHit>> {
         let mut hits = Vec::new();
-        for page in 0..self.page_count()? {
-            match query {
-                RedactQuery::Phrase(phrase) if !phrase.trim().is_empty() => {
+        match query {
+            RedactQuery::Phrase(phrase) if phrase.trim().is_empty() => {}
+            RedactQuery::Phrase(phrase) => {
+                for page in 0..self.page_count()? {
                     hits.extend(self.search(page, phrase)?.into_iter().map(|r| RedactHit {
                         page,
                         rects: vec![r],
                         text: phrase.clone(),
                     }));
                 }
-                RedactQuery::Phrase(_) => {}
-                RedactQuery::Patterns(patterns) => {
-                    hits.extend(self.find_patterns(page, patterns)?);
+            }
+            RedactQuery::Patterns(patterns) => {
+                // compiladas uma vez para o documento todo
+                let regexes: Vec<(RedactPattern, Regex)> = patterns
+                    .iter()
+                    .map(|&p| (p, Regex::new(p.regex()).expect("padrão fixo válido")))
+                    .collect();
+                for page in 0..self.page_count()? {
+                    hits.extend(self.find_patterns(page, &regexes)?);
                 }
             }
         }
@@ -143,11 +204,11 @@ impl PdfDoc {
     }
 
     /// Padrões numa página: cada linha do texto estruturado, com a caixa de cada letra.
-    fn find_patterns(&self, page: i32, patterns: &[RedactPattern]) -> Result<Vec<RedactHit>> {
-        let regexes: Vec<(RedactPattern, Regex)> = patterns
-            .iter()
-            .map(|&p| (p, Regex::new(p.regex()).expect("padrão fixo válido")))
-            .collect();
+    fn find_patterns(
+        &self,
+        page: i32,
+        regexes: &[(RedactPattern, Regex)],
+    ) -> Result<Vec<RedactHit>> {
         let tp = self.load(page)?.to_text_page(TextPageFlags::empty())?;
         let mut hits = Vec::new();
         for block in tp.blocks() {
@@ -160,7 +221,7 @@ impl PdfDoc {
                     boxes.push((text.len(), Rect::from(ch.quad())));
                     text.push(c);
                 }
-                for (pattern, re) in &regexes {
+                for (pattern, re) in regexes {
                     for m in re.find_iter(&text) {
                         if !pattern.accepts(m.as_str()) {
                             continue;
@@ -188,6 +249,7 @@ impl PdfDoc {
     /// elas sai do arquivo e a caixa é pintada. Devolve quantas marcas foram aplicadas.
     pub fn apply_redactions(&mut self, look: &RedactLook) -> Result<usize> {
         self.require_modifiable("aplicar a redação")?;
+        let overlay = Overlay::new(look)?;
         self.with_snapshot(|d| {
             let mut applied = 0;
             for page in 0..d.page_count()? {
@@ -215,14 +277,20 @@ impl PdfDoc {
                     text: PdfRedactTextMethod::Remove,
                 })?;
                 drop(pdf_page);
-                d.paint_boxes(page, &boxes, look)?;
+                d.paint_boxes(page, &boxes, look, overlay.as_ref())?;
             }
             Ok(applied)
         })
     }
 
     /// Pinta as caixas aplicadas (tela) com a cor e o texto sobreposto, por cima do conteúdo.
-    fn paint_boxes(&mut self, page: i32, boxes: &[Rect], look: &RedactLook) -> Result<()> {
+    fn paint_boxes(
+        &mut self,
+        page: i32,
+        boxes: &[Rect],
+        look: &RedactLook,
+        overlay: Option<&Overlay>,
+    ) -> Result<()> {
         let mut pdf_page = self.inner.load_pdf_page(page)?;
         let mut page_obj = pdf_page.object();
         let to_screen = page_obj.page_ctm()?;
@@ -241,27 +309,24 @@ impl PdfDoc {
             ));
         }
         ops.push_str("f ");
-        let overlay = look.overlay.trim();
-        if !overlay.is_empty() {
-            let font = Font::new("Helvetica-Bold")?;
-            let name = self.font_resource(&mut page_obj, &font)?;
-            let unit = width(&font, overlay, 1.0)?.max(0.01);
+        if let Some(o) = overlay {
+            let name = self.font_resource(&mut page_obj, &o.font)?;
             ops.push_str(&format!("BT {} ", rgb_ops(look.overlay_color)));
             for b in boxes {
                 let (w, h) = (b.x1 - b.x0, b.y1 - b.y0);
                 // cabe na caixa: até 12 pt, no máximo 75% da altura e 95% da largura
-                let size = 12f32.min(0.75 * h).min(0.95 * w / unit);
+                let size = 12f32.min(0.75 * h).min(0.95 * w / o.unit);
                 if size < 3.0 {
                     continue;
                 }
-                let x = b.x0 + (w - unit * size) / 2.0;
+                let x = b.x0 + (w - o.unit * size) / 2.0;
                 let y = b.y0 + h / 2.0 + 0.35 * size;
                 ops.push_str(&format!(
                     "/{name} {} Tf 1 0 0 -1 {} {} Tm {} ",
                     num(size),
                     num(x),
                     num(y),
-                    glyph_run(&font, overlay)?
+                    o.run
                 ));
             }
             ops.push_str("ET ");
@@ -296,7 +361,13 @@ impl PdfDoc {
                     n.dict_delete("JavaScript")?;
                 }
             }
-            for page in 0..d.page_count()? {
+            // só os metadados: nada a fazer nas páginas
+            let pages = if opts.scripts || opts.comments || opts.attachments {
+                d.page_count()?
+            } else {
+                0
+            };
+            for page in 0..pages {
                 let mut pdf_page = d.inner.load_pdf_page(page)?;
                 if opts.scripts {
                     pdf_page.object().dict_delete("AA")?;
