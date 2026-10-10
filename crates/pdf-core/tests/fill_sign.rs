@@ -169,6 +169,13 @@ fn fill_text_is_a_borderless_typewriter_box() {
     assert_eq!(a.kind, AnnotKind::TextBox);
     assert_eq!(a.width.unwrap_or(0.0), 0.0, "sem borda");
     assert!((a.rect.x0 - 100.0).abs() < 0.5 && (a.rect.y0 - 100.0).abs() < 0.5);
+    // a caixa tem a largura do texto (uma linha), como o Typewriter do Acrobat
+    assert!(
+        a.rect.width() > 100.0 && a.rect.width() < 160.0,
+        "{:?}",
+        a.rect
+    );
+    assert!(a.rect.height() < 25.0, "{:?}", a.rect);
 }
 
 #[test]
@@ -195,4 +202,50 @@ fn marks_are_black_and_fit_their_box() {
             "{mark:?}: {x0} {y0} {x1} {y1}"
         );
     }
+}
+
+#[test]
+fn editing_fill_text_resizes_the_box_to_the_new_text() {
+    let (_d, _p, mut d) = doc(0);
+    d.apply(AnnotOp::Create(NewAnnot::FillText {
+        page: 0,
+        at: (100.0, 100.0),
+        text: "Ana".into(),
+        size: 12.0,
+    }))
+    .unwrap();
+    let id = d.annotations(0).unwrap()[0].id;
+    d.apply(AnnotOp::SetContents {
+        page: 0,
+        id,
+        text: "Ana Maria de Souza Albuquerque".into(),
+    })
+    .unwrap();
+    let r = d.annotations(0).unwrap()[0].rect;
+    assert!(r.width() > 150.0 && r.height() < 20.0, "{r:?}");
+}
+
+#[test]
+fn bigger_fill_text_gets_a_wider_box() {
+    let (_d, _p, mut d) = doc(0);
+    d.apply(AnnotOp::Create(NewAnnot::FillText {
+        page: 0,
+        at: (100.0, 100.0),
+        text: "Ana Maria".into(),
+        size: 12.0,
+    }))
+    .unwrap();
+    let a = d.annotations(0).unwrap()[0].clone();
+    d.apply(AnnotOp::Font {
+        page: 0,
+        id: a.id,
+        size: 24.0,
+        color: [0.0; 3],
+    })
+    .unwrap();
+    let r = d.annotations(0).unwrap()[0].rect;
+    assert!(
+        r.width() > a.rect.width() * 1.8 && r.height() < 35.0,
+        "{r:?}"
+    );
 }

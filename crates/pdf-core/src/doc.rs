@@ -347,8 +347,7 @@ fn add_one(doc: &mut PdfDocument, page: &mut PdfPage, a: &NewAnnot) -> Result<Pd
             a
         }
         NewAnnot::FillText { at, text, size, .. } => {
-            let start = PdfRect::new(at.0, at.1, at.0 + *size, at.1 + *size);
-            let rect = text_fit::fitted(start, text, *size, 0.0)?;
+            let rect = text_fit::snug(*at, text, *size)?;
             let mut a = page.add_free_text_annotation(Rect::from(rect), text)?;
             a.set_default_appearance("Helv", *size, Some(rgb([0.0; 3])))?;
             a.set_border_width(0.0)?;
@@ -731,6 +730,28 @@ impl PdfDoc {
     }
 
     /// Aplica uma operação do usuário no documento em memória; devolve as páginas mudadas.
+    /// Caixa de texto `id` com `text` (ou o atual) em `size`: (retângulo atual, novo). O texto solto
+    /// do Preencher e assinar fica justo ao texto; a caixa comum só cresce para baixo.
+    fn refit(
+        &self,
+        page: i32,
+        id: i32,
+        text: Option<&str>,
+        size: f32,
+    ) -> Result<Option<(PdfRect, PdfRect)>> {
+        let Some((rect, current, _, border)) = annot_edit::text_box_of(&self.inner, page, id)?
+        else {
+            return Ok(None);
+        };
+        let text = text.unwrap_or(&current);
+        let new = if annot_edit::is_typewriter(&self.inner, page, id)? {
+            text_fit::snug((rect.x0, rect.y0), text, size)?
+        } else {
+            text_fit::fitted(rect, text, size, border)?
+        };
+        Ok(Some((rect, new)))
+    }
+
     pub fn apply(&mut self, op: AnnotOp) -> Result<Vec<i32>> {
         let edit = match op {
             AnnotOp::Create(a) => {
@@ -793,12 +814,7 @@ impl PdfDoc {
                 color,
             } => {
                 let size = size.clamp(4.0, 144.0);
-                let fit = match annot_edit::text_box_of(&self.inner, page, id)? {
-                    Some((rect, text, _, border)) => {
-                        Some((rect, text_fit::fitted(rect, &text, size, border)?))
-                    }
-                    None => None,
-                };
+                let fit = self.refit(page, id, None, size)?;
                 with_fit(
                     Edit::Font {
                         page,
@@ -836,9 +852,7 @@ impl PdfDoc {
             },
             AnnotOp::SetContents { page, id, text } => {
                 let fit = match annot_edit::text_box_of(&self.inner, page, id)? {
-                    Some((rect, _, size, border)) => {
-                        Some((rect, text_fit::fitted(rect, &text, size, border)?))
-                    }
+                    Some((_, _, size, _)) => self.refit(page, id, Some(&text), size)?,
                     None => None,
                 };
                 let contents = Edit::Contents {

@@ -59,6 +59,23 @@ pub fn resized(r: PdfRect, h: Handle, to: (f32, f32), min: f32) -> PdfRect {
     }
 }
 
+/// Como `resized`, mantendo a proporção (assinaturas e carimbos): o canto oposto fica fixo e vale
+/// o eixo que o mouse puxou mais.
+pub fn resized_keep_aspect(r: PdfRect, h: Handle, to: (f32, f32), min: f32) -> PdfRect {
+    let (w0, h0) = (r.width().max(0.01), r.height().max(0.01));
+    let (ax, ay, sx, sy) = match h {
+        Handle::TopLeft => (r.x1, r.y1, -1.0, -1.0),
+        Handle::TopRight => (r.x0, r.y1, 1.0, -1.0),
+        Handle::BottomLeft => (r.x1, r.y0, -1.0, 1.0),
+        Handle::BottomRight => (r.x0, r.y0, 1.0, 1.0),
+    };
+    let pull = ((to.0 - ax) * sx).max(0.0) / w0;
+    let pull = pull.max(((to.1 - ay) * sy).max(0.0) / h0);
+    let scale = pull.max(min / w0.min(h0));
+    let (w, hh) = (w0 * scale, h0 * scale);
+    PdfRect::from_corners((ax, ay), (ax + sx * w, ay + sy * hh))
+}
+
 /// Retângulo do arrasto de `a` até `b`, em qualquer direção; com `square` (Shift), o lado maior
 /// vale para os dois (quadrado, ou círculo na elipse).
 pub fn rect_from_drag(a: (f32, f32), b: (f32, f32), square: bool) -> PdfRect {
@@ -113,6 +130,21 @@ pub fn line_handle_at(a: (f32, f32), b: (f32, f32), p: (f32, f32), size: f32) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeping_the_aspect_follows_the_wider_pull_from_the_opposite_corner() {
+        let r = PdfRect::new(100.0, 100.0, 200.0, 150.0); // 2:1
+        let out = resized_keep_aspect(r, Handle::BottomRight, (300.0, 160.0), 4.0);
+        assert_eq!(
+            (out.x0, out.y0, out.x1, out.y1),
+            (100.0, 100.0, 300.0, 200.0)
+        );
+        let out = resized_keep_aspect(r, Handle::TopLeft, (180.0, 60.0), 4.0);
+        assert_eq!((out.x1, out.y1), (200.0, 150.0), "canto oposto fixo");
+        assert!((out.width() / out.height() - 2.0).abs() < 0.01);
+        let tiny = resized_keep_aspect(r, Handle::BottomRight, (90.0, 90.0), 4.0);
+        assert!(tiny.height() >= 4.0 && (tiny.width() / tiny.height() - 2.0).abs() < 0.01);
+    }
     use pdf_core::PdfRect;
 
     #[test]

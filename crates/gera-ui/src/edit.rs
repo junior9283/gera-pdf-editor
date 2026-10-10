@@ -54,6 +54,8 @@ struct AnnotDrag {
     to: (f32, f32),
     /// Pontos da linha arrastada (o contorno de uma linha é ela mesma, não o retângulo).
     line: Option<Segment>,
+    /// Redimensionar mantém a proporção (carimbos e assinaturas, como no Acrobat).
+    keep_aspect: bool,
 }
 
 /// Menor lado (pontos) de um desenho redimensionado.
@@ -72,7 +74,12 @@ impl AnnotDrag {
             Grab::Move => r.translated(dx, dy),
             Grab::Resize(h) => {
                 let (x, y) = h.point(r);
-                resized(r, h, (x + dx, y + dy), MIN_SIZE)
+                let to = (x + dx, y + dy);
+                if self.keep_aspect {
+                    app_state::annot_geom::resized_keep_aspect(r, h, to, MIN_SIZE)
+                } else {
+                    resized(r, h, to, MIN_SIZE)
+                }
             }
             Grab::LinePoint { .. } => r,
         }
@@ -528,6 +535,7 @@ impl EditState {
                 from: p,
                 to: p,
                 line: a.line,
+                keep_aspect: a.kind == AnnotKind::Stamp,
             });
             return true;
         }
@@ -990,6 +998,7 @@ mod tests {
             from: (110.0, 110.0),
             to,
             line: None,
+            keep_aspect: false,
         }
     }
 
