@@ -3,6 +3,7 @@ pub mod annot_geom;
 pub mod cache;
 pub mod close;
 pub mod comments;
+pub mod fill_sign;
 pub mod layout;
 pub mod nav;
 pub mod organize;
