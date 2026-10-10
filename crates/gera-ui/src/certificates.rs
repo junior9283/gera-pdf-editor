@@ -226,11 +226,21 @@ pub fn panel(
             ui.indent(("assinatura", s.page, s.id), |ui| {
                 ui.label(match (&s.integrity, status) {
                     (pdf_core::Integrity::Broken(why), _) => format!("Assinatura inválida: {why}."),
+                    (pdf_core::Integrity::Unverifiable(why), _) => {
+                        format!("Não foi possível verificar a assinatura: {why}.")
+                    }
                     (_, SigStatus::Valid) => "A assinatura é válida.".to_owned(),
                     _ => "Validade desconhecida: a identidade do titular não foi verificada como confiável.".to_owned(),
                 });
-                if s.modified_after {
-                    ui.label("O documento foi alterado depois desta assinatura.");
+                if s.modified_after && s.changes_permitted {
+                    ui.label(
+                        "Depois desta assinatura só houve alterações permitidas (assinaturas, comentários ou campos).",
+                    );
+                } else if s.modified_after {
+                    ui.label("O conteúdo das páginas foi alterado depois desta assinatura.");
+                }
+                if s.integrity == pdf_core::Integrity::Intact && !s.cert_valid_at_signing {
+                    ui.label("O certificado não estava dentro da validade na hora da assinatura.");
                 } else if s.integrity == pdf_core::Integrity::Intact {
                     ui.label("O documento não foi alterado desde esta assinatura.");
                 }

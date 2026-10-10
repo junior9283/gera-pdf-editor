@@ -31,6 +31,8 @@ pub enum Integrity {
     Intact,
     /// Documento alterado no intervalo assinado, assinatura que não confere ou malformada.
     Broken(String),
+    /// Algoritmo que este programa não confere (ou fraco, como SHA-1): nem válida nem inválida.
+    Unverifiable(String),
 }
 
 /// Uma assinatura do documento, como o painel Assinaturas mostra.
@@ -52,6 +54,11 @@ pub struct SignatureInfo {
     pub modified_after: bool,
     /// Impressões digitais SHA-256 do certificado do titular e da cadeia (titular primeiro).
     pub fingerprints: Vec<String>,
+    /// As revisões posteriores só mexem em anotações e campos (assinar, comentar, preencher):
+    /// o conteúdo das páginas é o assinado, como o Acrobat permite num documento não certificado.
+    pub changes_permitted: bool,
+    /// O certificado (e a cadeia) estava dentro da validade na hora da assinatura.
+    pub cert_valid_at_signing: bool,
 }
 
 /// Bytes reservados para o CMS em `/Contents` (o Acrobat reserva parecido).
@@ -69,11 +76,6 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
-/// Texto PDF literal (WinAnsi), para a aparência.
-fn literal(s: &str) -> String {
-    crate::stamp::literal(s)
-}
-
 /// Fonte que cabe em `width` pt para `text` em Helvetica, até `max`.
 fn fit_size(font: &Font, text: &str, width: f32, max: f32) -> Result<f32> {
     let w = crate::text_fit::text_width(font, text, 1.0)?;
@@ -83,7 +85,12 @@ fn fit_size(font: &Font, text: &str, width: f32, max: f32) -> Result<f32> {
 /// "D:20261010153000-03'00'" → "2026.10.10 15:30:00 -03'00'" (como o Acrobat mostra).
 pub fn display_date(pdf: &str) -> String {
     let d = pdf.trim_start_matches("D:");
-    if d.len() < 14 || !d[..14].bytes().all(|b| b.is_ascii_digit()) {
+    // por bytes: um /M malicioso com acento na posição 14 não pode derrubar o app
+    if !d
+        .as_bytes()
+        .get(..14)
+        .is_some_and(|b| b.iter().all(u8::is_ascii_digit))
+    {
         return pdf.to_owned();
     }
     format!(
@@ -117,7 +124,7 @@ fn appearance_ops(
     let mut ops = format!(
         "q 0 g BT /Helv {big:.2} Tf {pad} {:.2} Td ({}) Tj ET\n",
         (h - big * 0.7) / 2.0,
-        literal(name)
+        crate::stamp::literal(name)
     );
     let mut lines = vec![
         "Assinado digitalmente por".to_owned(),
@@ -144,7 +151,7 @@ fn appearance_ops(
         ops.push_str(&format!(
             "BT /Helv {size:.2} Tf {:.2} {y:.2} Td ({}) Tj ET\n",
             half + pad,
-            literal(l)
+            crate::stamp::literal(l)
         ));
         y -= size * 1.2;
     }
@@ -223,49 +230,102 @@ fn digest_with(oid: &der::oid::ObjectIdentifier, parts: &[&[u8]]) -> Option<Vec<
     })
 }
 
-/// Confere a assinatura do `signed` (atributos assinados) com a chave pública do certificado.
+/// Por que uma assinatura não foi aceita.
+enum Fail {
+    /// Não confere: a assinatura é inválida.
+    Bad(String),
+    /// Algoritmo ou chave que este programa não confere.
+    Unsupported(String),
+}
+
+impl Fail {
+    fn integrity(self) -> Integrity {
+        match self {
+            Fail::Bad(m) => Integrity::Broken(m),
+            Fail::Unsupported(m) => Integrity::Unverifiable(m),
+        }
+    }
+}
+
+/// Confere `signature` sobre `signed` com a chave pública do certificado (RSA PKCS#1 v1.5 ou
+/// ECDSA P-256), com o resumo `digest_oid`.
 fn verify_with_cert(
     cert: &Certificate,
     digest_oid: &der::oid::ObjectIdentifier,
     signed: &[u8],
     signature: &[u8],
-) -> std::result::Result<(), String> {
+) -> std::result::Result<(), Fail> {
+    use const_oid::db::rfc5912::{ID_SHA_1, ID_SHA_256, ID_SHA_384, ID_SHA_512};
     use rsa::pkcs8::DecodePublicKey;
+    let unsupported = || Fail::Unsupported("algoritmo de resumo não suportado".into());
+    let mismatch = || Fail::Bad("a assinatura não confere com o certificado".into());
     let spki = cert
         .tbs_certificate
         .subject_public_key_info
         .to_der()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Fail::Bad(e.to_string()))?;
+    let hashed = digest_with(digest_oid, &[signed]).ok_or_else(unsupported)?;
     if let Ok(key) = rsa::RsaPublicKey::from_public_key_der(&spki) {
-        use const_oid::db::rfc5912::{ID_SHA_1, ID_SHA_256, ID_SHA_384, ID_SHA_512};
-        let hashed =
-            digest_with(digest_oid, &[signed]).ok_or("algoritmo de resumo desconhecido")?;
         let scheme = match *digest_oid {
             ID_SHA_1 => rsa::Pkcs1v15Sign::new::<sha1::Sha1>(),
             ID_SHA_256 => rsa::Pkcs1v15Sign::new::<sha2::Sha256>(),
             ID_SHA_384 => rsa::Pkcs1v15Sign::new::<sha2::Sha384>(),
             ID_SHA_512 => rsa::Pkcs1v15Sign::new::<sha2::Sha512>(),
-            _ => return Err("algoritmo de resumo desconhecido".into()),
+            _ => return Err(unsupported()),
         };
         return key
             .verify(scheme, &hashed, signature)
-            .map_err(|_| "a assinatura não confere com o certificado".to_owned());
+            .map_err(|_| mismatch());
     }
     if let Ok(key) = p256::ecdsa::VerifyingKey::from_public_key_der(&spki) {
-        use p256::ecdsa::signature::Verifier;
+        use p256::ecdsa::signature::hazmat::PrehashVerifier;
         let sig = p256::ecdsa::DerSignature::try_from(signature)
-            .map_err(|_| "assinatura ECDSA malformada")?;
-        return key
-            .verify(signed, &sig)
-            .map_err(|_| "a assinatura não confere com o certificado".to_owned());
+            .map_err(|_| Fail::Bad("assinatura ECDSA malformada".into()))?;
+        // o resumo é o que o CMS pede (SHA-256, SHA-384…), não sempre SHA-256
+        return key.verify_prehash(&hashed, &sig).map_err(|_| mismatch());
     }
-    Err("tipo de chave do certificado não suportado".into())
+    Err(Fail::Unsupported(
+        "tipo de chave não suportado (só RSA e ECDSA P-256)".into(),
+    ))
+}
+
+/// Hora da assinatura (atributo assinado signing-time), se houver.
+fn signing_time(si: &cms::signed_data::SignerInfo) -> Option<std::time::Duration> {
+    si.signed_attrs
+        .as_ref()?
+        .iter()
+        .find(|a| a.oid == const_oid::db::rfc5911::ID_SIGNING_TIME)
+        .and_then(|a| a.values.iter().next())
+        .and_then(|v| x509_cert::time::Time::from_der(&v.to_der().ok()?).ok())
+        .map(|t| t.to_unix_duration())
+}
+
+/// Todos os certificados da cadeia valiam no instante `t`?
+fn valid_at(chain: &[Certificate], t: std::time::Duration) -> bool {
+    chain.iter().all(|c| {
+        let v = &c.tbs_certificate.validity;
+        v.not_before.to_unix_duration() <= t && t <= v.not_after.to_unix_duration()
+    })
 }
 
 /// Valida uma assinatura: `/ByteRange` coerente com o arquivo, resumo e assinatura do CMS. Devolve
 /// a integridade, o fim do intervalo assinado e os certificados (titular primeiro).
-fn check(file: &[u8], byte_range: &[i64]) -> (Integrity, usize, Vec<Certificate>) {
-    let broken = |m: &str| (Integrity::Broken(m.into()), 0, Vec::new());
+/// Resultado da validação de uma assinatura: integridade, fim do intervalo assinado, cadeia
+/// verificada (titular primeiro) e se ela valia na hora da assinatura.
+struct Checked {
+    integrity: Integrity,
+    end: usize,
+    chain: Vec<Certificate>,
+    valid_then: bool,
+}
+
+fn check(file: &[u8], byte_range: &[i64]) -> Checked {
+    let broken = |m: &str| Checked {
+        integrity: Integrity::Broken(m.into()),
+        end: 0,
+        chain: Vec::new(),
+        valid_then: false,
+    };
     let [0, a, b, c] = byte_range else {
         return broken("/ByteRange malformado");
     };
@@ -329,11 +389,12 @@ fn check(file: &[u8], byte_range: &[i64]) -> (Integrity, usize, Vec<Certificate>
     let ordered = verified_chain(leaf.clone(), &certs);
     let parts = [&file[..a], &file[b..b + c]];
     let Some(digest) = digest_with(&si.digest_alg.oid, &parts) else {
-        return (
-            Integrity::Broken("algoritmo de resumo desconhecido".into()),
-            b + c,
-            ordered,
-        );
+        return Checked {
+            integrity: Integrity::Unverifiable("algoritmo de resumo não suportado".into()),
+            end: b + c,
+            chain: ordered,
+            valid_then: false,
+        };
     };
     let integrity = match &si.signed_attrs {
         Some(attrs) => {
@@ -350,7 +411,7 @@ fn check(file: &[u8], byte_range: &[i64]) -> (Integrity, usize, Vec<Certificate>
                         &signed,
                         si.signature.as_bytes(),
                     )
-                    .map_or_else(Integrity::Broken, |()| Integrity::Intact),
+                    .map_or_else(Fail::integrity, |()| Integrity::Intact),
                     Err(_) => Integrity::Broken("assinatura malformada".into()),
                 },
                 Some(_) => Integrity::Broken("o documento foi alterado depois de assinado".into()),
@@ -364,9 +425,26 @@ fn check(file: &[u8], byte_range: &[i64]) -> (Integrity, usize, Vec<Certificate>
             &[&file[..a], &file[b..b + c]].concat(),
             si.signature.as_bytes(),
         )
-        .map_or_else(Integrity::Broken, |()| Integrity::Intact),
+        .map_or_else(Fail::integrity, |()| Integrity::Intact),
     };
-    (integrity, b + c, ordered)
+    // SHA-1 já não é seguro: o Acrobat também não dá essas assinaturas como válidas
+    let integrity = match integrity {
+        Integrity::Intact if si.digest_alg.oid == const_oid::db::rfc5912::ID_SHA_1 => {
+            Integrity::Unverifiable("resumo SHA-1, que não é mais considerado seguro".into())
+        }
+        other => other,
+    };
+    let when = signing_time(si).unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+    });
+    Checked {
+        valid_then: valid_at(&ordered, when),
+        integrity,
+        end: b + c,
+        chain: ordered,
+    }
 }
 
 /// SubjectKeyIdentifier (extensão 2.5.29.14) do certificado.
@@ -457,6 +535,50 @@ fn signed_details(
     Some((get("M")?, get("Reason")?, get("Location")?))
 }
 
+/// Conteúdo de uma página que conta para "alterado": os fluxos de /Contents, /Rotate e /MediaBox.
+fn page_fingerprint(doc: &mupdf::pdf::PdfDocument, page: i32) -> Option<Vec<u8>> {
+    let obj = doc.find_page(page).ok()?;
+    let mut out = Vec::new();
+    match obj.get_dict("Contents").ok()? {
+        Some(c) if c.is_array().ok()? => {
+            for i in 0..c.len().ok()? as i32 {
+                out.extend(c.get_array(i).ok()??.read_stream().ok()?);
+            }
+        }
+        Some(c) => out.extend(c.read_stream().ok()?),
+        None => {}
+    }
+    for key in ["Rotate", "MediaBox"] {
+        if let Some(v) = obj.get_dict_inheritable(key).ok()? {
+            out.extend(v.to_string().into_bytes());
+        }
+    }
+    Some(out)
+}
+
+/// As revisões depois de `end` só mexeram em anotações e campos (assinar, comentar, preencher)?
+/// O conteúdo de cada página e o número de páginas são os da versão assinada.
+fn only_annotations_changed(file: &[u8], end: usize, password: Option<&str>) -> bool {
+    let open = |bytes: &[u8]| -> Option<mupdf::pdf::PdfDocument> {
+        let mut d = mupdf::pdf::PdfDocument::from_bytes(bytes).ok()?;
+        if let Some(p) = password {
+            d.authenticate(p).ok()?;
+        }
+        Some(d)
+    };
+    let (Some(signed), Some(now)) = (file.get(..end).and_then(open), open(file)) else {
+        return false;
+    };
+    let (Ok(n), Ok(m)) = (signed.page_count(), now.page_count()) else {
+        return false;
+    };
+    n == m
+        && (0..n).all(|p| {
+            let a = page_fingerprint(&signed, p);
+            a.is_some() && a == page_fingerprint(&now, p)
+        })
+}
+
 fn text_of(o: Option<PdfObject>) -> Result<String> {
     Ok(match o {
         Some(o) if o.is_string()? => o.as_string()?,
@@ -483,6 +605,10 @@ impl PdfDoc {
 
     /// Assinaturas do documento, validadas contra os bytes do arquivo no disco.
     pub fn signatures(&self) -> Result<Vec<SignatureInfo>> {
+        // sem assinaturas, nada de ler o arquivo inteiro (PDFs grandes)
+        if !self.signed_on_disk && !self.has_signatures()? {
+            return Ok(Vec::new());
+        }
         let file = std::fs::read(&self.path)?;
         let mut out = Vec::new();
         for page in 0..self.page_count()? {
@@ -500,7 +626,12 @@ impl PdfDoc {
                         br.push(n.as_int().map(i64::from).unwrap_or(-1));
                     }
                 }
-                let (integrity, end, certs) = check(&file, &br);
+                let Checked {
+                    integrity,
+                    end,
+                    chain: certs,
+                    valid_then,
+                } = check(&file, &br);
                 // titular só do certificado (o /Name do dicionário não é verificado)
                 let (signer, email) = certs.first().map(subject_of).unwrap_or_default();
                 let field = w.name().ok().flatten().unwrap_or_default();
@@ -529,6 +660,9 @@ impl PdfDoc {
                     location,
                     modified_after,
                     integrity,
+                    changes_permitted: modified_after
+                        && only_annotations_changed(&file, end, self.password.as_deref()),
+                    cert_valid_at_signing: valid_then,
                     fingerprints: certs
                         .iter()
                         .filter_map(|c| c.to_der().ok())
@@ -552,8 +686,28 @@ impl PdfDoc {
         // pendências primeiro: a assinatura cobre o arquivo como está no disco
         if self.history_state().dirty || self.history.can_undo() {
             self.save(&path)?;
-            // a gravação incremental parte do arquivo que o MuPDF abriu: reabre o recém-salvo
-            self.reload()?;
+        }
+        // a gravação incremental parte do arquivo que o MuPDF abriu: reabre o do disco (depois de
+        // salvar, ou de um "Salvar como", o aberto é outro)
+        self.discard_changes()?;
+        // arquivo reparado pelo MuPDF (tabela xref quebrada) não aceita gravação incremental:
+        // sem assinaturas ainda, grava uma vez por inteiro (consertado) e reabre
+        let mut probe = PdfWriteOptions::default();
+        probe.set_incremental(true);
+        if self
+            .inner
+            .write_to_with_options(&mut Vec::new(), probe)
+            .is_err()
+        {
+            if self.signed_on_disk {
+                return Err(err(
+                    "o arquivo está danificado e já tem assinaturas: não dá para acrescentar outra",
+                ));
+            }
+            let mut keep = PdfWriteOptions::default();
+            keep.set_encryption(mupdf::pdf::Encryption::Keep);
+            crate::doc::write_atomic(&self.inner, &path, keep)?;
+            self.discard_changes()?;
         }
         let (page, widget_id) = match place {
             SignPlace::Field { page, id } => (page, id),
@@ -566,7 +720,7 @@ impl PdfDoc {
         };
         let result = self.write_signature(page, widget_id, id, reason, location);
         // o documento em memória volta a ser o do disco (assinado, ou como estava se falhou)
-        self.reload()?;
+        self.discard_changes()?;
         result
     }
 
@@ -706,6 +860,8 @@ mod tests {
             "2026.10.10 15:30:00 -03'00'"
         );
         assert_eq!(display_date("lixo"), "lixo");
+        // acento na posição 14 (PDF malicioso): sem pânico
+        assert_eq!(display_date("D:1234567890123é"), "D:1234567890123é");
     }
 
     #[test]
@@ -752,7 +908,10 @@ mod tests {
             vec![1, 2, 3, 4],
             vec![0, 9],
         ] {
-            assert!(matches!(check(file, &br).0, Integrity::Broken(_)), "{br:?}");
+            assert!(
+                matches!(check(file, &br).integrity, Integrity::Broken(_)),
+                "{br:?}"
+            );
         }
     }
 }

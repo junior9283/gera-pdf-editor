@@ -324,6 +324,10 @@ impl PdfDoc {
                         None => "Off".into(),
                     };
                     set_buttons(&mut head, &default)?;
+                } else if w.r#type()? == WidgetType::Signature
+                    && w.annotation().object().get_dict_inheritable("V")?.is_some()
+                {
+                    // assinatura feita fica (como no Acrobat): apagá-la invalidaria o documento
                 } else {
                     w.reset(&mut self.inner)?;
                 }

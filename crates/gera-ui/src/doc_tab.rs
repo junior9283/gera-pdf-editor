@@ -1430,6 +1430,16 @@ impl DocTab {
                 {
                     self.edit.sign_field(page, rect)
                 }
+                // campo já assinado: o Acrobat mostra a assinatura (painel), não pede outra
+                crate::fields::FieldAction::Sign { page, id, .. }
+                    if self
+                        .cert
+                        .signatures
+                        .iter()
+                        .any(|s| s.page == page && s.id == id) =>
+                {
+                    self.events.push(DocEvent::ShowPanel(LeftPanel::Signatures));
+                }
                 crate::fields::FieldAction::Sign { page, id, .. } => {
                     let author = self.edit.author.clone();
                     self.cert

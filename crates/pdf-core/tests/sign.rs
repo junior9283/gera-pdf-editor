@@ -236,3 +236,140 @@ fn details_changed_after_signing_show_the_signed_ones() {
     assert!(s[0].modified_after);
     assert_eq!(s[0].reason, "Aprovado", "o motivo assinado, não o forjado");
 }
+
+fn intact(path: &std::path::Path) -> bool {
+    let s = PdfDoc::open(path, None).unwrap().signatures().unwrap();
+    !s.is_empty() && s.iter().all(|s| s.integrity == Integrity::Intact)
+}
+
+#[test]
+fn undoing_a_page_change_and_saving_keeps_the_signature() {
+    let (_d, path) = signed(0);
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    d.apply_pages(pdf_core::PageOp::Rotate {
+        pages: vec![1],
+        quarter_turns: 1,
+    })
+    .unwrap();
+    d.undo().unwrap();
+    d.save(&path).unwrap();
+    assert!(
+        intact(&path),
+        "desfazer por instantâneo não pode regravar o arquivo assinado"
+    );
+}
+
+#[test]
+fn reset_form_and_saving_keeps_the_signature() {
+    let (_d, path) = signed(0);
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    d.reset_form().unwrap();
+    d.save(&path).unwrap();
+    assert!(
+        intact(&path),
+        "Limpar formulário não apaga a assinatura nem regrava o arquivo"
+    );
+}
+
+#[test]
+fn deleting_the_signed_page_saves_incrementally() {
+    let (_d, path) = signed(0);
+    let before = std::fs::read(&path).unwrap();
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    d.apply_pages(pdf_core::PageOp::Delete { pages: vec![0] })
+        .unwrap();
+    d.save(&path).unwrap();
+    let after = std::fs::read(&path).unwrap();
+    assert!(
+        after.starts_with(&before),
+        "a revisão assinada continua no arquivo"
+    );
+}
+
+#[test]
+fn signing_after_save_as_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_sample(&dir, "a.pdf", 1, 0);
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let other = dir.path().join("b.pdf");
+    d.save(&other).unwrap();
+    d.sign_digitally(
+        SignPlace::New {
+            page: 0,
+            rect: PdfRect::new(100.0, 100.0, 300.0, 150.0),
+        },
+        id(),
+        "",
+        "",
+    )
+    .unwrap();
+    assert!(intact(&other));
+}
+
+#[test]
+fn a_repaired_pdf_can_be_signed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("quebrado.pdf");
+    // xref com offsets errados: o MuPDF repara ao abrir
+    let mut bytes = pdf_core::sample::sample_pdf(1, 0);
+    // startxref apontando para o lugar errado: o MuPDF reconstrói a tabela ao abrir
+    let i = bytes.windows(9).rposition(|w| w == b"startxref").unwrap();
+    let j = i + 10;
+    bytes[j] = b'1';
+    std::fs::write(&path, &bytes).unwrap();
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    d.sign_digitally(
+        SignPlace::New {
+            page: 0,
+            rect: PdfRect::new(100.0, 100.0, 300.0, 150.0),
+        },
+        id(),
+        "",
+        "",
+    )
+    .unwrap();
+    assert!(intact(&path));
+}
+
+#[test]
+fn a_second_signature_does_not_cast_doubt_on_the_first() {
+    let (_d, path) = signed(0);
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    d.sign_digitally(
+        SignPlace::New {
+            page: 1,
+            rect: PdfRect::new(100.0, 100.0, 300.0, 160.0),
+        },
+        id(),
+        "",
+        "",
+    )
+    .unwrap();
+    let s = PdfDoc::open(&path, None).unwrap().signatures().unwrap();
+    let first = s.iter().find(|s| s.reason == "Aprovado").unwrap();
+    assert!(
+        first.modified_after && first.changes_permitted,
+        "só assinaturas e anotações depois"
+    );
+}
+
+#[test]
+fn changing_page_content_after_signing_is_not_permitted() {
+    let (_d, path) = signed(0);
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    d.apply_pages(pdf_core::PageOp::Rotate {
+        pages: vec![1],
+        quarter_turns: 1,
+    })
+    .unwrap();
+    d.save(&path).unwrap();
+    let s = PdfDoc::open(&path, None).unwrap().signatures().unwrap();
+    assert!(s[0].modified_after && !s[0].changes_permitted);
+}
+
+#[test]
+fn the_certificate_was_valid_when_signing() {
+    let (_d, path) = signed(0);
+    let s = PdfDoc::open(&path, None).unwrap().signatures().unwrap();
+    assert!(s[0].cert_valid_at_signing);
+}

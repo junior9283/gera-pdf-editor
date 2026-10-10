@@ -59,6 +59,16 @@ fn id_file_name(name: &str) -> String {
     format!("{}.pfx", clean.trim())
 }
 
+/// Caminho livre para o ID novo: "Ana Souza.pfx", "Ana Souza (2).pfx"… (nunca sobrescreve a
+/// chave de outro ID com o mesmo nome).
+fn free_id_path(name: &str) -> Option<PathBuf> {
+    let first = app_state::store::config_file(&format!("ids/{}", id_file_name(name)))?;
+    let stem = first.file_stem()?.to_string_lossy().into_owned();
+    std::iter::once(first.clone())
+        .chain((2..).map(|n| first.with_file_name(format!("{stem} ({n}).pfx"))))
+        .find(|p| !p.exists())
+}
+
 fn entry(id: &DigitalId, path: PathBuf) -> IdEntry {
     IdEntry {
         path,
@@ -213,7 +223,19 @@ impl SignDialog {
                 .clicked()
             {
                 let path = path.expect("habilitado só com ID");
+                let expected = ids
+                    .iter()
+                    .find(|e| {
+                        self.importing.is_none() && Some(&e.fingerprint) == self.chosen.as_ref()
+                    })
+                    .map(|e| e.fingerprint.clone());
                 match DigitalId::open(&path, &self.password) {
+                    // o arquivo do ID foi trocado por outro: não assina em nome de quem não é
+                    Ok(id) if expected.as_ref().is_some_and(|f| *f != id.fingerprint()) => {
+                        self.error =
+                            "O arquivo deste ID digital foi substituído por outro certificado."
+                                .into();
+                    }
                     Ok(id) => {
                         if self.importing.take().is_some() {
                             with_ids(|ids| ids.add(entry(&id, path)));
@@ -284,9 +306,7 @@ impl SignDialog {
                     std::mem::take(&mut n.password),
                 );
                 n.confirm.clear();
-                let Some(path) =
-                    app_state::store::config_file(&format!("ids/{}", id_file_name(&name)))
-                else {
+                let Some(path) = free_id_path(&name) else {
                     self.error = "Pasta de configuração indisponível.".into();
                     return;
                 };

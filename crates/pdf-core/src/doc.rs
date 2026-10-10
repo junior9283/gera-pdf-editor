@@ -49,6 +49,9 @@ pub struct PdfDoc {
     unsaved: bool,
     /// Nome gravado como autor (/T) nas anotações criadas.
     author: Option<String>,
+    /// O arquivo do disco tem assinaturas: gravar e tirar instantâneos só de forma incremental
+    /// (a memória pode ter perdido o /V ou a página assinada, o arquivo não).
+    pub(crate) signed_on_disk: bool,
 }
 
 /// Abre o arquivo e, se for protegido, autentica com `password`.
@@ -67,14 +70,17 @@ pub(crate) fn open_authenticated(path: &Path, password: Option<&str>) -> Result<
 impl PdfDoc {
     pub fn open(path: &Path, password: Option<&str>) -> Result<Self> {
         let inner = open_authenticated(path, password)?;
-        Ok(Self {
+        let mut doc = Self {
             inner,
             path: path.to_path_buf(),
             password: password.map(str::to_owned),
             history: History::default(),
             unsaved: false,
             author: None,
-        })
+            signed_on_disk: false,
+        };
+        doc.signed_on_disk = doc.has_signatures().unwrap_or(false);
+        Ok(doc)
     }
 
     /// Caminho do arquivo aberto (muda com Salvar como).
@@ -723,15 +729,11 @@ impl PdfDoc {
     }
 
     /// Volta ao arquivo do disco (com a mesma senha), sem as edições em memória.
-    pub(crate) fn reload(&mut self) -> Result<()> {
-        self.discard_changes()
-    }
-
-    /// Volta ao arquivo do disco (com a mesma senha), sem as edições em memória.
-    fn discard_changes(&mut self) -> Result<()> {
+    pub(crate) fn discard_changes(&mut self) -> Result<()> {
         self.inner = open_authenticated(&self.path, self.password.as_deref())?;
         self.history = History::default();
         self.unsaved = false;
+        self.signed_on_disk = self.has_signatures().unwrap_or(false);
         Ok(())
     }
 
@@ -742,7 +744,7 @@ impl PdfDoc {
     fn write(&mut self, dest: &Path) -> Result<()> {
         let mut opts = PdfWriteOptions::default();
         opts.set_encryption(Encryption::Keep);
-        if self.has_signatures()? {
+        if self.signed_on_disk || self.has_signatures()? {
             // documento assinado: só gravação incremental (como o Acrobat), senão a reescrita
             // mudaria os bytes assinados e quebraria as assinaturas
             opts.set_incremental(true);
@@ -993,6 +995,9 @@ impl PdfDoc {
         let mut bytes = Vec::new();
         let mut keep = PdfWriteOptions::default();
         keep.set_encryption(Encryption::Keep);
+        // arquivo assinado: o instantâneo é incremental, para continuar começando pelos bytes
+        // assinados (restaurar e salvar depois não pode regravar o arquivo)
+        keep.set_incremental(self.signed_on_disk);
         self.inner.write_to_with_options(&mut bytes, keep)?;
         Ok(Snapshot {
             bytes,

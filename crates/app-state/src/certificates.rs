@@ -81,9 +81,12 @@ pub enum SigStatus {
 pub fn status(sig: &SignatureInfo, trusted: &TrustedCerts) -> SigStatus {
     match sig.integrity {
         Integrity::Broken(_) => SigStatus::Invalid,
+        Integrity::Unverifiable(_) => SigStatus::Unknown,
         // confiável e sem revisões depois; alterado depois de assinado fica com ressalva
         Integrity::Intact
-            if !sig.modified_after && sig.fingerprints.iter().any(|f| trusted.trusts(f)) =>
+            if sig.cert_valid_at_signing
+                && (!sig.modified_after || sig.changes_permitted)
+                && sig.fingerprints.iter().any(|f| trusted.trusts(f)) =>
         {
             SigStatus::Valid
         }
@@ -135,6 +138,8 @@ mod tests {
             integrity,
             modified_after: false,
             fingerprints: vec![fp.into()],
+            changes_permitted: false,
+            cert_valid_at_signing: true,
         }
     }
 
