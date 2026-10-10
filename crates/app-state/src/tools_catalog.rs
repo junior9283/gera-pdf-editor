@@ -46,6 +46,7 @@ pub const FILL_SIGN: &str = "assinar";
 pub const PREPARE_FORM: &str = "formulario";
 pub const CERTIFICATES: &str = "certificados";
 pub const PROTECT: &str = "proteger";
+pub const COMPRESS: &str = "comprimir";
 /// Ferramentas que abrem o Organizar páginas.
 pub const ORGANIZE: &str = "organizar";
 pub const INSERT: &str = "inserir";
@@ -84,7 +85,7 @@ pub const CATALOG: &[ToolEntry] = &[
     tool("comparar", "Comparar arquivos", "⚖", Review, Planned("v5"), "Diferenças entre duas versões"),
     tool(PROTECT, "Proteger PDF", "🔒", Protect, Ready, "Senha e permissões"),
     tool("redigir", "Redigir", "⬛", Protect, Planned("v5"), "Apagar informações sensíveis de vez"),
-    tool("comprimir", "Comprimir PDF", "⛃", Protect, Planned("v5"), "Reduzir o tamanho do arquivo"),
+    tool(COMPRESS, "Comprimir PDF", "⛃", Protect, Ready, "Reduzir o tamanho do arquivo"),
     tool(PREPARE_FORM, "Preparar formulário", "🗋", Protect, Ready, "Criar e editar campos de formulário"),
     tool("organizar", "Organizar páginas", "🗁", Organize, Ready, "Reordenar, girar e excluir páginas"),
     tool(SPLIT, "Dividir PDF", "✂", Organize, Ready, "Separar em vários arquivos"),
@@ -149,6 +150,7 @@ mod tests {
                 FILL_SIGN,
                 CERTIFICATES,
                 PROTECT,
+                COMPRESS,
                 PREPARE_FORM,
                 ORGANIZE,
                 SPLIT,

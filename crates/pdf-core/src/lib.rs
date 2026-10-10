@@ -2,6 +2,7 @@
 pub mod sample;
 
 mod annot_edit;
+mod compress;
 mod digital_id;
 mod doc;
 mod error;
@@ -18,6 +19,7 @@ mod text_fit;
 mod types;
 mod worker;
 
+pub use compress::{CompressLevel, CompressReport};
 pub use digital_id::{fingerprint, DigitalId};
 pub use doc::{max_render_scale, PdfDoc};
 pub use error::{PdfError, Result};

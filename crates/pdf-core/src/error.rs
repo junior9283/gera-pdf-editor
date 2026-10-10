@@ -18,6 +18,9 @@ pub enum PdfError {
     InvalidPages(String),
     #[error("erro do motor PDF: {0}")]
     Engine(String),
+    /// Recusa com motivo já explicado (ex.: comprimir um arquivo que não diminuiria).
+    #[error("{0}")]
+    Refused(String),
     #[error("assinatura digital: {0}")]
     Signature(String),
     #[error("erro de arquivo: {0}")]

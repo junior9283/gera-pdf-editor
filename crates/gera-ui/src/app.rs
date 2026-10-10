@@ -203,6 +203,8 @@ impl GeraApp {
     /// Respostas dos workers e do seletor de arquivos.
     fn poll(&mut self, ctx: &egui::Context) {
         let active = self.tabs.active();
+        // arquivos a abrir em abas novas (depois do laço: abrir mexe na lista de abas)
+        let mut to_open = Vec::new();
         for tab in (FIXED..self.tabs.len()).rev() {
             let Some(i) = self.tabs.doc_index(tab) else {
                 continue;
@@ -234,8 +236,12 @@ impl GeraApp {
                         self.close_tab(tab);
                         break;
                     }
+                    DocEvent::OpenFile(path) => to_open.push(path),
                 }
             }
+        }
+        for path in to_open {
+            self.open_path(ctx, path);
         }
         if let Some(picked) = self.dialogs.poll() {
             match picked {
@@ -591,6 +597,18 @@ impl GeraApp {
     fn run_tool(&mut self, ctx: &egui::Context, id: &str) {
         if id == tools_catalog::COMBINE {
             self.combine.open = true;
+            return;
+        }
+        if id == tools_catalog::COMPRESS {
+            match self.last_doc.clone().and_then(|p| self.tabs.find(&p)) {
+                Some(tab) => {
+                    self.activate(tab);
+                    if let Some(doc) = self.active_doc() {
+                        doc.open_compress();
+                    }
+                }
+                None => self.status = "Abra um PDF para comprimir.".into(),
+            }
             return;
         }
         if matches!(
