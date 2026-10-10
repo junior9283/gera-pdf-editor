@@ -16,7 +16,8 @@ use mupdf::pdf::{
     PdfRedactTextMethod,
 };
 use mupdf::text_page::TextBlockType;
-use mupdf::{Font, Quad, Rect, TextPageFlags};
+use mupdf::text_page::TextCharFlags;
+use mupdf::{Font, Matrix, Point, Quad, Rect, StrokeState, TextPageFlags};
 use std::collections::HashMap;
 
 /// Bloco de texto da página.
@@ -61,6 +62,8 @@ struct Glyph {
     size: f32,
     argb: u32,
     font: Option<Font>,
+    /// Pintado (preenchido ou contornado); o invisível é o texto de OCR (`3 Tr`).
+    visible: bool,
 }
 
 /// Trecho de uma linha (as lacunas grandes separam colunas), com as medidas usadas para juntar
@@ -167,26 +170,50 @@ fn group(segments: Vec<Segment>) -> Vec<Vec<Segment>> {
 /// O bloco com o que é preciso para trocá-lo.
 struct Block {
     info: PageTextBlock,
-    /// Caixa de cada linha (a redação tira só o que está nelas).
+    /// Caixa de cada linha (para conferir o que sobrou depois da redação).
     lines: Vec<Rect>,
+    /// Faixa do meio de cada letra: a redação tira só o que a toca, não as linhas vizinhas
+    /// (as caixas das letras, do ascendente ao descendente, se sobrepõem em linhas apertadas).
+    marks: Vec<Quad>,
     font: Option<Font>,
-    /// Origem do primeiro caractere (na linha de base), na tela.
+    /// Início da margem esquerda na linha de base da primeira linha, na tela, e o recuo da
+    /// primeira linha a partir dela.
     origin: (f32, f32),
+    indent: f32,
     dir: Dir,
-    /// Fim das linhas ao longo da direção do texto.
-    end: f32,
+    /// Largura do bloco ao longo da direção do texto (da margem ao fim da linha mais longa).
+    width: f32,
     /// Distância entre as linhas de base (só com mais de uma linha).
     gap: Option<f32>,
+    /// Texto invisível (camada de OCR).
+    invisible: bool,
+}
+
+/// A faixa do meio (35% a 65% da altura) da caixa da letra.
+fn middle_band(q: &Quad) -> Quad {
+    let at = |lo: &Point, hi: &Point, t: f32| Point {
+        x: lo.x + (hi.x - lo.x) * t,
+        y: lo.y + (hi.y - lo.y) * t,
+    };
+    Quad::new(
+        at(&q.ll, &q.ul, 0.65),
+        at(&q.lr, &q.ur, 0.65),
+        at(&q.ll, &q.ul, 0.35),
+        at(&q.lr, &q.ur, 0.35),
+    )
 }
 
 impl Block {
     fn from_lines(mut lines: Vec<Segment>) -> Block {
         // estilo mais frequente: (fonte, tamanho×10, cor) → letras e a fonte
         let mut styles: HashMap<(String, i32, u32), (usize, Option<Font>)> = HashMap::new();
+        let (mut shown, mut letters) = (0, 0);
         for g in lines.iter_mut().flat_map(|l| &mut l.glyphs) {
             if g.c.is_whitespace() {
                 continue;
             }
+            letters += 1;
+            shown += usize::from(g.visible);
             let key = (
                 g.font
                     .as_ref()
@@ -209,18 +236,32 @@ impl Block {
         let n = lines.len();
         let gap = (n > 1).then(|| (lines[n - 1].baseline - lines[0].baseline) / (n - 1) as f32);
         let rects: Vec<Rect> = lines.iter().map(Segment::bounds).collect();
-        let text = lines
-            .iter()
-            .map(|l| {
-                l.glyphs
+        let left = lines.iter().map(|l| l.span.0).fold(f32::MAX, f32::min);
+        let end = lines.iter().map(|l| l.span.1).fold(f32::MIN, f32::max);
+        let em = size as f32 / 10.0;
+        // a linha continua na seguinte (o parágrafo reflui, como no Acrobat) se a primeira palavra
+        // da seguinte não caberia no fim dela; senão, a quebra era do autor
+        let mut text = String::new();
+        for (i, l) in lines.iter().enumerate() {
+            let s: String = l.glyphs.iter().map(|g| g.c).collect();
+            text.push_str(s.trim_end());
+            if let Some(next) = lines.get(i + 1) {
+                let word_end = next
+                    .glyphs
                     .iter()
-                    .map(|g| g.c)
-                    .collect::<String>()
-                    .trim_end()
-                    .to_owned()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+                    .take_while(|g| !g.c.is_whitespace())
+                    .map(|g| dir.along((g.quad.ur.x, g.quad.ur.y)))
+                    .fold(next.span.0, f32::max);
+                let word = word_end - next.span.0;
+                text.push(if l.span.1 + 0.3 * em + word > end {
+                    ' '
+                } else {
+                    '\n'
+                });
+            }
+        }
+        let first = lines[0].glyphs[0].origin;
+        let indent = (dir.along(first) - left).max(0.0);
         Block {
             info: PageTextBlock {
                 rect: rects
@@ -234,12 +275,20 @@ impl Block {
                 color: [(argb >> 16) as u8, (argb >> 8) as u8, argb as u8],
                 font: strip_subset(&name).to_owned(),
             },
+            marks: lines
+                .iter()
+                .flat_map(|l| &l.glyphs)
+                .filter(|g| !g.c.is_whitespace())
+                .map(|g| middle_band(&g.quad))
+                .collect(),
             lines: rects,
             font,
-            origin: lines[0].glyphs[0].origin,
+            origin: (first.0 - dir.0 * indent, first.1 - dir.1 * indent),
+            indent,
             dir,
-            end: lines.iter().map(|l| l.span.1).fold(f32::MIN, f32::max),
+            width: end - left,
             gap,
+            invisible: shown * 2 < letters,
         }
     }
 }
@@ -250,6 +299,8 @@ struct Place {
     dir: Dir,
     maxw: f32,
     gap: f32,
+    /// Recuo da primeira linha.
+    indent: f32,
 }
 
 /// Estilo do texto a escrever.
@@ -257,6 +308,7 @@ struct Style {
     font: Font,
     size: f32,
     color: [u8; 3],
+    invisible: bool,
 }
 
 /// Tamanho de fonte do Adicionar texto, como no Acrobat.
@@ -300,11 +352,23 @@ fn standard_font(font: Option<&Font>) -> Result<Font> {
     Ok(Font::new(&format!("{family}{style}"))?)
 }
 
-/// A fonte tem todas as letras do texto (os espaços podem faltar: viram deslocamento)?
+/// A fonte tem o desenho de todas as letras do texto (os espaços podem faltar: viram
+/// deslocamento)? Subconjuntos podem manter o mapa de caracteres inteiro com os glifos não usados
+/// vazios, e fontes Type3 não têm contorno: os dois caem para a padrão.
 fn covers(font: &Font, text: &str) -> bool {
-    text.chars()
-        .filter(|c| !c.is_whitespace())
-        .all(|c| font.encode_character(c as i32).is_ok_and(|g| g > 0))
+    text.chars().filter(|c| !c.is_whitespace()).all(|c| {
+        font.encode_character(c as i32)
+            .is_ok_and(|g| g > 0 && has_outline(font, g))
+    })
+}
+
+/// O glifo tem desenho (contorno com área)?
+fn has_outline(font: &Font, glyph: i32) -> bool {
+    let Ok(Some(path)) = font.outline_glyph(glyph) else {
+        return false;
+    };
+    path.bounds(&StrokeState::default(), &Matrix::IDENTITY)
+        .is_ok_and(|b| b.x1 > b.x0 && b.y1 > b.y0)
 }
 
 /// Avanço de um caractere; o espaço sem glifo vale um quarto de eme.
@@ -323,19 +387,25 @@ fn width(font: &Font, s: &str, size: f32) -> Result<f32> {
 
 /// Quebra o texto em linhas de até `maxw`: parágrafos nos `\n`, depois entre palavras; uma palavra
 /// maior que a linha quebra no meio. Cada palavra é medida uma vez.
-fn wrap(font: &Font, text: &str, size: f32, maxw: f32) -> Result<Vec<String>> {
+fn wrap(font: &Font, text: &str, size: f32, maxw: f32, indent: f32) -> Result<Vec<String>> {
     let maxw = maxw.max(size);
     let space = advance(font, ' ', size)?;
     let mut lines = Vec::new();
     for paragraph in text.split('\n') {
-        let (mut line, mut used) = (String::new(), 0.0);
+        // a primeira linha começa depois do recuo
+        let mut used = if lines.is_empty() {
+            indent.min(maxw - size).max(0.0)
+        } else {
+            0.0
+        };
+        let mut line = String::new();
         for word in paragraph.split(' ') {
             let w = width(font, word, size)?;
             if !line.is_empty() && used + space + w > maxw {
                 lines.push(std::mem::take(&mut line));
                 used = 0.0;
             }
-            if line.is_empty() && w > maxw {
+            if line.is_empty() && used + w > maxw {
                 // palavra maior que a linha: corta onde couber
                 for c in word.chars() {
                     let a = advance(font, c, size)?;
@@ -376,18 +446,6 @@ fn glyph_run(font: &Font, line: &str) -> Result<String> {
     Ok(out)
 }
 
-/// Impressão digital da fonte: glifo e avanço de algumas letras, ascendente e descendente (iguais
-/// para a mesma fonte, qualquer que seja o nome com que foi carregada).
-fn fingerprint(font: &Font) -> String {
-    let mut out = format!("{:.4} {:.4}", font.ascender(), font.descender());
-    for c in ['a', 'W', '0', 'g', 'M'] {
-        let g = font.encode_character(c as i32).unwrap_or(0);
-        let w = font.advance_glyph(g).unwrap_or(0.0);
-        out.push_str(&format!(" {g}:{w:.4}"));
-    }
-    out
-}
-
 /// A caixa de `rect` reduzida para conferir o que sobrou depois da redação.
 fn inner(rect: &Rect) -> PdfRect {
     let (dx, dy) = ((rect.x1 - rect.x0) * 0.1, (rect.y1 - rect.y0) * 0.25);
@@ -422,6 +480,9 @@ impl PdfDoc {
                             size: ch.size(),
                             argb: ch.argb() & 0xff_ffff,
                             font: ch.font(),
+                            visible: ch
+                                .flags()
+                                .intersects(TextCharFlags::FILLED | TextCharFlags::STROKED),
                         })
                     })
                     .collect();
@@ -448,23 +509,14 @@ impl PdfDoc {
                 .filter(|b| distance(b) <= 8.0)
                 .min_by(|a, b| distance(a).total_cmp(&distance(b)))
                 .ok_or_else(|| refused("o bloco de texto não está mais na página"))?;
-            doc.redact_lines(page, &block.lines)?;
+            doc.redact_lines(page, &block.lines, &block.marks)?;
             let text = text.trim_end();
             if text.trim().is_empty() {
                 return Ok(());
             }
-            let font = match block.font {
-                Some(f) if covers(&f, text) => f,
-                f => standard_font(f.as_ref())?,
-            };
-            let style = Style {
-                font,
-                size: block.info.size,
-                color: block.info.color,
-            };
             // parágrafo mantém a largura; linha solta (título) cresce até a margem, como no Acrobat
             let maxw = if block.lines.len() > 1 {
-                block.end - block.dir.along(block.origin)
+                block.width
             } else {
                 doc.room(page, block.origin, block.dir)?
             };
@@ -472,9 +524,23 @@ impl PdfDoc {
                 origin: block.origin,
                 dir: block.dir,
                 maxw,
-                gap: block.gap.unwrap_or(LINE_HEIGHT * style.size),
+                gap: block.gap.unwrap_or(LINE_HEIGHT * block.info.size),
+                indent: block.indent,
             };
-            doc.write_text(page, &style, text, &place)
+            let style = |font| Style {
+                font,
+                size: block.info.size,
+                color: block.info.color,
+                invisible: block.invisible,
+            };
+            let fallback = standard_font(block.font.as_ref())?;
+            match block.font {
+                // a original pode não poder ser embutida de novo (Type1 antiga, Type3): a padrão
+                Some(f) if covers(&f, text) => doc
+                    .write_text(page, &style(f), text, &place)
+                    .or_else(|_| doc.write_text(page, &style(fallback), text, &place)),
+                _ => doc.write_text(page, &style(fallback), text, &place),
+            }
         })
     }
 
@@ -493,11 +559,13 @@ impl PdfDoc {
                 dir: Dir(1.0, 0.0),
                 maxw: doc.room(page, origin, Dir(1.0, 0.0))?,
                 gap: LINE_HEIGHT * NEW_TEXT_SIZE,
+                indent: 0.0,
             };
             let style = Style {
                 font,
                 size: NEW_TEXT_SIZE,
                 color: [0, 0, 0],
+                invisible: false,
             };
             doc.write_text(page, &style, text, &place)
         })
@@ -520,8 +588,11 @@ impl PdfDoc {
         Ok(t.max(MIN_TEXT_WIDTH))
     }
 
-    /// Redação só de texto nas caixas das linhas; recusa se o texto antigo continuar lá.
-    fn redact_lines(&mut self, page: i32, lines: &[Rect]) -> Result<()> {
+    /// Redação só de texto na faixa do meio das letras do bloco (`marks`); recusa se o texto
+    /// antigo continuar nas linhas ou se alguma letra de fora sumir. Links e comentários sobre o
+    /// texto ficam (a redação do MuPDF os apagaria).
+    fn redact_lines(&mut self, page: i32, lines: &[Rect], marks: &[Quad]) -> Result<()> {
+        let before = self.letters(page)?;
         let mut pdf_page = self.inner.load_pdf_page(page)?;
         if pdf_page
             .annotations()
@@ -531,16 +602,55 @@ impl PdfDoc {
                 "a página tem marcas de redação pendentes; aplique ou apague-as antes",
             ));
         }
-        let quads: Vec<Quad> = lines.iter().map(|r| Quad::from(*r)).collect();
-        pdf_page.add_redact_annotation(quads)?;
+        let mut page_obj = pdf_page.object();
+        let annots = page_obj
+            .get_dict("Annots")?
+            .map(|a| a.copy_array())
+            .transpose()?;
+        pdf_page.add_redact_annotation(marks.to_vec())?;
         pdf_page.apply_redactions_with_options(PdfRedactOptions {
             black_boxes: false,
             image_method: PdfRedactImageMethod::None,
             line_art: PdfRedactLineArtMethod::None,
             text: PdfRedactTextMethod::Remove,
         })?;
-        let tp = self.load(page)?.to_text_page(TextPageFlags::empty())?;
+        match annots {
+            Some(a) => page_obj.dict_put("Annots", a)?,
+            None => page_obj.dict_delete("Annots")?,
+        }
+        drop(pdf_page);
+        let after = self.letters(page)?;
         let boxes: Vec<PdfRect> = lines.iter().map(inner).collect();
+        let inside = |p: &(f32, f32)| boxes.iter().any(|b| b.contains(p.0, p.1));
+        if after.iter().any(inside) {
+            return Err(refused(
+                "este texto não pode ser editado (faz parte de um formulário ou usa uma fonte \
+                 especial)",
+            ));
+        }
+        // só as letras do bloco podem ter saído: as outras continuam todas
+        let center = |q: &Quad| ((q.ul.x + q.lr.x) / 2.0, (q.ul.y + q.lr.y) / 2.0);
+        let ours: Vec<(f32, f32)> = marks.iter().map(center).collect();
+        let others = before
+            .iter()
+            .filter(|p| {
+                !ours
+                    .iter()
+                    .any(|o| (o.0 - p.0).abs() < 0.05 && (o.1 - p.1).abs() < 0.05)
+            })
+            .count();
+        if after.len() < others {
+            return Err(refused(
+                "editar este texto apagaria letras vizinhas (linhas sobrepostas)",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Centro de cada letra (sem os espaços) da página.
+    fn letters(&self, page: i32) -> Result<Vec<(f32, f32)>> {
+        let tp = self.load(page)?.to_text_page(TextPageFlags::empty())?;
+        let mut out = Vec::new();
         for block in tp.blocks() {
             for line in block.lines() {
                 for ch in line.chars() {
@@ -548,17 +658,12 @@ impl PdfDoc {
                         continue;
                     }
                     let q = ch.quad();
-                    let (x, y) = ((q.ul.x + q.lr.x) / 2.0, (q.ul.y + q.lr.y) / 2.0);
-                    if boxes.iter().any(|b| b.contains(x, y)) {
-                        return Err(refused(
-                            "este texto não pode ser editado (faz parte de um formulário ou usa \
-                             uma fonte especial)",
-                        ));
-                    }
+                    out.push(((q.ul.x + q.lr.x) / 2.0, (q.ul.y + q.lr.y) / 2.0));
+                    // (o mesmo centro que o da faixa do meio em `marks`)
                 }
             }
         }
-        Ok(())
+        Ok(out)
     }
 
     /// Escreve `text` por cima do conteúdo da página, na posição e direção de `place`.
@@ -570,19 +675,21 @@ impl PdfDoc {
         let [r, g, b] = style.color.map(|c| num(c as f32 / 255.0));
         let m = invert(&to_screen)?;
         let mut ops = format!(
-            " q {} cm BT {r} {g} {b} rg /{name} {} Tf ",
+            " q {} cm BT {r} {g} {b} rg /{name} {} Tf {}",
             [m.a, m.b, m.c, m.d, m.e, m.f].map(num).join(" "),
-            num(style.size)
+            num(style.size),
+            if style.invisible { "3 Tr " } else { "" }
         );
         // na tela (y para baixo): o x do glifo segue `dir`, o "para cima" dele é `dir` girada
         let Dir(dx, dy) = place.dir;
         let (ox, oy) = place.origin;
-        for (n, line) in wrap(&style.font, text, style.size, place.maxw)?
+        for (n, line) in wrap(&style.font, text, style.size, place.maxw, place.indent)?
             .iter()
             .enumerate()
         {
             let t = n as f32 * place.gap;
-            let (x, y) = (ox - dy * t, oy + dx * t);
+            let along = if n == 0 { place.indent } else { 0.0 };
+            let (x, y) = (ox - dy * t + dx * along, oy + dx * t + dy * along);
             ops.push_str(&format!(
                 "{} {} {} {} {} {} Tm {} ",
                 num(dx),
@@ -601,32 +708,33 @@ impl PdfDoc {
         Ok(())
     }
 
-    /// A fonte nos recursos da página (como `GeraFnN`): a que esta sessão já acrescentou, se for a
-    /// mesma (impressão digital), ou uma nova.
+    /// A fonte nos recursos da página (como `GeraFnN`). O MuPDF já devolve o mesmo objeto para o
+    /// mesmo programa de fonte acrescentado nesta sessão (pelo MD5); o nome que já aponta para ele
+    /// é reaproveitado. Fontes do arquivo nunca são tomadas por "do app".
     fn font_resource(&mut self, page_obj: &mut PdfObject, font: &Font) -> Result<String> {
-        let print = fingerprint(font);
-        let mut fonts = own_resource(&self.inner, page_obj, "Font")?;
-        // o primeiro GeraFnN livre ou que já é esta fonte (acrescentada nesta sessão)
-        let mut existing = None;
-        let name = (0..)
-            .map(|n| format!("GeraFn{n}"))
-            .find(|name| {
-                existing = fonts.get_dict(name.as_str()).ok().flatten();
-                existing.as_ref().is_none_or(|f| {
-                    f.is_indirect().unwrap_or(false)
-                        && f.as_indirect().is_ok_and(|num| {
-                            self.added_fonts
-                                .iter()
-                                .any(|(p, n)| *n == num && *p == print)
-                        })
-                })
-            })
-            .expect("sempre há um nome livre");
-        if existing.is_none() {
-            let obj = self.inner.add_font(font)?;
-            self.added_fonts.push((print, obj.as_indirect()?));
-            fonts.dict_put(name.as_str(), obj)?;
+        let obj = self.inner.add_font(font)?;
+        let num = obj.as_indirect()?;
+        let ours = self.added_fonts.contains(&num);
+        if !ours {
+            self.added_fonts.push(num);
         }
+        let mut fonts = own_resource(&self.inner, page_obj, "Font")?;
+        let mut free = None;
+        for n in 0.. {
+            let name = format!("GeraFn{n}");
+            match fonts.get_dict(name.as_str()) {
+                Ok(None) => {
+                    free = Some(name);
+                    break;
+                }
+                Ok(Some(f)) if ours && f.is_indirect()? && f.as_indirect()? == num => {
+                    return Ok(name);
+                }
+                _ => {} // ocupado (ou ilegível): o próximo
+            }
+        }
+        let name = free.expect("o laço só termina num nome livre");
+        fonts.dict_put(name.as_str(), obj)?;
         Ok(name)
     }
 }
@@ -638,10 +746,10 @@ mod tests {
     #[test]
     fn wrapping_keeps_paragraphs_and_breaks_long_words() {
         let f = Font::new("Helvetica").unwrap();
-        let lines = wrap(&f, "um dois três\nquatro", 10.0, 40.0).unwrap();
+        let lines = wrap(&f, "um dois três\nquatro", 10.0, 40.0, 0.0).unwrap();
         assert_eq!(lines.last().unwrap(), "quatro");
         assert!(lines.len() >= 3, "{lines:?}");
-        let long = wrap(&f, "aaaaaaaaaaaaaaaaaaaaaaaa", 10.0, 30.0).unwrap();
+        let long = wrap(&f, "aaaaaaaaaaaaaaaaaaaaaaaa", 10.0, 30.0, 0.0).unwrap();
         assert!(long.len() > 1 && long.concat() == "aaaaaaaaaaaaaaaaaaaaaaaa");
     }
 

@@ -102,7 +102,10 @@ fn paragraphs_wrap_inside_their_width() {
         .into_iter()
         .find(|b| b.text.starts_with("Este é"))
         .unwrap();
-    assert!(new.text.lines().count() >= 3, "{:?}", new.text);
+    assert!(
+        new.rect.height() >= 3.0 * 12.0,
+        "três linhas ou mais: {new:?}"
+    );
     assert_eq!(new.text.replace('\n', " "), long);
     assert!(new.rect.x1 <= r.x1 + 1.0, "{r:?} → {:?}", new.rect);
 }
@@ -125,8 +128,17 @@ fn line_breaks_are_kept() {
     let (_dir, mut d) = open(PAGE, 0);
     let r = block_rect(&d, "Texto acima");
     d.edit_text_block(0, r, "Um\nDois").unwrap();
-    let blocks = d.page_text_blocks(0).unwrap();
-    assert!(blocks.iter().any(|b| b.text == "Um\nDois"), "{blocks:?}");
+    // duas linhas (lidas de volta como um parágrafo: "Dois" não caberia depois de "Um")
+    let b = d
+        .page_text_blocks(0)
+        .unwrap()
+        .into_iter()
+        .find(|b| b.text.starts_with("Um"))
+        .unwrap();
+    assert!(
+        b.text.replace('\n', " ") == "Um Dois" && b.rect.height() > 30.0,
+        "{b:?}"
+    );
 }
 
 #[test]
@@ -294,4 +306,125 @@ fn a_font_planted_in_the_file_is_not_reused() {
         !raw.contains("/GeraFonte"),
         "nenhuma marca confiável vem do arquivo"
     );
+}
+
+fn fixture(name: &str) -> (tempfile::TempDir, PdfDoc) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(name);
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name),
+        &path,
+    )
+    .unwrap();
+    let d = PdfDoc::open(&path, None).unwrap();
+    (dir, d)
+}
+
+#[test]
+fn tight_lines_above_and_below_survive() {
+    for content in [
+        "BT /F1 14 Tf 72 700 Td (Titulo grande) Tj ET BT /F1 10 Tf 72 687 Td (corpo logo abaixo) Tj ET",
+        "BT /F1 20 Tf 72 700 Td (Titulo grande) Tj 0 -24 Td (segunda linha) Tj ET \
+         BT /F1 11 Tf 72 662 Td (corpo logo abaixo) Tj ET",
+    ] {
+        let (_dir, mut d) = open(content, 0);
+        let r = block_rect(&d, "Titulo");
+        d.edit_text_block(0, r, "Trocado").unwrap();
+        let text = d.page_text(0).unwrap();
+        assert!(text.contains("corpo logo abaixo"), "{text}");
+    }
+}
+
+#[test]
+fn a_hollow_subset_font_falls_back_to_the_standard_one() {
+    // subconjunto que mantém o mapa de caracteres inteiro mas esvazia os glifos não usados
+    let (_dir, mut d) = fixture("fonte-oca.pdf");
+    let r = block_rect(&d, "Texto");
+    d.edit_text_block(0, r, "Bolo Texto").unwrap();
+    let b = d
+        .page_text_blocks(0)
+        .unwrap()
+        .into_iter()
+        .find(|b| b.text.contains("Bolo"))
+        .unwrap();
+    assert!(!b.font.contains("Liberation"), "{b:?}");
+}
+
+#[test]
+fn a_type3_font_falls_back_to_the_standard_one() {
+    let (_dir, mut d) = fixture("fonte-type3.pdf");
+    let b = d.page_text_blocks(0).unwrap().remove(0);
+    d.edit_text_block(0, b.rect, "Trocado").unwrap();
+    assert!(d.page_text(0).unwrap().contains("Trocado"));
+}
+
+#[test]
+fn links_over_the_text_are_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = pdf(dir.path(), PAGE, 0);
+    let raw = std::fs::read_to_string(&path).unwrap().replace(
+        "/Contents 4 0 R>>",
+        "/Contents 4 0 R/Annots[<</Type/Annot/Subtype/Link/Rect[70 710 200 734]/A<</S/URI/URI(https://exemplo.org)>>>>]>>",
+    );
+    std::fs::write(&path, raw).unwrap();
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let r = block_rect(&d, "Texto acima");
+    d.edit_text_block(0, r, "Texto acima!").unwrap();
+    d.save(&path).unwrap();
+    let saved = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+    assert!(saved.contains("exemplo.org"), "o link continua");
+}
+
+#[test]
+fn paragraphs_reflow_and_keep_the_first_line_indent() {
+    let (_dir, mut d) = open(
+        "BT /F1 12 Tf 108 700 Td (aaaa bbbb cccc dddd) Tj -36 -14 Td (aaaa bbbb cccc dddd eeee ffff) Tj \
+         0 -14 Td (aaaa bbbb cccc dddd eeee ffff) Tj 0 -14 Td (fim.) Tj ET",
+        0,
+    );
+    let b = d
+        .page_text_blocks(0)
+        .unwrap()
+        .into_iter()
+        .find(|b| b.text.starts_with("aaaa"))
+        .unwrap();
+    // as linhas cheias são uma só frase (o Acrobat reflui o parágrafo)
+    assert_eq!(
+        b.text,
+        "aaaa bbbb cccc dddd aaaa bbbb cccc dddd eeee ffff aaaa bbbb cccc dddd eeee ffff fim."
+    );
+    d.edit_text_block(0, b.rect, &b.text).unwrap();
+    let after = d
+        .page_text_blocks(0)
+        .unwrap()
+        .into_iter()
+        .find(|b| b.text.starts_with("aaaa"))
+        .unwrap();
+    assert!(
+        (after.rect.x0 - 72.0).abs() < 1.0,
+        "margem esquerda: {after:?}"
+    );
+    assert!(
+        (after.rect.x1 - b.rect.x1).abs() < 15.0,
+        "mesma largura: {after:?}"
+    );
+}
+
+#[test]
+fn invisible_text_stays_invisible() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = pdf(
+        dir.path(),
+        "BT 3 Tr /F1 12 Tf 72 700 Td (Texto invisivel OCR) Tj ET",
+        0,
+    );
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let r = block_rect(&d, "invisivel");
+    d.edit_text_block(0, r, "Trocado").unwrap();
+    assert!(d.page_text(0).unwrap().contains("Trocado"));
+    d.save(&path).unwrap();
+    let saved = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+    assert!(saved.contains(" 3 Tr "), "o texto novo continua invisível");
 }

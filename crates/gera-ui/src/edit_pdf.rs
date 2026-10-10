@@ -200,6 +200,8 @@ impl EditPdfState {
     pub fn commit(&mut self) -> Option<EditAction> {
         let e = self.editing.take()?;
         let (page, text) = (e.page, e.buffer.trim_end().to_owned());
+        // a lista da página é pedida de novo (o worker responde depois da edição)
+        self.texts.invalidate(&[page]);
         let request = if e.is_new {
             let at = (e.rect.x0, e.rect.y0);
             (!text.trim().is_empty()).then_some(Request::AddText { page, at, text })?
@@ -287,7 +289,7 @@ impl EditPdfState {
 
     /// Clique em `p`: confirma o texto em edição; depois abre o bloco de texto clicado (ou um novo,
     /// no Adicionar texto) ou seleciona a imagem (ou solta a seleção fora delas).
-    fn click(&mut self, page: i32, p: (f32, f32)) -> Vec<EditAction> {
+    pub(crate) fn click(&mut self, page: i32, p: (f32, f32)) -> Vec<EditAction> {
         let mut out: Vec<EditAction> = self.commit().into_iter().collect();
         if matches!(self.placing, Some(Placing::Text)) {
             self.placing = None;
@@ -643,6 +645,18 @@ mod tests {
             &actions[..],
             [EditAction::Send(Request::EditTextBlock { page: 0, text, .. })] if text == "Oi"
         ));
+    }
+
+    #[test]
+    fn committing_asks_the_page_text_again() {
+        let mut st = text_state();
+        st.click(0, (50.0, 108.0));
+        st.editing.as_mut().unwrap().buffer = "Oi".into();
+        assert!(st.commit().is_some());
+        assert!(
+            st.texts.get(0).is_none(),
+            "a lista velha não reabre o texto antigo"
+        );
     }
 
     #[test]

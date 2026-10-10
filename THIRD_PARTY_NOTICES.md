@@ -7,6 +7,8 @@
 - **Dados de idioma do Tesseract** (tessdata por/eng, Google) — Apache-2.0; acompanham o AppImage.
 - **Great Vibes** (fonte manuscrita da assinatura digitada, The Great Vibes Pro Project Authors) —
   SIL Open Font License 1.1 (`crates/pdf-core/fonts/OFL.txt`).
+- **Liberation Sans** (Red Hat) — SIL Open Font License 1.1: um subconjunto dela está só no PDF de
+  teste `crates/pdf-core/tests/fixtures/fonte-oca.pdf` (não vai no programa).
 - **RustCrypto** (cms, x509-cert, der, rsa, p256, sha1, sha2, md-5, aes, cbc) — MIT ou Apache-2.0.
 - **p12-keystore** — MIT ou Apache-2.0. **jpeg-encoder** — MIT ou Apache-2.0 (e IJG). **zip** — MIT.
 - **egui / eframe** (Emil Ernerfeldt e contribuidores) — MIT ou Apache-2.0.

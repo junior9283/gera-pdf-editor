@@ -271,17 +271,30 @@ impl DocTab {
 
     /// Confirma o texto que está sendo digitado num campo (antes de salvar ou imprimir).
     /// Devolve se havia o que gravar.
+    /// Confirma o que está sendo digitado (campo de formulário, texto do Editar PDF) antes de gravar,
+    /// imprimir ou desfazer: o worker atende em ordem. Devolve se havia o que confirmar.
     fn commit_field(&mut self) -> bool {
-        match self.form.commit() {
+        let field = match self.form.commit() {
             Some(crate::fields::FieldAction::Set { page, id, value }) => {
                 self.worker.send(Request::SetField { page, id, value });
                 true
             }
             _ => false,
-        }
+        };
+        let text = self.edit_pdf.commit().map(|action| {
+            send_edit_action(&self.worker, &mut self.status, action);
+        });
+        field || text.is_some()
     }
 
     pub fn run(&mut self, ctx: &egui::Context, cmd: DocCommand) {
+        if matches!(cmd, DocCommand::Undo | DocCommand::Redo) && self.commit_field() {
+            // o texto em edição entra no histórico; desfazer o tira (como no Acrobat)
+            if cmd == DocCommand::Undo {
+                self.worker.send(Request::Undo);
+            }
+            return;
+        }
         let page = self.last.current_page;
         let Some(view) = self.view.as_mut() else {
             return;
@@ -2131,6 +2144,26 @@ mod tests {
             b.scroll_id(),
             "rolar uma aba não pode mover a outra"
         );
+    }
+
+    #[test]
+    fn saving_or_undoing_first_commits_the_text_being_edited() {
+        let ctx = egui::Context::default();
+        let mut tab = DocTab::new(&ctx, PathBuf::from("/a.pdf"), false);
+        tab.edit_pdf.on_text_blocks(
+            0,
+            vec![pdf_core::PageTextBlock {
+                rect: pdf_core::PdfRect::new(10.0, 10.0, 90.0, 25.0),
+                text: "Olá".into(),
+                size: 12.0,
+                color: [0, 0, 0],
+                font: "Helvetica".into(),
+            }],
+        );
+        tab.edit_pdf.click(0, (50.0, 18.0));
+        tab.edit_pdf.editing.as_mut().unwrap().buffer = "Oi".into();
+        assert!(tab.commit_field(), "o texto em edição vai antes de gravar");
+        assert!(tab.edit_pdf.editing.is_none());
     }
 
     #[test]

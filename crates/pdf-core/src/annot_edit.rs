@@ -97,7 +97,7 @@ pub(crate) struct Snapshot {
     pub(crate) bytes: Vec<u8>,
     pub(crate) hidden: HashSet<(i32, i32)>,
     /// Fontes acrescentadas pelo Editar texto (`PdfDoc::added_fonts`) no momento do instantâneo.
-    pub(crate) added_fonts: Vec<(String, i32)>,
+    pub(crate) added_fonts: Vec<i32>,
 }
 
 /// Um passo do desfazer/refazer: edição de anotação (com a inversa) ou instantâneo do documento.

@@ -58,9 +58,9 @@ pub struct PdfDoc {
     pub(crate) owner_unlocked: bool,
     /// Proteção a aplicar no próximo Salvar (`Some(None)`: remover a segurança).
     pub(crate) pending_protection: Option<Option<crate::security::Protection>>,
-    /// Fontes que o Editar texto acrescentou nesta sessão: (impressão digital, número do objeto).
-    /// Só elas são reaproveitadas; nada do arquivo é confiado como "fonte do app".
-    pub(crate) added_fonts: Vec<(String, i32)>,
+    /// Números dos objetos das fontes que o Editar texto acrescentou nesta sessão: só elas são
+    /// reaproveitadas; nada do arquivo é confiado como "fonte do app".
+    pub(crate) added_fonts: Vec<i32>,
 }
 
 /// Abre o arquivo e, se for protegido, autentica com `password`.
