@@ -12,7 +12,8 @@ use crate::doc::PdfDoc;
 use crate::edit_text::{glyph_run, width};
 use crate::error::{refused, Result};
 use crate::page_content::{
-    free_name, invert, matrix_ops, mul, num, own_resource, page_content, rgb_ops, Lexer, Tok,
+    form_xobject, free_name, invert, matrix_ops, mul, num, own_resource, page_content, page_parts,
+    rgb_ops, Lexer, Tok,
 };
 use mupdf::pdf::{PdfDocument, PdfObject};
 use mupdf::{Buffer, Font, Matrix};
@@ -553,38 +554,11 @@ impl PdfDoc {
                 if *page < 0 || *page >= src.page_count()? {
                     return Err(refused("o PDF escolhido não tem essa página"));
                 }
-                let obj = src.find_page(*page)?;
-                let media = obj
-                    .get_dict_inheritable("MediaBox")?
-                    .ok_or_else(|| refused("a página escolhida não tem tamanho"))?;
-                let mut v = [0.0; 4];
-                for (i, x) in v.iter_mut().enumerate() {
-                    *x = media
-                        .get_array(i as i32)?
-                        .map(|n| n.as_float())
-                        .transpose()?
-                        .unwrap_or(0.0);
-                }
-                let content = page_content(&obj)?;
-                let res = match obj.get_dict_inheritable("Resources")? {
-                    Some(r) => self.inner.graft_object(&r)?,
-                    None => self.inner.new_dict()?,
-                };
-                (content, res, [v[0], v[1], v[2] - v[0], v[3] - v[1]])
+                let mut map = self.inner.new_graft_map()?;
+                page_parts(&mut map, &self.inner, &src.find_page(*page)?)?
             }
         };
-        let [x, y, w, h] = bbox;
-        let mut dict = self.inner.new_object_from_str(&format!(
-            "<</Type/XObject/Subtype/Form/BBox[{} {} {} {}]>>",
-            num(x),
-            num(y),
-            num(x + w),
-            num(y + h)
-        ))?;
-        dict.dict_put("Resources", resources)?;
-        let form = self
-            .inner
-            .add_stream(&Buffer::from_bytes(&content)?, Some(&dict), false)?;
+        let form = form_xobject(&mut self.inner, &content, resources, bbox)?;
         Ok((form, bbox))
     }
 
