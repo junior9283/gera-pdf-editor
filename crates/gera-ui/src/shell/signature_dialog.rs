@@ -1,6 +1,6 @@
 //! Janela "Assinatura"/"Iniciais" do Preencher e assinar (como no Acrobat): Digitar, Desenhar ou
 //! Imagem; "Aplicar" guarda para reutilizar.
-use crate::fill_sign::{paint_saved, script_family};
+use crate::fill_sign::{paint_saved, paint_script};
 use crate::open_dialog::{FileDialogs, Picked};
 use app_state::fill_sign::{self as fs, Saved};
 use std::path::PathBuf;
@@ -111,20 +111,20 @@ impl SignatureDialog {
                         .desired_width(CANVAS.x),
                 );
                 let (r, painter) = canvas(ui);
-                if !self.text.trim().is_empty() {
-                    painter.text(
-                        r.center(),
-                        egui::Align2::CENTER_CENTER,
-                        self.text.trim(),
-                        egui::FontId::new(64.0, script_family()),
-                        egui::Color32::BLACK,
-                    );
-                }
+                paint_script(
+                    &painter,
+                    self.text.trim(),
+                    r.shrink2(egui::vec2(16.0, 30.0)),
+                    egui::Color32::BLACK,
+                );
             }
             Tab::Draw => {
                 let (r, painter, response) = draw_area(ui);
                 if response.drag_started() {
-                    self.strokes.push(Vec::new());
+                    // começa onde o botão foi apertado (o arrasto só é percebido alguns pixels depois)
+                    let start = ui.input(|i| i.pointer.press_origin()).map(|p| p - r.min);
+                    self.strokes
+                        .push(start.map(|p| vec![(p.x, p.y)]).unwrap_or_default());
                 }
                 if response.dragged() {
                     if let (Some(p), Some(s)) =

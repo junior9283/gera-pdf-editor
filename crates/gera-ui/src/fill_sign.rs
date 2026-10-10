@@ -256,15 +256,7 @@ fn paint_ghost(ui: &egui::Ui, tool: FillTool, st: &FillState, at: (f32, f32), ma
 /// Desenha a assinatura guardada no retângulo da tela `r` (prévias e menu).
 pub fn paint_saved(painter: &egui::Painter, saved: &Saved, r: egui::Rect, ink: egui::Color32) {
     match saved {
-        Saved::Typed { text } => {
-            painter.text(
-                r.center(),
-                egui::Align2::CENTER_CENTER,
-                text,
-                egui::FontId::new(r.height() * 0.8, script_family()),
-                ink,
-            );
-        }
+        Saved::Typed { text } => paint_script(painter, text, r, ink),
         Saved::Drawn { strokes, .. } => {
             let stroke = egui::Stroke::new((r.height() * 0.045).max(1.0), ink);
             for s in strokes {
@@ -291,6 +283,28 @@ pub fn paint_saved(painter: &egui::Painter, saved: &Saved, r: egui::Rect, ink: e
             );
         }
     }
+}
+
+/// Texto na fonte manuscrita, o maior que couber em `r`, centrado.
+pub fn paint_script(painter: &egui::Painter, text: &str, r: egui::Rect, ink: egui::Color32) {
+    let font = |size| egui::FontId::new(size, script_family());
+    let size = r.height() * 0.8;
+    let width = painter
+        .layout_no_wrap(text.to_owned(), font(size), ink)
+        .size()
+        .x;
+    let size = if width > r.width() {
+        size * r.width() / width
+    } else {
+        size
+    };
+    painter.text(
+        r.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        font(size),
+        ink,
+    );
 }
 
 /// Família de fonte manuscrita registrada no egui (a mesma que vai para o PDF).

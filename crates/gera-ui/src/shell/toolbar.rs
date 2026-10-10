@@ -81,8 +81,8 @@ pub fn fill_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
             FillTool::Text,
         );
         for (label, tip, mark) in [
-            ("✕", "Xis", Mark::Cross),
-            ("✓", "Visto", Mark::Check),
+            ("✖", "Xis", Mark::Cross),
+            ("✔", "Visto", Mark::Check),
             ("○", "Círculo", Mark::Circle),
             ("—", "Linha", Mark::Line),
             ("•", "Ponto", Mark::Dot),

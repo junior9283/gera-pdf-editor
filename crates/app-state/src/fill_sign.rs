@@ -72,17 +72,26 @@ pub fn nudge(dir: (i8, i8), shift: bool) -> (f32, f32) {
     (dir.0 as f32 * step, dir.1 as f32 * step)
 }
 
-/// Média móvel de 3 pontos (tira o tremido do mouse), mantendo o começo e o fim.
+/// Distância (pixels) até a qual pontos vizinhos são tremido do mouse; além dela, o ponto é um
+/// canto desenhado de propósito e fica.
+const JITTER: f32 = 6.0;
+
+/// Média móvel de 3 pontos (tira o tremido do mouse), mantendo o começo, o fim e os cantos.
 pub fn smooth(stroke: &[(f32, f32)]) -> Vec<(f32, f32)> {
     if stroke.len() < 3 {
         return stroke.to_vec();
     }
+    let near = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).hypot(a.1 - b.1) <= JITTER;
     let mut out = vec![stroke[0]];
     for w in stroke.windows(3) {
-        out.push((
-            (w[0].0 + w[1].0 + w[2].0) / 3.0,
-            (w[0].1 + w[1].1 + w[2].1) / 3.0,
-        ));
+        out.push(if near(w[0], w[1]) && near(w[1], w[2]) {
+            (
+                (w[0].0 + w[1].0 + w[2].0) / 3.0,
+                (w[0].1 + w[1].1 + w[2].1) / 3.0,
+            )
+        } else {
+            w[1]
+        });
     }
     out.push(stroke[stroke.len() - 1]);
     out
@@ -253,10 +262,17 @@ mod tests {
 
     #[test]
     fn smoothing_keeps_the_ends_and_softens_the_middle() {
-        let s = smooth(&[(0.0, 0.0), (1.0, 3.0), (2.0, 0.0), (3.0, 3.0)]);
+        let s = smooth(&[(0.0, 0.0), (1.0, 3.0), (2.0, 0.0), (3.0, 3.0)]); // tremido
         assert_eq!(s.first(), Some(&(0.0, 0.0)));
         assert_eq!(s.last(), Some(&(3.0, 3.0)));
         assert!(s[1].1 < 3.0 && s[1].1 > 0.0);
+    }
+
+    #[test]
+    fn smoothing_keeps_deliberate_corners() {
+        // pontos esparsos (traço rápido): o vértice do "A" fica onde está
+        let s = smooth(&[(0.0, 80.0), (30.0, 0.0), (60.0, 80.0)]);
+        assert_eq!(s[1], (30.0, 0.0));
     }
 
     #[test]
