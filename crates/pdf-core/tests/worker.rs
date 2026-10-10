@@ -479,3 +479,46 @@ fn text_blocks_are_listed_and_edited_through_the_worker() {
         other => panic!("esperava PageTextBlocks, veio {other:?}"),
     }
 }
+
+#[test]
+fn watermark_through_the_worker() {
+    let (_d, w, _) = opened(2);
+    w.send(Request::AddWatermark {
+        watermark: pdf_core::Watermark {
+            source: pdf_core::WatermarkSource::Text {
+                text: "CONFIDENCIAL".into(),
+                look: pdf_core::TextLook {
+                    font: pdf_core::StdFont::Helvetica,
+                    bold: false,
+                    size: 40.0,
+                    color: [0, 0, 0],
+                },
+            },
+            rotation: 45.0,
+            opacity: 0.5,
+            scale: None,
+            behind: false,
+            vertical: (pdf_core::Align::Center, 0.0),
+            horizontal: (pdf_core::Align::Center, 0.0),
+            pages: pdf_core::PageSet::All,
+        },
+        replace: false,
+    });
+    assert!(matches!(recv(&w), Response::PagesChanged { .. }));
+    w.send(Request::PaginationState(pdf_core::Pagination::Watermark));
+    match recv(&w) {
+        Response::PaginationState {
+            present: true,
+            config: Some(pdf_core::PaginationConfig::Watermark(m)),
+            ..
+        } => assert_eq!(m.rotation, 45.0),
+        other => panic!("esperava PaginationState, veio {other:?}"),
+    }
+    w.send(Request::RemovePagination(pdf_core::Pagination::Watermark));
+    assert!(matches!(recv(&w), Response::PagesChanged { .. }));
+    w.send(Request::PaginationState(pdf_core::Pagination::Watermark));
+    assert!(matches!(
+        recv(&w),
+        Response::PaginationState { present: false, .. }
+    ));
+}

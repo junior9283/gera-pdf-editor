@@ -372,7 +372,7 @@ fn has_outline(font: &Font, glyph: i32) -> bool {
 }
 
 /// Avanço de um caractere; o espaço sem glifo vale um quarto de eme.
-fn advance(font: &Font, c: char, size: f32) -> Result<f32> {
+pub(crate) fn advance(font: &Font, c: char, size: f32) -> Result<f32> {
     let g = font.encode_character(c as i32)?;
     Ok(if g == 0 && c == ' ' {
         0.25 * size
@@ -381,7 +381,7 @@ fn advance(font: &Font, c: char, size: f32) -> Result<f32> {
     })
 }
 
-fn width(font: &Font, s: &str, size: f32) -> Result<f32> {
+pub(crate) fn width(font: &Font, s: &str, size: f32) -> Result<f32> {
     s.chars().map(|c| advance(font, c, size)).sum()
 }
 
@@ -432,7 +432,7 @@ fn wrap(font: &Font, text: &str, size: f32, maxw: f32, indent: f32) -> Result<Ve
 
 /// O `TJ` de uma linha: os glifos em hexadecimal (fonte Identity-H) e os espaços sem glifo como
 /// deslocamento.
-fn glyph_run(font: &Font, line: &str) -> Result<String> {
+pub(crate) fn glyph_run(font: &Font, line: &str) -> Result<String> {
     let mut out = String::from("[<");
     for c in line.chars() {
         let g = font.encode_character(c as i32)?;
@@ -711,7 +711,11 @@ impl PdfDoc {
     /// A fonte nos recursos da página (como `GeraFnN`). O MuPDF já devolve o mesmo objeto para o
     /// mesmo programa de fonte acrescentado nesta sessão (pelo MD5); o nome que já aponta para ele
     /// é reaproveitado. Fontes do arquivo nunca são tomadas por "do app".
-    fn font_resource(&mut self, page_obj: &mut PdfObject, font: &Font) -> Result<String> {
+    pub(crate) fn font_resource(
+        &mut self,
+        page_obj: &mut PdfObject,
+        font: &Font,
+    ) -> Result<String> {
         let obj = self.inner.add_font(font)?;
         let num = obj.as_indirect()?;
         let ours = self.added_fonts.contains(&num);

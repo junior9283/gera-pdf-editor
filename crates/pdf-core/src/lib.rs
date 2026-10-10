@@ -14,6 +14,7 @@ mod ocr;
 mod owner_password;
 mod page_content;
 mod pages;
+mod pagination;
 mod prepare;
 mod security;
 mod sign;
@@ -33,6 +34,10 @@ pub use edit_text::{PageTextBlock, MIN_TEXT_WIDTH, NEW_TEXT_SIZE, TEXT_MARGIN};
 pub use error::{PdfError, Result};
 pub use forms::{FieldInfo, FieldKind, FormNotes};
 pub use ocr::{tessdata_dir, OcrLanguage, OcrReport};
+pub use pagination::{
+    parse_ranges, Align, Bates, DateFormat, HeaderFooter, PageSet, Pagination, PaginationConfig,
+    StdFont, TextLook, Watermark, WatermarkSource,
+};
 pub use prepare::{FieldProps, NewFieldKind, PrepareOp};
 pub use security::{Permissions, Protection, SecurityInfo};
 pub use sign::{display_date, Integrity, SignPlace, SignatureInfo};

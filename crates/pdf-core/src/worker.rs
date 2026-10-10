@@ -130,6 +130,20 @@ pub enum Request {
         at: (f32, f32),
         text: String,
     },
+    /// Marca d'água (`replace`: no lugar da existente — o Atualizar).
+    AddWatermark {
+        watermark: crate::Watermark,
+        replace: bool,
+    },
+    /// Cabeçalho e rodapé (`replace`: no lugar dos existentes).
+    AddHeaderFooter {
+        header_footer: crate::HeaderFooter,
+        replace: bool,
+    },
+    /// Tira as marcas d'água (ou os cabeçalhos e rodapés) de todas as páginas.
+    RemovePagination(crate::Pagination),
+    /// Há marca d'água (ou cabeçalho e rodapé)? E as escolhas gravadas, para o Atualizar.
+    PaginationState(crate::Pagination),
     /// Organizar páginas (girar, excluir, mover, inserir, substituir, recortar).
     Pages(PageOp),
     /// Divide o documento em arquivos na pasta `dir`; o documento não muda.
@@ -268,6 +282,12 @@ pub enum Response {
     PageImages {
         page: i32,
         images: Vec<crate::PageImage>,
+    },
+    /// Resposta ao `PaginationState`.
+    PaginationState {
+        kind: crate::Pagination,
+        present: bool,
+        config: Option<crate::PaginationConfig>,
     },
     /// Blocos de texto de uma página (vazio se não deu para ler).
     PageTextBlocks {
@@ -490,6 +510,25 @@ impl State {
             Request::AddText { page, at, text } => self.edit(send, |d| {
                 d.add_text(page, at, &text)
                     .map(|()| Changed::Pages(vec![page]))
+            }),
+            Request::AddWatermark { watermark, replace } => self.edit(send, |d| {
+                d.add_watermark(&watermark, replace)
+                    .map(|()| Changed::Document)
+            }),
+            Request::AddHeaderFooter {
+                header_footer,
+                replace,
+            } => self.edit(send, |d| {
+                d.add_header_footer(&header_footer, replace)
+                    .map(|()| Changed::Document)
+            }),
+            Request::RemovePagination(kind) => self.edit(send, |d| {
+                d.remove_pagination(kind).map(|_| Changed::Document)
+            }),
+            Request::PaginationState(kind) => send(Response::PaginationState {
+                kind,
+                present: self.with_doc(|d| d.has_pagination(kind)).unwrap_or(false),
+                config: self.with_doc(|d| d.pagination_config(kind)).unwrap_or(None),
             }),
             Request::Pages(op) => {
                 self.edit(send, |d| d.apply_pages(op).map(|()| Changed::Document))

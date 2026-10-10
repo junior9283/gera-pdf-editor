@@ -144,37 +144,7 @@ pub fn any_oversized(sizes: impl IntoIterator<Item = (f32, f32)>) -> bool {
     })
 }
 
-const RANGE_HINT: &str = "Use números de página, como 1-3, 7.";
-
-/// "1-3, 7" → [(1, 3), (7, 7)], com páginas de 1 a `total`.
-pub fn parse_ranges(text: &str, total: usize) -> Result<Vec<(usize, usize)>, String> {
-    let num = |s: &str| {
-        s.trim()
-            .parse::<usize>()
-            .map_err(|_| RANGE_HINT.to_string())
-    };
-    let mut out = Vec::new();
-    for part in text.split(',') {
-        let (a, b) = match part.split_once('-') {
-            Some((a, b)) => (num(a)?, num(b)?),
-            None => {
-                let n = num(part)?;
-                (n, n)
-            }
-        };
-        if a == 0 {
-            return Err("A primeira página é a 1.".into());
-        }
-        if a > b {
-            return Err(format!("Intervalo invertido: {a}-{b}."));
-        }
-        if b > total {
-            return Err(format!("O documento tem {total} páginas."));
-        }
-        out.push((a, b));
-    }
-    Ok(out)
-}
+pub use pdf_core::parse_ranges;
 
 /// Argumentos do `lp` para imprimir `file` com as opções `o`. `current` é a página atual (1-based);
 /// `oversized` diz se alguma página é maior que o papel (para "Reduzir páginas grandes").
