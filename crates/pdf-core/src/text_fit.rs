@@ -20,6 +20,14 @@ pub(crate) fn text_width(font: &Font, s: &str, size: f32) -> Result<f32> {
 /// Quantas linhas `text` ocupa com largura `maxw`: cada parágrafo quebra entre palavras; uma
 /// palavra maior que a linha quebra no meio.
 fn line_count(font: &Font, text: &str, size: f32, maxw: f32) -> Result<usize> {
+    // caixa estreitíssima (ou largura inválida, de outro programa): pelo menos um "eme" por linha,
+    // senão a quebra de palavra viraria milhões de linhas
+    let maxw = if maxw.is_finite() {
+        maxw.max(size)
+    } else {
+        size
+    }
+    .max(1.0);
     let mut lines = 0;
     for paragraph in text.split('\n') {
         lines += 1;
@@ -37,9 +45,11 @@ fn line_count(font: &Font, text: &str, size: f32, maxw: f32) -> Result<usize> {
             } else {
                 used += w;
             }
-            while used > maxw && maxw > 0.0 {
-                lines += 1;
-                used -= maxw;
+            if used > maxw {
+                // palavra maior que a linha: quebra no meio, quantas vezes for preciso
+                let extra = (used / maxw).ceil() - 1.0;
+                lines += extra as usize;
+                used -= extra * maxw;
             }
         }
     }
@@ -76,5 +86,19 @@ mod tests {
     fn fitted_never_shrinks() {
         let big = PdfRect::new(0.0, 0.0, 200.0, 300.0);
         assert_eq!(fitted(big, "oi", 12.0, 1.0).unwrap(), big);
+    }
+
+    #[test]
+    fn degenerate_widths_finish_fast() {
+        let font = Font::new("Helvetica").unwrap();
+        let long = "x".repeat(5000);
+        let t = std::time::Instant::now();
+        for w in [1e-6, 0.0, -50.0, f32::NAN] {
+            let n = line_count(&font, &long, 12.0, w).unwrap();
+            assert!(n >= 1);
+        }
+        let tiny = PdfRect::new(0.0, 0.0, 2.0, 10.0);
+        assert!(fitted(tiny, &long, 12.0, 1.0).unwrap().height().is_finite());
+        assert!(t.elapsed().as_millis() < 500, "{:?}", t.elapsed());
     }
 }
