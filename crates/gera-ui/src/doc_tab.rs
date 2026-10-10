@@ -512,12 +512,14 @@ impl DocTab {
                     self.status = format!("Não foi possível organizar as páginas: {msg}");
                 }
                 Response::Split(files) => {
-                    self.status = match files.first().and_then(|f| f.parent()) {
-                        Some(dir) => {
-                            format!("{} arquivos criados em {}", files.len(), dir.display())
-                        }
-                        None => "Nenhum arquivo criado.".into(),
+                    self.status = match (files.len(), files.first().and_then(|f| f.parent())) {
+                        (1, Some(dir)) => format!("1 arquivo criado em {}", dir.display()),
+                        (n, Some(dir)) => format!("{n} arquivos criados em {}", dir.display()),
+                        _ => "Nenhum arquivo criado.".into(),
                     };
+                }
+                Response::SplitFailed(msg) => {
+                    self.status = format!("Não foi possível dividir: {msg}");
                 }
                 Response::Extracted(files) => {
                     if let Some(pages) = self.delete_after_extract.take() {
@@ -866,8 +868,10 @@ impl DocTab {
             });
         if pick {
             let start = Some(d.dir.clone());
-            self.picking = Some(PickFor::Folder);
-            self.files.pick_folder(ui.ctx(), start);
+            if !self.files.busy() {
+                self.picking = Some(PickFor::Folder);
+                self.files.pick_folder(ui.ctx(), start);
+            }
         }
         if go {
             let rule = match d.by {
@@ -921,10 +925,11 @@ impl DocTab {
                 OrgAction::Redo => self.worker.send(Request::Redo),
                 OrgAction::Close => self.organize = None,
                 OrgAction::Split => self.open_split(),
-                OrgAction::PickFile(purpose) => {
+                OrgAction::PickFile(purpose) if !self.files.busy() => {
                     self.picking = Some(PickFor::File(purpose));
                     self.files.open(ui.ctx());
                 }
+                OrgAction::PickFile(_) => {}
                 OrgAction::Extract {
                     pages,
                     separate,

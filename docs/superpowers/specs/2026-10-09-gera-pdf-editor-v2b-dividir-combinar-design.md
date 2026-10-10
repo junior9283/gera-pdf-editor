@@ -16,7 +16,7 @@ As ferramentas **Dividir PDF** e **Combinar arquivos** do Acrobat Pro.
 - Partes levam páginas, comentários e os marcadores que caem nelas; cada parte que começa por um
   marcador de primeiro nível leva o título dele no nome (`<nome>_<Título>.pdf`, caracteres
   inválidos trocados por "_").
-- **Combinar arquivos** (hub): aba "Combinar arquivos" com a lista (nome, páginas, tamanho),
+- **Combinar arquivos** (hub): janela "Combinar arquivos" com a lista (nome, páginas, tamanho),
   **Adicionar arquivos…**, **Mover para cima/baixo**, **Remover**, senha quando o arquivo pedir;
   **Combinar** pergunta onde salvar e abre o resultado numa aba nova.
 - O arquivo combinado tem um marcador por arquivo (título = nome do arquivo) com os marcadores
@@ -35,8 +35,7 @@ Dividir por intervalos personalizados, combinar arquivos que não sejam PDF (v5:
   marcadores de cada parte/arquivo são refeitos com `set_outlines` (destinos deslocados).
 - **worker**: `Request::Split { rule, dir }` → `Response::Split(Vec<PathBuf>)`; combinar roda numa
   thread própria da interface (não depende de documento aberto).
-- **gera-ui**: diálogo Dividir (na aba), aba especial "Combinar arquivos" (como Início e
-  Ferramentas) com a lista; hub liga "dividir" e "combinar".
+- **gera-ui**: diálogo Dividir (na aba), janela "Combinar arquivos" com a lista; hub liga "dividir" e "combinar".
 
 ## 3. Erros
 

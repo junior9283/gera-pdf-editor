@@ -38,9 +38,14 @@ impl Entry {
                 self.pages = Some(n);
                 self.error = None;
             }
-            Err(PdfError::PasswordRequired | PdfError::WrongPassword) => {
+            Err(e @ (PdfError::PasswordRequired | PdfError::WrongPassword)) => {
                 self.needs_password = true;
-                self.error = Some("Protegido por senha".into());
+                let msg = if matches!(e, PdfError::WrongPassword) {
+                    "Senha incorreta"
+                } else {
+                    "Protegido por senha"
+                };
+                self.error = Some(msg.into());
             }
             Err(e) => self.error = Some(e.to_string()),
         }
@@ -60,9 +65,19 @@ pub fn size_text(bytes: u64) -> String {
     }
 }
 
+/// Botões de cada linha.
+#[derive(Clone, Copy)]
+enum RowAction {
+    Up,
+    Down,
+    Remove,
+}
+
 #[derive(Default)]
 pub struct CombineWindow {
     pub open: bool,
+    /// Documentos abertos nas abas: o resultado não pode ir por cima de um deles.
+    pub open_docs: Vec<PathBuf>,
     pub files: Vec<Entry>,
     dialogs: FileDialogs,
     job: Option<Receiver<Result<PathBuf, String>>>,
@@ -141,7 +156,7 @@ impl CombineWindow {
             ui.label("Adicione os PDFs que vão virar um arquivo só, na ordem desejada.");
             return;
         }
-        let mut action: Option<(usize, i32)> = None; // (linha, -1 sobe / 1 desce / 0 remove)
+        let mut action: Option<(usize, RowAction)> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             egui::Grid::new("arquivos").striped(true).show(ui, |ui| {
                 ui.strong("Arquivo");
@@ -175,21 +190,24 @@ impl CombineWindow {
                             }
                         }
                         if ui
-                            .add_enabled(i > 0, egui::Button::new("▲"))
+                            .add_enabled(!busy && i > 0, egui::Button::new("▲"))
                             .on_hover_text("Mover para cima")
                             .clicked()
                         {
-                            action = Some((i, -1));
+                            action = Some((i, RowAction::Up));
                         }
                         if ui
-                            .add_enabled(i + 1 < n, egui::Button::new("▼"))
+                            .add_enabled(!busy && i + 1 < n, egui::Button::new("▼"))
                             .on_hover_text("Mover para baixo")
                             .clicked()
                         {
-                            action = Some((i, 1));
+                            action = Some((i, RowAction::Down));
                         }
-                        if ui.button("Remover").clicked() {
-                            action = Some((i, 0));
+                        if ui
+                            .add_enabled(!busy, egui::Button::new("Remover"))
+                            .clicked()
+                        {
+                            action = Some((i, RowAction::Remove));
                         }
                     });
                     ui.end_row();
@@ -197,16 +215,23 @@ impl CombineWindow {
             });
         });
         match action {
-            Some((i, 0)) => {
+            Some((i, RowAction::Remove)) => {
                 self.files.remove(i);
             }
-            Some((i, d)) => self.files.swap(i, (i as i32 + d) as usize),
+            Some((i, RowAction::Up)) => self.files.swap(i, i - 1),
+            Some((i, RowAction::Down)) => self.files.swap(i, i + 1),
             None => {}
         }
     }
 
     /// Combina numa thread (arquivos grandes não travam a janela).
     fn start(&mut self, ctx: &egui::Context, dest: PathBuf) {
+        let same = |p: &PathBuf| p.canonicalize().ok() == dest.canonicalize().ok() || *p == dest;
+        if self.open_docs.iter().any(same) {
+            self.status =
+                "Esse arquivo está aberto numa aba: feche-o ou escolha outro nome.".into();
+            return;
+        }
         let inputs: Vec<(PathBuf, Option<String>)> = self
             .files
             .iter()

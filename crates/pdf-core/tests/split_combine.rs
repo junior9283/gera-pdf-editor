@@ -168,3 +168,35 @@ fn combine_needs_passwords() {
     combine(&[(locked, Some("segredo".into()))], &dest).unwrap();
     assert_eq!(open(&dest).page_count().unwrap(), 1);
 }
+
+#[test]
+fn every_part_respects_the_size_limit_bookmarks_included() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_sample(&dir, "a.pdf", 40, 0);
+    let d = open(&path);
+    let out = tempfile::tempdir().unwrap();
+    let limit = 1500;
+    let parts = d
+        .split(SplitRule::MaxBytes(limit), out.path(), "a")
+        .unwrap();
+    assert!(parts.len() > 1);
+    for p in &parts {
+        let size = std::fs::metadata(p).unwrap().len();
+        let pages = open(p).page_count().unwrap();
+        assert!(
+            size <= limit || pages == 1,
+            "{} tem {size} bytes",
+            p.display()
+        );
+    }
+    let total: i32 = parts.iter().map(|p| open(p).page_count().unwrap()).sum();
+    assert_eq!(total, 40);
+}
+
+#[test]
+fn long_bookmark_titles_still_make_valid_file_names() {
+    let long = "Capítulo ".repeat(60);
+    let name = pdf_core::safe_file_name(&long);
+    assert!(name.len() <= 150, "{}", name.len());
+    assert_eq!(pdf_core::safe_file_name("fim. . "), "fim");
+}

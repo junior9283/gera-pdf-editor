@@ -148,6 +148,7 @@ pub enum Response {
     PagesFailed(String),
     Extracted(Vec<PathBuf>),
     Split(Vec<PathBuf>),
+    SplitFailed(String),
 }
 
 const NO_DOC: &str = "nenhum documento aberto";
@@ -274,15 +275,10 @@ impl State {
             }
             Request::Split { rule, dir } => send(
                 match self.with_doc(|d| {
-                    let stem = d
-                        .path()
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "documento".into());
-                    d.split(rule, &dir, &stem)
+                    d.split(rule, &dir, &crate::split::stem_of(d.path(), "documento"))
                 }) {
                     Ok(files) => Response::Split(files),
-                    Err(e) => Response::PagesFailed(e),
+                    Err(e) => Response::SplitFailed(e),
                 },
             ),
             Request::Extract {

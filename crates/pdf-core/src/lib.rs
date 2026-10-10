@@ -5,7 +5,7 @@ mod annot_edit;
 mod doc;
 mod error;
 mod pages;
-mod split;
+pub(crate) mod split;
 mod stamp;
 mod text_fit;
 mod types;

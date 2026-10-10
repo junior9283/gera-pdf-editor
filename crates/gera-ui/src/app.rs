@@ -699,6 +699,7 @@ impl eframe::App for GeraApp {
         self.drive_close(ui);
         help::shortcuts_window(ui, &mut self.show_shortcuts);
         help::about_window(ui, &mut self.show_about);
+        self.combine.open_docs = self.docs.iter().map(|d| d.path.clone()).collect();
         if let Some(merged) = self.combine.show(ui) {
             self.open_path(ui.ctx(), merged);
         }
