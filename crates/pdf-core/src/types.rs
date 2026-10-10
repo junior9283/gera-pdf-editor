@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct PdfRect {
     pub x0: f32,
     pub y0: f32,
@@ -68,18 +68,52 @@ pub struct Word {
     pub rect: PdfRect,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AnnotKind {
     Highlight,
     Underline,
     Note,
     Ink,
     StrikeOut,
+    TextBox,
+    Rect,
+    Ellipse,
+    Line,
+    Stamp,
     /// Tipo que não criamos (de outro programa): selecionável e apagável.
+    #[default]
     Other,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// Início e fim de uma linha (pontos da página).
+pub type Segment = ((f32, f32), (f32, f32));
+
+/// Cor dos comentários novos (contorno das formas e linhas, texto da caixa), como no Acrobat.
+pub const COMMENT_RED: [f32; 3] = [1.0, 0.0, 0.0];
+
+/// Ponta de uma linha ou seta.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineEnd {
+    Start,
+    End,
+}
+
+impl AnnotKind {
+    /// Tem traço/borda com espessura editável.
+    pub fn has_border(self) -> bool {
+        matches!(
+            self,
+            Self::Ink | Self::TextBox | Self::Rect | Self::Ellipse | Self::Line
+        )
+    }
+
+    /// Tem preenchimento (formas) ou fundo (caixa de texto).
+    pub fn has_fill(self) -> bool {
+        matches!(self, Self::Rect | Self::Ellipse | Self::TextBox)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct AnnotInfo {
     /// Número do objeto no PDF: identidade estável da anotação.
     pub id: i32,
@@ -89,19 +123,37 @@ pub struct AnnotInfo {
     pub contents: String,
     pub color: Option<[f32; 3]>,
     pub opacity: f32,
-    /// Espessura do traço (desenho).
+    /// Espessura do traço (desenho, formas, linhas e borda da caixa de texto).
     pub width: Option<f32>,
+    /// Cor de preenchimento (formas e caixa de texto).
+    pub fill: Option<[f32; 3]>,
+    /// Pontos de início e fim (linha e seta).
+    pub line: Option<Segment>,
+    /// Tamanho e cor do texto (caixa de texto).
+    pub font: Option<(f32, [f32; 3])>,
+    /// Autor (/T); vazio quando não há.
+    pub author: String,
 }
 
 impl AnnotInfo {
     /// Pode ser arrastada (marcações de texto ficam presas às palavras, como no Acrobat).
     pub fn movable(&self) -> bool {
-        matches!(self.kind, AnnotKind::Note | AnnotKind::Ink)
+        !matches!(
+            self.kind,
+            AnnotKind::Highlight | AnnotKind::Underline | AnnotKind::StrikeOut | AnnotKind::Other
+        )
     }
 
-    /// Tem alças para mudar de tamanho.
+    /// Tem alças nos cantos para mudar de tamanho (a linha tem alças nas pontas).
     pub fn resizable(&self) -> bool {
-        self.kind == AnnotKind::Ink
+        matches!(
+            self.kind,
+            AnnotKind::Ink
+                | AnnotKind::TextBox
+                | AnnotKind::Rect
+                | AnnotKind::Ellipse
+                | AnnotKind::Stamp
+        )
     }
 }
 
@@ -128,6 +180,34 @@ pub enum NewAnnot {
         page: i32,
         strokes: Vec<Vec<(f32, f32)>>,
     },
+    TextBox {
+        page: i32,
+        rect: PdfRect,
+        text: String,
+        size: f32,
+        color: [f32; 3],
+    },
+    /// Retângulo ou elipse.
+    Shape {
+        page: i32,
+        rect: PdfRect,
+        ellipse: bool,
+    },
+    /// Linha; com `arrow`, ponta de seta no fim.
+    Line {
+        page: i32,
+        a: (f32, f32),
+        b: (f32, f32),
+        arrow: bool,
+    },
+    /// Carimbo: título e, nos dinâmicos, a linha com nome, data e hora.
+    Stamp {
+        page: i32,
+        rect: PdfRect,
+        title: String,
+        subtitle: Option<String>,
+        color: [f32; 3],
+    },
 }
 
 impl NewAnnot {
@@ -137,7 +217,11 @@ impl NewAnnot {
             | Self::Underline { page, .. }
             | Self::StrikeOut { page, .. }
             | Self::Note { page, .. }
-            | Self::Ink { page, .. } => *page,
+            | Self::Ink { page, .. }
+            | Self::TextBox { page, .. }
+            | Self::Shape { page, .. }
+            | Self::Line { page, .. }
+            | Self::Stamp { page, .. } => *page,
         }
     }
 
@@ -149,6 +233,11 @@ impl NewAnnot {
             | Self::StrikeOut { rects, .. } => rects.is_empty(),
             Self::Note { text, .. } => text.trim().is_empty(),
             Self::Ink { strokes, .. } => strokes.iter().all(|s| s.len() < 2),
+            Self::TextBox { text, .. } => text.trim().is_empty(),
+            Self::Shape { rect, .. } | Self::Stamp { rect, .. } => {
+                rect.width() < 3.0 || rect.height() < 3.0
+            }
+            Self::Line { a, b, .. } => (b.0 - a.0).hypot(b.1 - a.1) < 3.0,
         }
     }
 }
@@ -247,6 +336,26 @@ pub enum AnnotOp {
         page: i32,
         id: i32,
     },
+    /// Leva uma ponta da linha/seta para `to`.
+    MoveLinePoint {
+        page: i32,
+        id: i32,
+        end: LineEnd,
+        to: (f32, f32),
+    },
+    /// Preenchimento (formas) ou fundo (caixa de texto); `None` tira.
+    Fill {
+        page: i32,
+        id: i32,
+        color: Option<[f32; 3]>,
+    },
+    /// Tamanho e cor do texto da caixa de texto (a borda segue a cor do texto).
+    Font {
+        page: i32,
+        id: i32,
+        size: f32,
+        color: [f32; 3],
+    },
 }
 
 /// Propriedades do documento (Arquivo → Propriedades). As datas vêm cruas (`D:AAAAMMDD…`).
@@ -281,10 +390,8 @@ mod tests {
             kind,
             page: 0,
             rect: PdfRect::new(0.0, 0.0, 1.0, 1.0),
-            contents: String::new(),
-            color: None,
             opacity: 1.0,
-            width: None,
+            ..Default::default()
         }
     }
 

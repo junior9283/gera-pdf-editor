@@ -3,9 +3,9 @@
 //! Cada mudança é uma [`Edit`] reversível: aplicá-la devolve a inversa. Apagar (e desfazer uma
 //! criação) só **esconde** a anotação (flag Hidden) — assim desfazer a traz de volta idêntica,
 //! mesmo que venha de outro programa. Ao salvar, as escondidas por nós saem de verdade.
-use crate::doc::annot_id;
+use crate::doc::{annot_id, rgb, rgb_of};
 use crate::error::{PdfError, Result};
-use crate::types::PdfRect;
+use crate::types::{PdfRect, Segment};
 use mupdf::color::AnnotationColor;
 use mupdf::pdf::{AnnotationFlags, PdfAnnotation, PdfAnnotationType, PdfDocument, PdfPage};
 use mupdf::{Point, Rect};
@@ -52,6 +52,28 @@ pub(crate) enum Edit {
         id: i32,
         text: String,
     },
+    /// Pontos da linha/seta (mover e puxar uma ponta).
+    LinePoints {
+        page: i32,
+        id: i32,
+        a: (f32, f32),
+        b: (f32, f32),
+    },
+    /// Preenchimento das formas (/IC) ou fundo da caixa de texto (/C).
+    Fill {
+        page: i32,
+        id: i32,
+        color: ColorEdit,
+    },
+    /// Fonte da caixa de texto (/DA).
+    Font {
+        page: i32,
+        id: i32,
+        size: f32,
+        color: [f32; 3],
+    },
+    /// Várias mudanças da mesma anotação num passo só do desfazer (ex.: texto e tamanho da caixa).
+    Batch(Vec<Edit>),
 }
 
 impl Edit {
@@ -60,7 +82,11 @@ impl Edit {
             Self::Visibility { page, .. }
             | Self::Geometry { page, .. }
             | Self::Style { page, .. }
-            | Self::Contents { page, .. } => *page,
+            | Self::Contents { page, .. }
+            | Self::LinePoints { page, .. }
+            | Self::Fill { page, .. }
+            | Self::Font { page, .. } => *page,
+            Self::Batch(edits) => edits.first().map_or(0, Edit::page),
         }
     }
 }
@@ -162,6 +188,31 @@ fn geometry(a: &PdfAnnotation) -> Result<(PdfRect, Option<Strokes>)> {
     }
 }
 
+/// Caixa de texto `id`: retângulo, texto, tamanho da fonte e borda; `None` se não é caixa de texto.
+pub(crate) fn text_box_of(
+    doc: &PdfDocument,
+    page: i32,
+    id: i32,
+) -> Result<Option<(PdfRect, String, f32, f32)>> {
+    let (_, a) = find(doc, page, id)?;
+    if a.r#type()? != PdfAnnotationType::FreeText {
+        return Ok(None);
+    }
+    let size = a.default_appearance()?.map_or(12.0, |da| da.size);
+    let text = a.contents()?.unwrap_or_default().to_owned();
+    Ok(Some((a.rect()?.into(), text, size, a.border_width()?)))
+}
+
+/// Pontos atuais da linha `id`, ou `None` se a anotação não é linha.
+pub(crate) fn line_of(doc: &PdfDocument, page: i32, id: i32) -> Result<Option<Segment>> {
+    let (_, a) = find(doc, page, id)?;
+    if a.r#type()? != PdfAnnotationType::Line {
+        return Ok(None);
+    }
+    let (p, q) = a.line()?;
+    Ok(Some(((p.x, p.y), (q.x, q.y))))
+}
+
 /// Geometria atual da anotação `id`.
 pub(crate) fn geometry_of(
     doc: &PdfDocument,
@@ -177,14 +228,36 @@ pub(crate) fn apply_edit(
     hidden: &mut HashSet<(i32, i32)>,
     edit: Edit,
 ) -> Result<Edit> {
+    if let Edit::Batch(edits) = edit {
+        // aplica em ordem; se uma falhar, desfaz as já aplicadas (nada fica pela metade)
+        let mut inverses = Vec::new();
+        for e in edits {
+            match apply_edit(doc, hidden, e) {
+                Ok(inv) => inverses.push(inv),
+                Err(err) => {
+                    for inv in inverses.into_iter().rev() {
+                        let _ = apply_edit(doc, hidden, inv);
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        inverses.reverse();
+        return Ok(Edit::Batch(inverses));
+    }
     let (page, id) = match &edit {
+        Edit::Batch(_) => unreachable!("tratado acima"),
         Edit::Visibility { page, id, .. }
         | Edit::Geometry { page, id, .. }
         | Edit::Style { page, id, .. }
-        | Edit::Contents { page, id, .. } => (*page, *id),
+        | Edit::Contents { page, id, .. }
+        | Edit::LinePoints { page, id, .. }
+        | Edit::Fill { page, id, .. }
+        | Edit::Font { page, id, .. } => (*page, *id),
     };
     let (mut page_ref, mut a) = find(doc, page, id)?;
     let inverse = match edit {
+        Edit::Batch(_) => unreachable!("tratado acima"),
         Edit::Visibility { hidden: hide, .. } => {
             let mut flags = a.flags()?;
             flags.set(AnnotationFlags::IS_HIDDEN, hide);
@@ -219,11 +292,8 @@ pub(crate) fn apply_edit(
             width,
             ..
         } => {
-            let old_width = if is_ink(&a)? {
-                Some(a.border_width()?)
-            } else {
-                None
-            };
+            // só a espessura que vai mudar precisa voltar (vale para qualquer tipo com borda)
+            let old_width = width.map(|_| a.border_width()).transpose()?;
             let old_color = match a.color()? {
                 Some(c) => ColorEdit::Set(c),
                 None => ColorEdit::Clear,
@@ -242,6 +312,50 @@ pub(crate) fn apply_edit(
                 width: old_width,
             }
         }
+        Edit::LinePoints { a: p, b: q, .. } => {
+            let (op, oq) = a.line()?;
+            a.set_line(Point::new(p.0, p.1), Point::new(q.0, q.1))?;
+            Edit::LinePoints {
+                page,
+                id,
+                a: (op.x, op.y),
+                b: (oq.x, oq.y),
+            }
+        }
+        Edit::Fill { color, .. } => {
+            // a caixa de texto guarda o fundo em /C; as formas, em /IC
+            let text_box = a.r#type()? == PdfAnnotationType::FreeText;
+            let (key, current) = if text_box {
+                ("C", a.color()?)
+            } else {
+                ("IC", a.interior_color()?)
+            };
+            let old = current.map_or(ColorEdit::Clear, ColorEdit::Set);
+            match color {
+                ColorEdit::Keep => {}
+                ColorEdit::Set(c) if text_box => a.set_color(c)?,
+                ColorEdit::Set(c) => a.set_interior_color(c)?,
+                ColorEdit::Clear => clear_key(&mut a, key)?,
+            }
+            Edit::Fill {
+                page,
+                id,
+                color: old,
+            }
+        }
+        Edit::Font { size, color, .. } => {
+            let da = a
+                .default_appearance()?
+                .ok_or_else(|| PdfError::InvalidAnnotation("anotação sem fonte".into()))?;
+            let old = da.color.map(rgb_of).unwrap_or([0.0; 3]);
+            a.set_default_appearance(&da.font_name, size, Some(rgb(color)))?;
+            Edit::Font {
+                page,
+                id,
+                size: da.size,
+                color: old,
+            }
+        }
         Edit::Contents { text, .. } => {
             let old = a.contents()?.unwrap_or_default().to_owned();
             a.set_contents(&text)?;
@@ -257,6 +371,15 @@ pub(crate) fn apply_edit(
     Ok(inverse)
 }
 
+/// Tira uma chave do dicionário da anotação e pede ao MuPDF que refaça a aparência (mexer no
+/// dicionário direto não avisa o MuPDF; reaplicar a opacidade marca a anotação como alterada).
+fn clear_key(a: &mut PdfAnnotation, key: &str) -> Result<()> {
+    a.object().dict_delete(key)?;
+    let opacity = a.opacity()?;
+    a.set_opacity(opacity)?;
+    Ok(())
+}
+
 fn set_style(
     a: &mut PdfAnnotation,
     color: ColorEdit,
@@ -266,7 +389,7 @@ fn set_style(
     match color {
         ColorEdit::Keep => {}
         ColorEdit::Set(c) => a.set_color(c)?,
-        ColorEdit::Clear => a.object().dict_delete("C")?,
+        ColorEdit::Clear => clear_key(a, "C")?,
     }
     a.set_opacity(opacity.clamp(0.0, 1.0))?;
     if let Some(w) = width {

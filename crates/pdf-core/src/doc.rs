@@ -1,13 +1,15 @@
 use crate::annot_edit::{self, ColorEdit, Edit, History};
 use crate::error::{PdfError, Result};
+use crate::stamp;
+use crate::text_fit;
 use crate::types::{
-    AnnotInfo, AnnotKind, AnnotOp, DocProperties, DocSummary, HistoryState, NewAnnot, OutlineItem,
-    PageSize, PdfRect, RenderedPage, Rotation, TextSelection, Word,
+    AnnotInfo, AnnotKind, AnnotOp, DocProperties, DocSummary, HistoryState, LineEnd, NewAnnot,
+    OutlineItem, PageSize, PdfRect, RenderedPage, Rotation, TextSelection, Word, COMMENT_RED,
 };
 use mupdf::color::AnnotationColor;
 use mupdf::pdf::{
-    AnnotationFlags, Encryption, PdfAnnotation, PdfAnnotationType, PdfDocument, PdfPage,
-    PdfWriteOptions,
+    AnnotationFlags, Encryption, LineEndingStyle, PdfAnnotation, PdfAnnotationType, PdfDocument,
+    PdfPage, PdfWriteOptions,
 };
 use mupdf::{
     Colorspace, Matrix, MetadataName, Point, Quad, Rect, TextExtractOptions, TextPageFlags,
@@ -43,6 +45,8 @@ pub struct PdfDoc {
     history: History,
     /// Edições que sobreviveram a uma gravação que falhou (o histórico delas já se perdeu).
     unsaved: bool,
+    /// Nome gravado como autor (/T) nas anotações criadas.
+    author: Option<String>,
 }
 
 /// Abre o arquivo e, se for protegido, autentica com `password`.
@@ -67,6 +71,7 @@ impl PdfDoc {
             password: password.map(str::to_owned),
             history: History::default(),
             unsaved: false,
+            author: None,
         })
     }
 
@@ -296,7 +301,7 @@ fn quads(rects: &[PdfRect]) -> Result<Vec<Quad>> {
     Ok(rects.iter().map(|r| Rect::from(*r).quad()).collect())
 }
 
-fn add_one(page: &mut PdfPage, a: &NewAnnot) -> Result<PdfAnnotation> {
+fn add_one(doc: &mut PdfDocument, page: &mut PdfPage, a: &NewAnnot) -> Result<PdfAnnotation> {
     Ok(match a {
         NewAnnot::Highlight { rects, .. } => page.add_highlight_annotation(quads(rects)?)?,
         NewAnnot::Underline { rects, .. } => page.add_underline_annotation(quads(rects)?)?,
@@ -307,12 +312,106 @@ fn add_one(page: &mut PdfPage, a: &NewAnnot) -> Result<PdfAnnotation> {
         NewAnnot::Ink { strokes, .. } => {
             page.add_ink_annotation(annot_edit::ink_points(strokes))?
         }
+        NewAnnot::TextBox {
+            rect,
+            text,
+            size,
+            color,
+            ..
+        } => {
+            let rect = text_fit::fitted(*rect, text, *size, 1.0)?;
+            let mut a = page.add_free_text_annotation(Rect::from(rect), text)?;
+            // na caixa de texto o MuPDF desenha a borda com a cor do texto; /C é o fundo
+            a.set_default_appearance("Helv", *size, Some(rgb(*color)))?;
+            a.set_border_width(1.0)?;
+            a
+        }
+        NewAnnot::Shape { rect, ellipse, .. } => outlined(if *ellipse {
+            page.add_circle_annotation(Rect::from(*rect))?
+        } else {
+            page.add_square_annotation(Rect::from(*rect))?
+        })?,
+        NewAnnot::Line {
+            a: p, b: q, arrow, ..
+        } => {
+            let mut a =
+                outlined(page.add_line_annotation(Point::new(p.0, p.1), Point::new(q.0, q.1))?)?;
+            if *arrow {
+                a.set_line_ending_styles(LineEndingStyle::None, LineEndingStyle::OpenArrow)?;
+            }
+            a
+        }
+        NewAnnot::Stamp {
+            rect,
+            title,
+            subtitle,
+            color,
+            ..
+        } => {
+            let img = stamp::image(title, subtitle.as_deref(), *color, page.rotation()?)?;
+            add_stamp(doc, page, *rect, title, &img)?
+        }
     })
 }
 
 fn utf8_path(path: &Path) -> Result<&str> {
     path.to_str()
         .ok_or_else(|| PdfError::Engine("caminho não é UTF-8 válido".into()))
+}
+
+/// Carimbo cuja aparência é a imagem `img` (o MuPDF a ajusta ao retângulo ao mover/redimensionar).
+fn add_stamp(
+    doc: &mut PdfDocument,
+    page: &mut PdfPage,
+    rect: PdfRect,
+    title: &str,
+    img: &mupdf::Image,
+) -> Result<PdfAnnotation> {
+    let image_ref = doc.add_image(img)?;
+    let annot = page.add_stamp_annotation(Rect::from(rect), title)?;
+    let mut xobjects = doc.new_dict()?;
+    xobjects.dict_put("I", image_ref)?;
+    let mut resources = doc.new_dict()?;
+    resources.dict_put("XObject", xobjects)?;
+    let mut normal = doc.new_dict()?;
+    normal.dict_put("Resources", resources)?;
+    let mut ap = doc.new_dict()?;
+    ap.dict_put("N", normal)?;
+    annot.object().dict_put("AP", ap)?;
+    Ok(annot)
+}
+
+/// Junta à edição o crescimento da caixa de texto, quando `fit` = (atual, necessário) difere.
+fn with_fit(edit: Edit, page: i32, id: i32, fit: Option<(PdfRect, PdfRect)>) -> Edit {
+    match fit {
+        Some((now, need)) if need != now => Edit::Batch(vec![
+            edit,
+            Edit::Geometry {
+                page,
+                id,
+                rect: need,
+                ink: None,
+            },
+        ]),
+        _ => edit,
+    }
+}
+
+/// Cor RGB da interface no formato do MuPDF (o inverso de `rgb_of`).
+pub(crate) fn rgb([red, green, blue]: [f32; 3]) -> AnnotationColor {
+    AnnotationColor::Rgb { red, green, blue }
+}
+
+/// Cor RGB pedida pela interface como edição; `None` vira `absent`.
+fn rgb_edit(color: Option<[f32; 3]>, absent: ColorEdit) -> ColorEdit {
+    color.map_or(absent, |c| ColorEdit::Set(rgb(c)))
+}
+
+/// Contorno padrão das formas e linhas: vermelho, 1 pt (como no Acrobat).
+fn outlined(mut a: PdfAnnotation) -> Result<PdfAnnotation> {
+    a.set_color(rgb(COMMENT_RED))?;
+    a.set_border_width(1.0)?;
+    Ok(a)
 }
 
 fn kind_of(t: PdfAnnotationType) -> AnnotKind {
@@ -322,6 +421,11 @@ fn kind_of(t: PdfAnnotationType) -> AnnotKind {
         PdfAnnotationType::Text => AnnotKind::Note,
         PdfAnnotationType::Ink => AnnotKind::Ink,
         PdfAnnotationType::StrikeOut => AnnotKind::StrikeOut,
+        PdfAnnotationType::FreeText => AnnotKind::TextBox,
+        PdfAnnotationType::Square => AnnotKind::Rect,
+        PdfAnnotationType::Circle => AnnotKind::Ellipse,
+        PdfAnnotationType::Line => AnnotKind::Line,
+        PdfAnnotationType::Stamp => AnnotKind::Stamp,
         _ => AnnotKind::Other,
     }
 }
@@ -347,17 +451,39 @@ pub(crate) fn annot_id(annot: &PdfAnnotation) -> Result<i32> {
 
 pub(crate) fn annot_info(annot: &PdfAnnotation, page: i32) -> Result<AnnotInfo> {
     let kind = kind_of(annot.r#type()?);
+    let font = (kind == AnnotKind::TextBox)
+        .then(|| annot.default_appearance())
+        .transpose()?
+        .flatten()
+        .map(|da| (da.size, da.color.map(rgb_of).unwrap_or([0.0; 3])));
+    let own_color = annot.color()?.map(rgb_of);
     Ok(AnnotInfo {
         id: annot_id(annot)?,
         kind,
         page,
         rect: annot.bounds()?.into(),
         contents: annot.contents()?.unwrap_or_default().to_owned(),
-        color: annot.color()?.map(rgb_of),
+        // caixa de texto: a cor é a do texto e da borda; /C é o fundo
+        color: match kind {
+            AnnotKind::TextBox => font.map(|f| f.1),
+            _ => own_color,
+        },
         opacity: annot.opacity()?,
-        width: (kind == AnnotKind::Ink)
+        width: kind
+            .has_border()
             .then(|| annot.border_width())
             .transpose()?,
+        fill: match kind {
+            AnnotKind::TextBox => own_color,
+            k if k.has_fill() => annot.interior_color()?.map(rgb_of),
+            _ => None,
+        },
+        line: (kind == AnnotKind::Line)
+            .then(|| annot.line())
+            .transpose()?
+            .map(|(p, q)| ((p.x, p.y), (q.x, q.y))),
+        font,
+        author: annot.author()?.unwrap_or_default().to_owned(),
     })
 }
 
@@ -471,7 +597,11 @@ impl PdfDoc {
                     return Err(PdfError::InvalidAnnotation("anotação vazia".into()));
                 }
                 let mut page_ref = self.inner.load_pdf_page(page)?;
-                let annot = add_one(&mut page_ref, &a)?;
+                let mut annot = add_one(&mut self.inner, &mut page_ref, &a)?;
+                if let Some(name) = &self.author {
+                    annot.set_author(name)?;
+                }
+                annot.update()?;
                 page_ref.update()?;
                 let id = annot_id(&annot)?;
                 self.history.record(Edit::Visibility {
@@ -482,14 +612,63 @@ impl PdfDoc {
                 return Ok(vec![page]);
             }
             AnnotOp::Move { page, id, dx, dy } => {
-                let (rect, ink) = annot_edit::geometry_of(&self.inner, page, id)?;
-                let (rect, ink) = annot_edit::moved(rect, ink, dx, dy);
-                Edit::Geometry {
+                if let Some((a, b)) = annot_edit::line_of(&self.inner, page, id)? {
+                    let shift = |p: (f32, f32)| (p.0 + dx, p.1 + dy);
+                    Edit::LinePoints {
+                        page,
+                        id,
+                        a: shift(a),
+                        b: shift(b),
+                    }
+                } else {
+                    let (rect, ink) = annot_edit::geometry_of(&self.inner, page, id)?;
+                    let (rect, ink) = annot_edit::moved(rect, ink, dx, dy);
+                    Edit::Geometry {
+                        page,
+                        id,
+                        rect,
+                        ink,
+                    }
+                }
+            }
+            AnnotOp::MoveLinePoint { page, id, end, to } => {
+                let (a, b) = annot_edit::line_of(&self.inner, page, id)?
+                    .ok_or_else(|| PdfError::InvalidAnnotation("não é uma linha".into()))?;
+                let (a, b) = match end {
+                    LineEnd::Start => (to, b),
+                    LineEnd::End => (a, to),
+                };
+                Edit::LinePoints { page, id, a, b }
+            }
+            AnnotOp::Fill { page, id, color } => Edit::Fill {
+                page,
+                id,
+                color: rgb_edit(color, ColorEdit::Clear),
+            },
+            AnnotOp::Font {
+                page,
+                id,
+                size,
+                color,
+            } => {
+                let size = size.clamp(4.0, 144.0);
+                let fit = match annot_edit::text_box_of(&self.inner, page, id)? {
+                    Some((rect, text, _, border)) => {
+                        Some((rect, text_fit::fitted(rect, &text, size, border)?))
+                    }
+                    None => None,
+                };
+                with_fit(
+                    Edit::Font {
+                        page,
+                        id,
+                        size,
+                        color,
+                    },
                     page,
                     id,
-                    rect,
-                    ink,
-                }
+                    fit,
+                )
             }
             AnnotOp::Resize { page, id, rect } => {
                 let (old, ink) = annot_edit::geometry_of(&self.inner, page, id)?;
@@ -510,13 +689,19 @@ impl PdfDoc {
             } => Edit::Style {
                 page,
                 id,
-                color: color.map_or(ColorEdit::Keep, |[red, green, blue]| {
-                    ColorEdit::Set(AnnotationColor::Rgb { red, green, blue })
-                }),
+                color: rgb_edit(color, ColorEdit::Keep),
                 opacity,
                 width,
             },
-            AnnotOp::SetContents { page, id, text } => Edit::Contents { page, id, text },
+            AnnotOp::SetContents { page, id, text } => {
+                let fit = match annot_edit::text_box_of(&self.inner, page, id)? {
+                    Some((rect, _, size, border)) => {
+                        Some((rect, text_fit::fitted(rect, &text, size, border)?))
+                    }
+                    None => None,
+                };
+                with_fit(Edit::Contents { page, id, text }, page, id, fit)
+            }
             AnnotOp::Delete { page, id } => Edit::Visibility {
                 page,
                 id,
@@ -546,7 +731,11 @@ impl PdfDoc {
         self.history.can_redo()
     }
 
-    /// Há edições desde a última gravação?
+    /// Autor das anotações criadas daqui em diante (`None`: sem /T).
+    pub fn set_author(&mut self, author: Option<String>) {
+        self.author = author.filter(|a| !a.trim().is_empty());
+    }
+
     pub fn history_state(&self) -> HistoryState {
         HistoryState {
             can_undo: self.can_undo(),
@@ -555,6 +744,7 @@ impl PdfDoc {
         }
     }
 
+    /// Há edições desde a última gravação?
     pub fn is_dirty(&self) -> bool {
         self.unsaved || self.history.can_undo()
     }

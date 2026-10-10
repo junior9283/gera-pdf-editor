@@ -96,6 +96,7 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
             ui.separator();
             ui.menu_button("Preferências", |ui| {
                 check(ui, &mut out, Command::ToggleDark, s.dark, true);
+                item(ui, &mut out, Command::Identity, true);
             });
         });
         ui.menu_button("Exibir", |ui| {

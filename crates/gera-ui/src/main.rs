@@ -1,6 +1,7 @@
 mod app;
 mod bench;
 mod canvas;
+mod create;
 mod doc_tab;
 mod edit;
 mod open_dialog;

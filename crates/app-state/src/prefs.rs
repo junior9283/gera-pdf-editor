@@ -48,6 +48,8 @@ pub struct Prefs {
     /// Painel de ferramentas à direita aberto?
     pub tools_panel: bool,
     pub tools_width: f32,
+    /// Nome do usuário (Identidade): autor das anotações e linha dos carimbos dinâmicos.
+    pub author: Option<String>,
 }
 
 impl Default for Prefs {
@@ -58,6 +60,7 @@ impl Default for Prefs {
             left_width: 180.0,
             tools_panel: true,
             tools_width: 200.0,
+            author: None,
         }
     }
 }

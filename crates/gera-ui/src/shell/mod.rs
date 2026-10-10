@@ -4,6 +4,7 @@ pub mod close;
 pub mod commands;
 pub mod help;
 pub mod home;
+pub mod identity;
 pub mod menus;
 pub mod panels;
 pub mod print_dialog;

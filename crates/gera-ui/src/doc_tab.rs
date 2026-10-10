@@ -60,6 +60,8 @@ pub enum DocEvent {
     Failed(String),
     /// "Salvar como" concluído no novo caminho.
     Renamed(PathBuf),
+    /// O usuário informou o nome no diálogo Identidade.
+    Author(String),
 }
 
 /// Impressão esperando a cópia temporária: opções, página atual no clique e o arquivo pedido.
@@ -115,6 +117,8 @@ pub struct DocTab {
     print_jobs: PrintJobs,
     /// Última virada de página pela roda (tempo do egui), para não virar várias de uma vez.
     turned_at: f64,
+    /// Nome sendo digitado no diálogo Identidade.
+    identity_name: String,
 }
 
 impl DocTab {
@@ -147,6 +151,7 @@ impl DocTab {
             printers_rx: None,
             print_jobs: PrintJobs::default(),
             turned_at: f64::NEG_INFINITY,
+            identity_name: String::new(),
         }
     }
 
@@ -427,6 +432,13 @@ impl DocTab {
     /// atalhos vêm da tabela de comandos da casca.
     pub fn handle_input(&mut self, ctx: &egui::Context) {
         let typing = ctx.egui_wants_keyboard_input();
+        // Esc volta para Selecionar (como no Acrobat); numa caixa de texto, só termina a digitação
+        if !typing
+            && self.edit.text_draft.is_none()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            self.edit.escape();
+        }
         if !typing {
             let nav = [
                 (NavKey::PageUp, egui::Key::PageUp),
@@ -583,6 +595,7 @@ impl DocTab {
         self.edit.drop_stale_drag(down);
         self.edit.note_window(ui);
         self.edit.props_window(ui, &self.annots);
+        self.identity_window(ui);
         self.send_edits();
         self.password_window(ui);
         if let Some(view) = self.view.as_mut() {
@@ -664,6 +677,34 @@ impl DocTab {
 
     pub fn zoom_percent(&self) -> Option<f32> {
         self.view.as_ref().map(|v| v.zoom * 100.0)
+    }
+
+    /// Nome do usuário: vai para os carimbos dinâmicos e, no worker, como autor das anotações.
+    /// Repetir o mesmo nome não manda nada (a Identidade já o aplica antes de avisar a casca).
+    pub fn set_author(&mut self, author: Option<String>) {
+        if self.edit.author != author {
+            self.edit.author = author.clone();
+            self.worker.send(Request::SetAuthor(author));
+        }
+    }
+
+    /// Diálogo Identidade, aberto por um carimbo dinâmico sem nome; o OK põe o carimbo.
+    fn identity_window(&mut self, ui: &mut egui::Ui) {
+        let Some((page, at)) = self.edit.identity_for else {
+            return;
+        };
+        match crate::shell::identity::window(ui, &mut self.identity_name) {
+            Some(true) => {
+                let name = self.identity_name.trim().to_owned();
+                self.edit.identity_for = None;
+                self.set_author(Some(name.clone()));
+                self.edit
+                    .place_stamp(page, at, Some(&name), crate::create::local_now());
+                self.events.push(DocEvent::Author(name));
+            }
+            Some(false) => self.edit.identity_for = None,
+            None => {}
+        }
     }
 
     /// Pedido de senha para abrir um PDF protegido (a senha não é registrada em lugar nenhum).
@@ -813,6 +854,7 @@ mod tests {
             color: None,
             opacity: 1.0,
             width: None,
+            ..Default::default()
         };
         let mut all = vec![a(0, 1), a(1, 2), a(1, 3), a(2, 4)];
         replace_pages(&mut all, &[1], vec![a(1, 3), a(1, 5)]);

@@ -50,6 +50,8 @@ pub enum Request {
     Annot(AnnotOp),
     Undo,
     Redo,
+    /// Autor gravado nas anotações criadas (vale também para documentos abertos depois).
+    SetAuthor(Option<String>),
     /// Seleção pelo fluxo do texto entre `a` e `b` (pontos da página).
     SelectText {
         tag: u64,
@@ -165,6 +167,7 @@ struct SearchJob {
 struct State {
     doc: Option<PdfDoc>,
     search: Option<SearchJob>,
+    author: Option<String>,
 }
 
 impl State {
@@ -175,7 +178,8 @@ impl State {
                 match PdfDoc::open(&path, password.as_deref())
                     .and_then(|d| d.summary().map(|s| (d, s)))
                 {
-                    Ok((d, summary)) => {
+                    Ok((mut d, summary)) => {
+                        d.set_author(self.author.clone());
                         self.doc = Some(d);
                         send(Response::Opened(summary));
                     }
@@ -244,6 +248,12 @@ impl State {
             }
             Request::Annot(op) => self.edit(send, |d| d.apply(op)),
             Request::Undo => self.edit(send, PdfDoc::undo),
+            Request::SetAuthor(author) => {
+                if let Some(d) = self.doc.as_mut() {
+                    d.set_author(author.clone());
+                }
+                self.author = author;
+            }
             Request::Redo => self.edit(send, PdfDoc::redo),
             Request::SelectText { tag, page, a, b } => {
                 let selection = self

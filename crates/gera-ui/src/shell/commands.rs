@@ -24,6 +24,8 @@ pub enum Command {
     About,
     Properties,
     Print,
+    /// Editar → Preferências → Identidade: o nome do usuário.
+    Identity,
 }
 
 impl Command {
@@ -46,6 +48,7 @@ impl Command {
             Command::About => "Sobre o Gera PDF Editor",
             Command::Properties => "Propriedades…",
             Command::Print => "Imprimir…",
+            Command::Identity => "Identidade…",
             Command::Doc(d) => match d {
                 DocCommand::Save => "Salvar",
                 DocCommand::Undo => "Desfazer",
