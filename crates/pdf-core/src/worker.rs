@@ -60,6 +60,13 @@ pub enum Request {
     },
     /// Limpar formulário (valores padrão).
     ResetForm,
+    /// Preparar formulário: criar, editar, mover ou excluir um campo.
+    Prepare(crate::PrepareOp),
+    /// Propriedades do campo, para a janela Propriedades.
+    FieldProps {
+        page: i32,
+        id: i32,
+    },
     /// Organizar páginas (girar, excluir, mover, inserir, substituir, recortar).
     Pages(PageOp),
     /// Divide o documento em arquivos na pasta `dir`; o documento não muda.
@@ -162,6 +169,12 @@ pub enum Response {
         history: HistoryState,
     },
     SplitFailed(String),
+    /// Propriedades de um campo (Preparar formulário).
+    FieldProps {
+        page: i32,
+        id: i32,
+        props: Result<crate::FieldProps, String>,
+    },
 }
 
 const NO_DOC: &str = "nenhum documento aberto";
@@ -287,6 +300,14 @@ impl State {
                 d.set_field(page, id, &value).map(|()| Changed::Fields)
             }),
             Request::ResetForm => self.edit(send, |d| d.reset_form().map(|()| Changed::Document)),
+            Request::FieldProps { page, id } => send(Response::FieldProps {
+                page,
+                id,
+                props: self
+                    .with_doc(|d| d.field_props(page, id))
+                    .map_err(|e| e.to_string()),
+            }),
+            Request::Prepare(op) => self.edit(send, |d| d.prepare(op).map(|()| Changed::Fields)),
             Request::Pages(op) => {
                 self.edit(send, |d| d.apply_pages(op).map(|()| Changed::Document))
             }

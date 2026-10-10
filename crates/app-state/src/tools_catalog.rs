@@ -43,6 +43,7 @@ pub struct ToolEntry {
 
 pub const COMMENT: &str = "comentar";
 pub const FILL_SIGN: &str = "assinar";
+pub const PREPARE_FORM: &str = "formulario";
 /// Ferramentas que abrem o Organizar páginas.
 pub const ORGANIZE: &str = "organizar";
 pub const INSERT: &str = "inserir";
@@ -82,7 +83,7 @@ pub const CATALOG: &[ToolEntry] = &[
     tool("proteger", "Proteger PDF", "🔒", Protect, Planned("v5"), "Senha e permissões"),
     tool("redigir", "Redigir", "⬛", Protect, Planned("v5"), "Apagar informações sensíveis de vez"),
     tool("comprimir", "Comprimir PDF", "⛃", Protect, Planned("v5"), "Reduzir o tamanho do arquivo"),
-    tool("formulario", "Preparar formulário", "🗋", Protect, Planned("v3"), "Criar campos de formulário"),
+    tool(PREPARE_FORM, "Preparar formulário", "🗋", Protect, Ready, "Criar e editar campos de formulário"),
     tool("organizar", "Organizar páginas", "🗁", Organize, Ready, "Reordenar, girar e excluir páginas"),
     tool(SPLIT, "Dividir PDF", "✂", Organize, Ready, "Separar em vários arquivos"),
     tool("inserir", "Inserir páginas", "➕", Organize, Ready, "Trazer páginas de outro arquivo"),
@@ -140,7 +141,16 @@ mod tests {
             .collect();
         assert_eq!(
             ready,
-            [COMBINE, COMMENT, FILL_SIGN, ORGANIZE, SPLIT, INSERT, CROP]
+            [
+                COMBINE,
+                COMMENT,
+                FILL_SIGN,
+                PREPARE_FORM,
+                ORGANIZE,
+                SPLIT,
+                INSERT,
+                CROP
+            ]
         );
         assert_eq!(find(COMMENT).map(badge).as_deref(), Some(""));
         assert_eq!(

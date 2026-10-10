@@ -108,6 +108,9 @@ pub struct DocTab {
     pub(crate) comment_tools: bool,
     /// Linha Preencher e assinar aberta.
     pub(crate) fill_tools: bool,
+    /// Linha Preparar formulário aberta (os campos viram objetos editáveis).
+    pub(crate) prepare_tools: bool,
+    pub(crate) prepare: crate::prepare::PrepareState,
     /// Pedido de foco no campo de busca (Ctrl+F ou menu).
     pub(crate) focus_search: bool,
     /// Propriedades mostradas na janela (aberta enquanto houver).
@@ -190,6 +193,8 @@ impl DocTab {
             password_prompt: None,
             comment_tools: false,
             fill_tools: false,
+            prepare_tools: false,
+            prepare: Default::default(),
             focus_search: false,
             properties: None,
             print_dialog: None,
@@ -260,6 +265,12 @@ impl DocTab {
             DocCommand::Find => self.focus_search = true,
             DocCommand::Copy => self.edit.copy(ctx),
             DocCommand::SelectAll => self.edit.select_all(&self.worker),
+            DocCommand::Delete if self.prepare_tools => {
+                if let Some((page, id)) = self.prepare.selected.take() {
+                    self.worker
+                        .send(Request::Prepare(pdf_core::PrepareOp::Delete { page, id }));
+                }
+            }
             DocCommand::Delete => self.edit.delete_selected(),
             DocCommand::ZoomIn | DocCommand::ZoomOut | DocCommand::ZoomReset => {
                 let z = match cmd {
@@ -364,6 +375,7 @@ impl DocTab {
     fn on_opened(&mut self, summary: DocSummary) {
         self.annots = summary.annots;
         self.fields = summary.fields;
+        self.prepare.on_fields(&self.fields);
         self.form.notes = summary.form_notes;
         self.history = HistoryState::default();
         self.outline = summary.outline;
@@ -389,6 +401,7 @@ impl DocTab {
     fn on_pages_changed(&mut self, summary: DocSummary, history: HistoryState) {
         self.annots = summary.annots;
         self.fields = summary.fields;
+        self.prepare.on_fields(&self.fields);
         self.form.notes = summary.form_notes;
         self.outline = summary.outline;
         self.history = history;
@@ -551,9 +564,27 @@ impl DocTab {
                         self.fields.iter().chain(&fields).map(|f| f.page).collect();
                     pages.dedup();
                     self.fields = fields;
+                    self.prepare.on_fields(&self.fields);
                     self.history = history;
                     if let Some(view) = self.view.as_mut() {
                         pages.into_iter().for_each(|p| view.invalidate_page(p));
+                    }
+                }
+                Response::FieldProps { page, id, props } => {
+                    if self.prepare.props_for.take() == Some((page, id)) {
+                        let kind = self.fields.iter().find(|f| f.page == page && f.id == id);
+                        match (props, kind) {
+                            (Ok(props), Some(f)) => {
+                                self.prepare.props =
+                                    Some(crate::shell::field_props::FieldPropsWindow::new(
+                                        page, id, &f.kind, props,
+                                    ));
+                            }
+                            (Err(e), _) => {
+                                self.status = format!("Não foi possível ler o campo: {e}")
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 Response::SplitFailed(msg) => {
@@ -587,6 +618,8 @@ impl DocTab {
         {
             if self.organize.is_some() {
                 self.organize = None; // Esc fecha o Organizar páginas
+            } else if self.prepare_tools && self.prepare.escape() {
+                // Preparar formulário: solta a ferramenta, depois a seleção
             } else if self.edit.fill.dialog.take().is_some() {
                 // Esc fecha a janela de assinatura (como Cancelar)
                 self.edit.fill.into_field = None;
@@ -652,11 +685,11 @@ impl DocTab {
 
     /// Setas movem a anotação selecionada (1 pt; Shift, 10 pt), como no Acrobat.
     fn nudge_selected(&mut self, ctx: &egui::Context) {
-        // com a janela de assinatura aberta, as setas são dela
-        let Some((page, id)) = self
-            .edit
-            .selected
-            .filter(|_| self.edit.fill.dialog.is_none())
+        // com a janela de assinatura aberta, as setas são dela; no Preparar, movem o campo
+        let field = self.prepare.selected.filter(|_| self.prepare_tools);
+        let Some((page, id)) = field
+            .or(self.edit.selected)
+            .filter(|_| self.edit.fill.dialog.is_none() && self.prepare.props.is_none())
         else {
             return;
         };
@@ -682,8 +715,35 @@ impl DocTab {
                 .as_ref()
                 .map_or_else(Default::default, |v| v.rotation);
             let (dx, dy) = app_state::fill_sign::nudge(dir, shift, rotation);
-            self.worker
-                .send(Request::Annot(pdf_core::AnnotOp::Move { page, id, dx, dy }));
+            let rect = field.and_then(|_| {
+                self.fields
+                    .iter()
+                    .find(|f| f.page == page && f.id == id)
+                    .map(|f| f.rect.translated(dx, dy))
+            });
+            self.worker.send(match rect {
+                Some(rect) => Request::Prepare(pdf_core::PrepareOp::Move { page, id, rect }),
+                None => Request::Annot(pdf_core::AnnotOp::Move { page, id, dx, dy }),
+            });
+        }
+    }
+
+    /// Janela Propriedades do campo (Preparar formulário): OK manda as propriedades ao worker.
+    fn field_props_window(&mut self, ctx: &egui::Context) {
+        let Some(w) = self.prepare.props.as_mut() else {
+            return;
+        };
+        let (page, id) = (w.page, w.id);
+        if let Some(outcome) = w.show(ctx) {
+            self.prepare.props = None;
+            if let Some(props) = outcome {
+                self.worker
+                    .send(Request::Prepare(pdf_core::PrepareOp::SetProps {
+                        page,
+                        id,
+                        props,
+                    }));
+            }
         }
     }
 
@@ -691,6 +751,9 @@ impl DocTab {
     pub fn show_row(&mut self, id: &str) {
         self.comment_tools = id == app_state::tools_catalog::COMMENT;
         self.fill_tools = id == app_state::tools_catalog::FILL_SIGN;
+        self.prepare_tools = id == app_state::tools_catalog::PREPARE_FORM;
+        self.prepare.set_tool(None);
+        self.prepare.selected = None;
         self.edit.set_fill_tool(None);
     }
 
@@ -792,7 +855,7 @@ impl DocTab {
             Some(PrintChoice::Cancel) => self.print_dialog = None,
             None => {}
         }
-        if !self.fields.is_empty() && self.organize.is_none() {
+        if !self.fields.is_empty() && self.organize.is_none() && !self.prepare_tools {
             let reset = egui::Panel::top("formulario")
                 .frame(egui::Frame::NONE)
                 .show(ui, |ui| crate::fields::bar(ui, &mut self.form))
@@ -813,6 +876,7 @@ impl DocTab {
         if let Some(msg) = self.edit.signature_window(ui.ctx()) {
             self.status = msg;
         }
+        self.field_props_window(ui.ctx());
         self.split_window(ui);
         self.poll_files();
         self.identity_window(ui);
@@ -1196,7 +1260,10 @@ impl DocTab {
         let (worker, edit, search, annots) =
             (&self.worker, &mut self.edit, &self.search, &self.annots);
         let (form, fields) = (&mut self.form, &self.fields);
+        let (prepare, preparing) = (&mut self.prepare, self.prepare_tools);
         let mut field_actions = Vec::new();
+        let mut prepare_ops = Vec::new();
+        let mut open_props = None;
         let jump_to = self.jump_to.take();
         // cada aba com seu id: a área de rolagem guarda a posição de cada documento
         self.last = ui
@@ -1208,6 +1275,20 @@ impl DocTab {
                     jump_to,
                     &mut |ui, page, rect, map: &PageMap| {
                         paint_search_hits(ui, search, page as i32, map);
+                        if preparing {
+                            // Preparar formulário: só os campos (sem comentários nem preencher)
+                            let (ops, props) = crate::prepare::on_page(
+                                ui,
+                                prepare,
+                                fields,
+                                page as i32,
+                                rect,
+                                map,
+                            );
+                            prepare_ops.extend(ops);
+                            open_props = open_props.or(props);
+                            return;
+                        }
                         edit.on_page(ui, worker, annots, page as i32, rect, map);
                         // depois dos gestos da página: os campos ficam por cima
                         field_actions.extend(crate::fields::on_page(
@@ -1224,6 +1305,13 @@ impl DocTab {
         if let Some((page, r)) = self.form.scroll_to.take() {
             // o Tab foi a um campo de outra página
             self.jump_to = view.go_to(page, Some((r.x0, r.y0)));
+        }
+        for op in prepare_ops {
+            self.worker.send(Request::Prepare(op));
+        }
+        if let Some((page, id)) = open_props {
+            self.prepare.props_for = Some((page, id));
+            self.worker.send(Request::FieldProps { page, id });
         }
         for action in field_actions {
             match action {

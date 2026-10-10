@@ -56,6 +56,45 @@ pub fn show(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     out
 }
 
+/// Linha do Preparar formulário: Selecionar, os tipos de campo, desfazer/refazer e Fechar.
+pub fn prepare_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
+    let mut out = None;
+    ui.horizontal(|ui| {
+        let current = doc.prepare.tool;
+        if ui
+            .add(egui::Button::selectable(current.is_none(), "Selecionar"))
+            .clicked()
+        {
+            doc.prepare.set_tool(None);
+        }
+        ui.separator();
+        for kind in app_state::prepare::KINDS {
+            let active = current == Some(kind);
+            if ui
+                .add(egui::Button::selectable(
+                    active,
+                    app_state::prepare::label(kind),
+                ))
+                .on_hover_text("Clique na página para colocar, ou arraste para escolher o tamanho")
+                .clicked()
+            {
+                doc.prepare.set_tool((!active).then_some(kind));
+            }
+        }
+        ui.separator();
+        let can_edit = !doc.edit.saving;
+        let can_undo = can_edit && doc.is_dirty();
+        button(ui, &mut out, "⮪", Command::Doc(DocCommand::Undo), can_undo);
+        button(ui, &mut out, "⮫", Command::Doc(DocCommand::Redo), can_edit);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Fechar").clicked() {
+                doc.show_row("");
+            }
+        });
+    });
+    out
+}
+
 /// Linha do Preencher e assinar: texto, tamanho, marcas, assinatura e iniciais (como no Acrobat).
 pub fn fill_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     let mut out = None;

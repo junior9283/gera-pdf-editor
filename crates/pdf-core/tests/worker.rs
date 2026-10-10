@@ -291,3 +291,57 @@ fn filling_a_field_reports_every_field_of_the_document() {
         other => panic!("esperava FieldsChanged, veio {other:?}"),
     }
 }
+
+#[test]
+fn preparing_a_form_reports_the_new_fields() {
+    let (_d, w, _) = opened(1);
+    w.send(Request::Prepare(pdf_core::PrepareOp::Add {
+        page: 0,
+        rect: PdfRect::new(100.0, 100.0, 250.0, 122.0),
+        kind: pdf_core::NewFieldKind::Text,
+        name: "Nome".into(),
+    }));
+    match recv(&w) {
+        Response::FieldsChanged { fields, history } => {
+            assert!(fields.iter().any(|f| f.name == "Nome"));
+            assert!(history.can_undo);
+        }
+        other => panic!("esperava FieldsChanged, veio {other:?}"),
+    }
+    w.send(Request::Prepare(pdf_core::PrepareOp::Add {
+        page: 0,
+        rect: PdfRect::new(100.0, 200.0, 250.0, 222.0),
+        kind: pdf_core::NewFieldKind::Text,
+        name: "Nome".into(),
+    }));
+    assert!(
+        matches!(recv(&w), Response::AnnotFailed(_)),
+        "nome repetido"
+    );
+}
+
+#[test]
+fn field_properties_come_from_the_worker() {
+    let (_d, w, _) = opened(1);
+    w.send(Request::Prepare(pdf_core::PrepareOp::Add {
+        page: 0,
+        rect: PdfRect::new(100.0, 100.0, 250.0, 122.0),
+        kind: pdf_core::NewFieldKind::Text,
+        name: "Nome".into(),
+    }));
+    let Response::FieldsChanged { fields, .. } = recv(&w) else {
+        panic!()
+    };
+    let id = fields[0].id;
+    w.send(Request::FieldProps { page: 0, id });
+    match recv(&w) {
+        Response::FieldProps {
+            page: 0,
+            id: got,
+            props: Ok(p),
+        } => {
+            assert_eq!((got, p.name.as_str()), (id, "Nome"));
+        }
+        other => panic!("esperava FieldProps, veio {other:?}"),
+    }
+}
