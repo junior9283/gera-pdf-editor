@@ -230,6 +230,106 @@ fn cut(content: &[u8], cuts: &[std::ops::Range<usize>]) -> Vec<u8> {
     out
 }
 
+/// Tira o texto alternativo das propriedades nomeadas do dicionário de recursos (no lugar).
+fn clean_properties(resources: &PdfObject) -> Result<()> {
+    let Some(props) = resources.get_dict("Properties")? else {
+        return Ok(());
+    };
+    for (_, mut v) in props.dict_iter()?.filter_map(|e| e.ok()) {
+        if v.is_dict()? {
+            for key in ALT_KEYS {
+                v.dict_delete(key)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Tira o texto alternativo dos formulários do dicionário /XObject e dos de dentro deles
+/// (`seen`: cada formulário uma vez; profundidade limitada contra arquivos hostis).
+fn clean_forms(
+    xobjects: &PdfObject,
+    seen: &mut std::collections::HashSet<i32>,
+    depth: u32,
+) -> Result<()> {
+    if depth > 16 {
+        return Ok(());
+    }
+    for (_, mut form) in xobjects.dict_iter()?.filter_map(|e| e.ok()) {
+        let is_form = form
+            .get_dict("Subtype")?
+            .and_then(|s| s.as_name().ok())
+            .is_some_and(|s| s == b"Form");
+        let num = form.as_indirect().unwrap_or(0);
+        if !is_form || (num != 0 && !seen.insert(num)) {
+            continue;
+        }
+        let content = form.read_stream()?;
+        let cuts = alternate_text_marks(&content);
+        if !cuts.is_empty() {
+            form.write_stream_buffer(&Buffer::from_bytes(&cut(&content, &cuts))?)?;
+        }
+        if let Some(res) = form.get_dict("Resources")? {
+            clean_properties(&res)?;
+            if let Some(inner) = res.get_dict("XObject")? {
+                clean_forms(&inner, seen, depth + 1)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Tira o texto alternativo dos elementos da árvore de estrutura (PDF marcado) que ficam nas
+/// páginas redigidas (`pages`: números dos objetos delas); o elemento sem /Pg herda o do pai.
+fn clean_structure(doc: &mupdf::pdf::PdfDocument, pages: &[i32]) -> Result<()> {
+    fn walk(
+        node: &PdfObject,
+        page: Option<i32>,
+        pages: &[i32],
+        seen: &mut std::collections::HashSet<i32>,
+        depth: u32,
+    ) -> Result<()> {
+        if depth > 64 {
+            return Ok(());
+        }
+        if node.is_array()? {
+            for i in 0..node.len()? as i32 {
+                if let Some(kid) = node.get_array(i)? {
+                    walk(&kid, page, pages, seen, depth + 1)?;
+                }
+            }
+            return Ok(());
+        }
+        if !node.is_dict()? {
+            return Ok(());
+        }
+        let num = node.as_indirect().unwrap_or(0);
+        if num != 0 && !seen.insert(num) {
+            return Ok(());
+        }
+        let page = node
+            .get_dict("Pg")?
+            .and_then(|p| p.as_indirect().ok())
+            .or(page);
+        if page.is_some_and(|p| pages.contains(&p)) {
+            let mut elem = node.clone();
+            for key in ALT_KEYS {
+                elem.dict_delete(key)?;
+            }
+        }
+        if let Some(kids) = node.get_dict("K")? {
+            walk(&kids, page, pages, seen, depth + 1)?;
+        }
+        Ok(())
+    }
+    if let Some(root) = doc.catalog()?.get_dict("StructTreeRoot")? {
+        if let Some(kids) = root.get_dict("K")? {
+            walk(&kids, None, pages, &mut std::collections::HashSet::new(), 0)?;
+        }
+    }
+    Ok(())
+}
+
 fn intersects(a: &Rect, b: &Rect) -> bool {
     a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0
 }
@@ -443,6 +543,7 @@ impl PdfDoc {
             d.history.hidden.clear();
             let mut applied = 0;
             let mut removed_fields = Vec::new();
+            let mut redacted_pages = Vec::new();
             for page in 0..d.page_count()? {
                 let mut pdf_page = d.inner.load_pdf_page(page)?;
                 let mut boxes = Vec::new();
@@ -474,11 +575,13 @@ impl PdfDoc {
                 })?;
                 drop(pdf_page);
                 d.strip_alternate_text(page)?;
+                redacted_pages.push(d.inner.find_page(page)?.as_indirect()?);
                 d.paint_boxes(page, &boxes, look, overlay.as_ref())?;
             }
             if !removed_fields.is_empty() {
                 prune_fields(&d.inner, &removed_fields)?;
             }
+            clean_structure(&d.inner, &redacted_pages)?;
             Ok(applied)
         })
     }
@@ -519,25 +622,13 @@ impl PdfDoc {
                 }
             }
         }
-        // formulários desenhados pela página (a redação apaga os glifos deles, não o marcado)
+        // formulários desenhados pela página, também os de dentro de outros (a redação apaga os
+        // glifos deles, não o marcado nem as propriedades nomeadas)
         let forms = resources
             .as_ref()
             .and_then(|r| r.get_dict("XObject").ok().flatten());
         if let Some(xobjects) = forms {
-            for (_, mut form) in xobjects.dict_iter()?.filter_map(|e| e.ok()) {
-                let is_form = form
-                    .get_dict("Subtype")?
-                    .and_then(|s| s.as_name().ok())
-                    .is_some_and(|s| s == b"Form");
-                if !is_form {
-                    continue;
-                }
-                let content = form.read_stream()?;
-                let cuts = alternate_text_marks(&content);
-                if !cuts.is_empty() {
-                    form.write_stream_buffer(&Buffer::from_bytes(&cut(&content, &cuts))?)?;
-                }
-            }
+            clean_forms(&xobjects, &mut std::collections::HashSet::new(), 0)?;
         }
         Ok(())
     }

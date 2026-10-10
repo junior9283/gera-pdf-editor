@@ -284,6 +284,10 @@ pub enum Response {
         page: i32,
         images: Vec<crate::PageImage>,
     },
+    /// Resultado do Aplicar do Redigir (resposta própria: o "Aplicar e salvar" só grava com ela).
+    RedactionsApplied {
+        result: std::result::Result<(DocSummary, crate::HistoryState), String>,
+    },
     /// Trechos achados pelo Localizar do Redigir.
     RedactHits(Vec<crate::RedactHit>),
     /// Resposta ao `PaginationState`.
@@ -524,9 +528,16 @@ impl State {
                     Err(e) => Response::EditFailed(e.to_string()),
                 })
             }
-            Request::ApplyRedactions(look) => self.edit(send, |d| {
-                d.apply_redactions(&look).map(|_| Changed::Document)
-            }),
+            Request::ApplyRedactions(look) => {
+                let result = match self.doc.as_mut() {
+                    None => Err(NO_DOC.to_string()),
+                    Some(d) => d
+                        .apply_redactions(&look)
+                        .and_then(|_| Ok((d.summary()?, d.history_state())))
+                        .map_err(|e| e.to_string()),
+                };
+                send(Response::RedactionsApplied { result })
+            }
             Request::Sanitize(opts) => {
                 self.edit(send, |d| d.sanitize(&opts).map(|()| Changed::Document))
             }

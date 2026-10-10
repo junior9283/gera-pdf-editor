@@ -543,7 +543,11 @@ fn redaction_through_the_worker() {
         overlay: String::new(),
         overlay_color: [255, 255, 255],
     }));
-    assert!(matches!(recv(&w), Response::PagesChanged { .. }));
+    // resposta própria: o "Aplicar e salvar" da interface só grava com ela
+    assert!(matches!(
+        recv(&w),
+        Response::RedactionsApplied { result: Ok(_) }
+    ));
     w.send(Request::FindRedactions(pdf_core::RedactQuery::Phrase(
         "hello".into(),
     )));
