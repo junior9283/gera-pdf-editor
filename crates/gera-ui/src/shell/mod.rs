@@ -10,6 +10,7 @@ pub mod menus;
 pub mod panels;
 pub mod print_dialog;
 pub mod properties;
+pub mod signature_dialog;
 pub mod tabs;
 pub mod toolbar;
 pub mod tools_hub;

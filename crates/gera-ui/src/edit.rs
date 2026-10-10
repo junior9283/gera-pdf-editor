@@ -56,6 +56,8 @@ struct AnnotDrag {
     line: Option<Segment>,
     /// Redimensionar mantém a proporção (carimbos e assinaturas, como no Acrobat).
     keep_aspect: bool,
+    /// Pode ser uma marca do Preencher e assinar (o tamanho dela vira o das próximas).
+    mark_like: bool,
 }
 
 /// Menor lado (pontos) de um desenho redimensionado.
@@ -187,6 +189,8 @@ pub struct EditState {
     pub(crate) text_draft: Option<TextDraft>,
     /// Nome do usuário (Identidade), para os carimbos dinâmicos.
     pub author: Option<String>,
+    /// Preencher e assinar: ferramenta, tamanhos e janela de assinatura.
+    pub fill: crate::fill_sign::FillState,
     /// Carimbo dinâmico esperando a Identidade: (página, ponto).
     pub identity_for: Option<(i32, (f32, f32))>,
 }
@@ -209,6 +213,8 @@ pub(crate) struct TextDraft {
     pub(crate) color: [f32; 3],
     /// O campo já teve o foco (perdê-lo depois termina a digitação).
     pub(crate) focused: bool,
+    /// Texto solto do Preencher e assinar (sem caixa), em vez de caixa de texto.
+    pub(crate) fill: bool,
 }
 
 /// Onde o arrasto começou, na página. O arrasto só "começa" depois de o mouse andar alguns pixels:
@@ -304,6 +310,7 @@ impl EditState {
     /// Esc (como no Acrobat): volta para Selecionar, tira a seleção e cancela gestos em andamento.
     pub fn escape(&mut self) {
         self.tool = Tool::Select;
+        self.fill.tool = None;
         self.selected = None;
         self.annot_drag = None;
         self.shape_drag = None;
@@ -440,6 +447,7 @@ impl EditState {
                 }
             }
             Tool::Ink => self.draw_ink(ui, &response, pointer, page, map),
+            Tool::Fill => self.fill_gestures(ui, &response, pointer, page, map),
             Tool::TextBox | Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Arrow | Tool::Stamp => {
                 if let Some(at) = self.create_gestures(ui, &response, pointer, page, map) {
                     let author = self.author.clone();
@@ -490,6 +498,7 @@ impl EditState {
                         size,
                         color,
                         focused: false,
+                        fill: false,
                     });
                     return true;
                 }
@@ -536,6 +545,7 @@ impl EditState {
                 to: p,
                 line: a.line,
                 keep_aspect: a.kind == AnnotKind::Stamp,
+                mark_like: matches!(a.kind, AnnotKind::Ink | AnnotKind::Ellipse),
             });
             return true;
         }
@@ -550,7 +560,14 @@ impl EditState {
                 };
             }
             if !response.dragged() {
-                self.ops.extend(drag.op());
+                let op = drag.op();
+                // Preencher e assinar: a marca redimensionada define o tamanho das próximas
+                if let (true, true, Some(AnnotOp::Resize { rect, .. })) =
+                    (self.fill.active, drag.mark_like, &op)
+                {
+                    self.fill.mark_size = rect.height().clamp(4.0, 72.0);
+                }
+                self.ops.extend(op);
                 self.annot_drag = None;
             }
             return true;
@@ -999,6 +1016,7 @@ mod tests {
             to,
             line: None,
             keep_aspect: false,
+            mark_like: false,
         }
     }
 
@@ -1120,6 +1138,8 @@ mod tests {
             from: (100.0, 50.0),
             to: (130.0, 70.0),
             line: Some(((0.0, 0.0), (100.0, 50.0))),
+            keep_aspect: false,
+            mark_like: false,
         };
         assert!(matches!(
             d.op(),

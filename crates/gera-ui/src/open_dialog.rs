@@ -69,6 +69,20 @@ impl FileDialogs {
         });
     }
 
+    /// Imagem da assinatura (PNG ou JPEG).
+    pub fn pick_image(&mut self, ctx: &egui::Context) {
+        self.spawn(ctx, || {
+            match rfd::FileDialog::new()
+                .set_title("Escolher imagem da assinatura")
+                .add_filter("Imagem", &["png", "jpg", "jpeg"])
+                .pick_file()
+            {
+                Some(p) => Picked::Open(vec![p]),
+                None => Picked::Cancelled,
+            }
+        });
+    }
+
     pub fn pick_folder(&mut self, ctx: &egui::Context, start: Option<PathBuf>) {
         self.spawn(ctx, move || {
             let mut dialog = rfd::FileDialog::new().set_title("Escolher pasta");

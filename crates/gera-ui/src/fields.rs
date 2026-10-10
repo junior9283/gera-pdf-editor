@@ -20,8 +20,11 @@ pub enum FieldAction {
         id: i32,
         value: String,
     },
-    /// Campo de assinatura clicado.
-    Sign,
+    /// Campo de assinatura clicado (página e retângulo do campo).
+    Sign {
+        page: i32,
+        rect: pdf_core::PdfRect,
+    },
 }
 
 pub struct FormState {
@@ -286,7 +289,10 @@ fn open(st: &mut FormState, f: &FieldInfo, out: &mut Vec<FieldAction>) {
             st.choices = Some((f.page, f.id));
             st.combo_text = f.value.clone();
         }
-        FieldKind::Signature => out.push(FieldAction::Sign),
+        FieldKind::Signature => out.push(FieldAction::Sign {
+            page: f.page,
+            rect: f.rect,
+        }),
         _ => {}
     }
 }

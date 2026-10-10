@@ -7,7 +7,7 @@ use mupdf::{Buffer, Font, Image, Matrix, PathWalker, Rect};
 use std::path::Path;
 
 /// Fonte manuscrita da assinatura digitada (Great Vibes, SIL OFL 1.1: ver `fonts/OFL.txt`).
-const SCRIPT_FONT: &[u8] = include_bytes!("../fonts/GreatVibes-Regular.ttf");
+pub const SCRIPT_FONT: &[u8] = include_bytes!("../fonts/GreatVibes-Regular.ttf");
 
 /// Nome que marca os carimbos de assinatura criados aqui.
 pub const STAMP_NAME: &str = "GeraSignature";

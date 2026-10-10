@@ -90,7 +90,7 @@ pub fn smooth(stroke: &[(f32, f32)]) -> Vec<(f32, f32)> {
 
 /// Traços normalizados: altura 1 (y para baixo), com margem, e a proporção. `None` sem tinta.
 /// Um traço quase reto não vira uma faixa gigante: a altura usada é no mínimo 1/4 da largura.
-pub fn normalize(strokes: &[Vec<(f32, f32)>]) -> Option<(Vec<Vec<(f32, f32)>>, f32)> {
+pub fn normalize(strokes: &[Stroke]) -> Option<(Vec<Stroke>, f32)> {
     let pts = strokes.iter().filter(|s| s.len() >= 2).flatten();
     let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
     for &(x, y) in pts {
@@ -138,6 +138,9 @@ pub fn drawn_art(strokes: &[Vec<(f32, f32)>], aspect: f32) -> SignatureArt {
         .collect();
     SignatureArt::Vector { paths, aspect }
 }
+
+/// Traço do desenho: pontos em sequência.
+pub type Stroke = Vec<(f32, f32)>;
 
 /// Assinatura (ou iniciais) guardada para reutilizar.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -1,11 +1,14 @@
 //! Barra de ferramentas do documento e a linha de ferramentas de comentário.
 use crate::doc_tab::{DocCommand, DocTab};
+use crate::fill_sign::{paint_saved, store_saved, with_saved};
 use crate::shell::annot_props::color32;
 use crate::shell::commands::{hover, Command};
+use app_state::fill_sign::{self as fs, FillTool, Saved};
 use app_state::stamps::StampKind;
 use app_state::tools::Tool;
 use app_state::tools_catalog;
 use app_state::zoom::Fit;
+use pdf_core::{AnnotKind, AnnotOp, Mark};
 
 pub fn show(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     let mut out = None;
@@ -39,22 +42,157 @@ pub fn show(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
         ui.separator();
         doc.search_box(ui);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if let Some(t) = tools_catalog::find("assinar") {
-                ui.add_enabled(false, egui::Button::new("🖊 Assinar"))
-                    .on_disabled_hover_text(tools_catalog::badge(t));
-            }
-            if ui
-                .add(egui::Button::selectable(doc.comment_tools, "✏ Comentar"))
-                .clicked()
-            {
-                doc.comment_tools = !doc.comment_tools;
-                if !doc.comment_tools {
-                    doc.edit.tool = Tool::Select; // sem a linha, a ferramenta ativa ficaria escondida
+            // uma linha de ferramentas por vez; fechar a linha volta a Selecionar
+            for (open, label, id) in [
+                (doc.fill_tools, "🖊 Assinar", tools_catalog::FILL_SIGN),
+                (doc.comment_tools, "✏ Comentar", tools_catalog::COMMENT),
+            ] {
+                if ui.add(egui::Button::selectable(open, label)).clicked() {
+                    doc.show_row(if open { "" } else { id });
                 }
             }
         });
     });
     out
+}
+
+/// Linha do Preencher e assinar: texto, tamanho, marcas, assinatura e iniciais (como no Acrobat).
+pub fn fill_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
+    let mut out = None;
+    if doc.edit.tool != Tool::Fill {
+        doc.edit.fill.tool = None; // Esc ou outra ferramenta
+    }
+    ui.horizontal(|ui| {
+        let current = doc.edit.fill.tool;
+        let mut pick = |ui: &mut egui::Ui, label: &str, tip: &str, tool: FillTool| {
+            let active = current == Some(tool);
+            if ui
+                .add(egui::Button::selectable(active, label))
+                .on_hover_text(tip)
+                .clicked()
+            {
+                doc.edit.set_fill_tool((!active).then_some(tool));
+            }
+        };
+        pick(
+            ui,
+            "Ab Adicionar texto",
+            "Clique onde o texto deve começar",
+            FillTool::Text,
+        );
+        for (label, tip, mark) in [
+            ("✕", "Xis", Mark::Cross),
+            ("✓", "Visto", Mark::Check),
+            ("○", "Círculo", Mark::Circle),
+            ("—", "Linha", Mark::Line),
+            ("•", "Ponto", Mark::Dot),
+        ] {
+            pick(ui, label, tip, FillTool::Mark(mark));
+        }
+        ui.separator();
+        text_size_buttons(ui, doc);
+        ui.separator();
+        sign_menu(ui, doc);
+        ui.separator();
+        let can_edit = !doc.edit.saving;
+        let can_undo = can_edit && doc.is_dirty();
+        button(ui, &mut out, "⮪", Command::Doc(DocCommand::Undo), can_undo);
+        button(ui, &mut out, "⮫", Command::Doc(DocCommand::Redo), can_edit);
+    });
+    out
+}
+
+/// A−/A+: muda o texto selecionado (e o tamanho dos próximos), em passos de 2 pt.
+fn text_size_buttons(ui: &mut egui::Ui, doc: &mut DocTab) {
+    for (label, tip, grow) in [
+        ("A−", "Diminuir texto", false),
+        ("A+", "Aumentar texto", true),
+    ] {
+        if !ui.button(label).on_hover_text(tip).clicked() {
+            continue;
+        }
+        let selected = doc.edit.selected.and_then(|(page, id)| {
+            doc.annots
+                .iter()
+                .find(|a| a.page == page && a.id == id && a.kind == AnnotKind::TextBox)
+        });
+        match selected {
+            Some(a) => {
+                let (size, color) = a.font.unwrap_or((fs::TEXT_SIZE, [0.0; 3]));
+                let size = fs::step_text_size(size, grow);
+                doc.edit.fill.text_size = size;
+                doc.edit.push_op(AnnotOp::Font {
+                    page: a.page,
+                    id: a.id,
+                    size,
+                    color,
+                });
+            }
+            None => doc.edit.fill.text_size = fs::step_text_size(doc.edit.fill.text_size, grow),
+        }
+    }
+}
+
+/// Menu Assinar: a assinatura e as iniciais guardadas (clique para colocar), criar ou trocar, e
+/// apagar o que está guardado.
+fn sign_menu(ui: &mut egui::Ui, doc: &mut DocTab) {
+    let active = matches!(
+        doc.edit.fill.tool,
+        Some(FillTool::Signature | FillTool::Initials)
+    );
+    let button = egui::Button::selectable(active, "🖊 Assinar ⏷");
+    egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
+        for (initials, name) in [(false, "assinatura"), (true, "iniciais")] {
+            let has = with_saved(|s| s.get(initials).is_some());
+            if has {
+                let (r, resp) =
+                    ui.allocate_exact_size(egui::vec2(180.0, 44.0), egui::Sense::click());
+                ui.painter().rect_filled(r, 4.0, egui::Color32::WHITE);
+                with_saved(|s| {
+                    if let Some(saved) = s.get(initials) {
+                        paint_saved(ui.painter(), saved, r.shrink(6.0), egui::Color32::BLACK);
+                    }
+                });
+                if resp.on_hover_text(format!("Colocar {name}")).clicked() {
+                    doc.edit.set_fill_tool(Some(if initials {
+                        FillTool::Initials
+                    } else {
+                        FillTool::Signature
+                    }));
+                    ui.close();
+                }
+            }
+            let label = match (has, initials) {
+                (false, false) => "Adicionar assinatura…",
+                (false, true) => "Adicionar iniciais…",
+                (true, false) => "Alterar assinatura…",
+                (true, true) => "Alterar iniciais…",
+            };
+            if ui.button(label).clicked() {
+                doc.edit.open_signature_dialog(initials, None);
+                ui.close();
+            }
+            ui.separator();
+        }
+        let any = with_saved(|s| s.signature.is_some() || s.initials.is_some());
+        if ui
+            .add_enabled(
+                any,
+                egui::Button::new("Apagar assinatura e iniciais guardadas"),
+            )
+            .clicked()
+        {
+            for initials in [false, true] {
+                if let Some(Saved::Image { file }) = with_saved(|s| s.get(initials).cloned()) {
+                    let _ = std::fs::remove_file(file);
+                }
+                if let Err(e) = store_saved(initials, None) {
+                    doc.status = format!("Não foi possível apagar: {e}");
+                }
+            }
+            ui.close();
+        }
+    });
 }
 
 /// Ferramentas de anotação, desfazer e refazer (aparece com "Comentar" ligado).
