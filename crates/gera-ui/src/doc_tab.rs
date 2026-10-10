@@ -482,12 +482,12 @@ impl DocTab {
                     pending,
                     history,
                 } => {
-                    self.security = security;
+                    let was = std::mem::replace(&mut self.security, security);
                     self.history = history;
                     if pending {
                         self.status =
                             "A proteção será aplicada quando o documento for salvo.".into();
-                    } else if security.unlocked {
+                    } else if security.unlocked && was.encrypted && !was.unlocked {
                         self.status =
                             "Documento desbloqueado: todas as permissões liberadas.".into();
                     }
@@ -807,6 +807,10 @@ impl DocTab {
                 ui.label("Senha de permissões:");
                 let r = ui.add(egui::TextEdit::singleline(pw).password(true));
                 let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                // o campo já abre pronto para digitar
+                if pw.is_empty() && !r.has_focus() {
+                    r.request_focus();
+                }
                 ui.horizontal(|ui| {
                     if ui.button("OK").clicked() || enter {
                         done = Some(true);
