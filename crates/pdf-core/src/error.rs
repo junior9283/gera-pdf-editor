@@ -23,6 +23,9 @@ pub enum PdfError {
     Refused(String),
     #[error("assinatura digital: {0}")]
     Signature(String),
+    /// O usuário cancelou a operação longa (ex.: comparar arquivos).
+    #[error("operação cancelada")]
+    Cancelled,
     #[error("erro de arquivo: {0}")]
     Io(#[from] std::io::Error),
 }

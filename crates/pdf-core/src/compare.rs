@@ -1,6 +1,7 @@
 //! Comparar arquivos (como no Acrobat): as diferenças de texto por palavra entre um PDF antigo e um
 //! novo, com as páginas alinhadas aos pares.
 use crate::doc::open_authenticated;
+use crate::edit_text::strip_subset;
 use crate::error::refused;
 use crate::{PdfError, PdfRect, Result};
 use md5::{Digest, Md5};
@@ -152,27 +153,6 @@ pub(crate) struct Side {
     pub images: Vec<ImageAt>,
 }
 
-pub(crate) fn cancelled() -> PdfError {
-    refused("comparação cancelada")
-}
-
-/// Nome da fonte sem o prefixo de subconjunto ("ABCDEF+Helvetica" → "Helvetica").
-fn base_font(name: &str) -> &str {
-    match name.split_once('+') {
-        Some((tag, rest)) if tag.len() == 6 && tag.bytes().all(|b| b.is_ascii_uppercase()) => rest,
-        _ => name,
-    }
-}
-
-fn union(a: PdfRect, b: PdfRect) -> PdfRect {
-    PdfRect {
-        x0: a.x0.min(b.x0),
-        y0: a.y0.min(b.y0),
-        x1: a.x1.max(b.x1),
-        y1: a.y1.max(b.y1),
-    }
-}
-
 /// Se a imagem (largura × altura × componentes) cabe no limite para ser decodificada.
 fn decodable(width: u32, height: u32, components: u8) -> bool {
     u64::from(width)
@@ -219,7 +199,7 @@ pub(crate) fn read_side(
     };
     for (k, &p) in pages.iter().enumerate() {
         if !progress(stage(k as i32 + 1, total)) {
-            return Err(cancelled());
+            return Err(PdfError::Cancelled);
         }
         let tp = doc.load_page(p)?.to_text_page(flags)?;
         for block in tp.blocks() {
@@ -252,7 +232,7 @@ pub(crate) fn read_side(
                     match &mut cur {
                         Some(w) => {
                             w.text.push(c);
-                            w.rect = union(w.rect, r);
+                            w.rect = w.rect.union(&r);
                         }
                         None => {
                             cur = Some(WordAt {
@@ -261,7 +241,7 @@ pub(crate) fn read_side(
                                 style: Style {
                                     font: ch
                                         .font()
-                                        .map(|f| base_font(f.name()).to_owned())
+                                        .map(|f| strip_subset(f.name()).to_owned())
                                         .unwrap_or_default(),
                                     half_points: (ch.size() * 2.0).round() as i32,
                                     argb: ch.argb(),
@@ -295,12 +275,19 @@ pub(crate) fn align_pages(
             .map(|i| ((i < n).then_some(i), (i < m).then_some(i)))
             .collect();
     }
-    let w = |i: usize, j: usize| u64::from(*weights.get(&(i, j)).unwrap_or(&0)) * 2 + 1;
+    // tabela densa: o laço abaixo consulta todas as células
+    let mut dense = vec![0u32; n * m];
+    for (&(i, j), &w) in weights {
+        if i < n && j < m {
+            dense[i * m + j] = w;
+        }
+    }
     let cols = m + 1;
     let mut score = vec![0u64; (n + 1) * cols];
     for i in 1..=n {
         for j in 1..=m {
-            let pair = score[(i - 1) * cols + j - 1] + w(i - 1, j - 1);
+            let w = u64::from(dense[(i - 1) * m + j - 1]) * 2 + 1;
+            let pair = score[(i - 1) * cols + j - 1] + w;
             let up = score[(i - 1) * cols + j];
             let left = score[i * cols + j - 1];
             score[i * cols + j] = pair.max(up).max(left);
@@ -336,7 +323,7 @@ fn merge_lines(rects: impl IntoIterator<Item = PdfRect>) -> Vec<PdfRect> {
                 if (last.y0 - r.y0).abs() < 0.5 * (r.y1 - r.y0).max(1.0)
                     && r.x0 >= last.x0 - 1.0 =>
             {
-                *last = union(*last, r)
+                *last = last.union(&r)
             }
             _ => out.push(r),
         }
@@ -403,17 +390,16 @@ fn diff<T: Eq + std::hash::Hash>(a: &[T], b: &[T]) -> Vec<DiffOp> {
 
 /// Os pares iguais de cada `Equal` (índice antigo, índice novo).
 fn equal_pairs(ops: &[DiffOp]) -> impl Iterator<Item = (usize, usize)> + '_ {
-    ops.iter().flat_map(|op| {
-        let (o, n, len) = match *op {
+    ops.iter()
+        .filter_map(|op| match *op {
             DiffOp::Equal {
                 old_index,
                 new_index,
                 len,
-            } => (old_index, new_index, len),
-            _ => (0, 0, 0),
-        };
-        (0..len).map(move |k| (o + k, n + k))
-    })
+            } => Some((0..len).map(move |k| (old_index + k, new_index + k))),
+            _ => None,
+        })
+        .flatten()
 }
 
 /// Compara os dois arquivos. `progress` devolve `false` para cancelar.
@@ -425,9 +411,11 @@ pub fn compare(
     let old = read_side(&opts.old, images, progress, CompareStage::ReadingOld)?;
     let new = read_side(&opts.new, images, progress, CompareStage::ReadingNew)?;
     if !progress(CompareStage::Diffing) {
-        return Err(cancelled());
+        return Err(PdfError::Cancelled);
     }
-    let text = |s: &Side| s.words.iter().map(|w| w.text.clone()).collect::<Vec<_>>();
+    fn text(s: &Side) -> Vec<&str> {
+        s.words.iter().map(|w| w.text.as_str()).collect()
+    }
     let ops = diff(&text(&old), &text(&new));
     let hashes = |s: &Side| s.images.iter().map(|i| i.hash).collect::<Vec<_>>();
     let image_ops = diff(&hashes(&old), &hashes(&new));
@@ -537,31 +525,31 @@ pub fn compare(
         .iter()
         .filter(|op| !matches!(op, DiffOp::Equal { .. }))
     {
-        let (o, n) = (&old.images[op.old_range()], &new.images[op.new_range()]);
-        // uma de cada lado no mesmo par: substituída; o resto entra ou sai
-        let (mut oi, mut ni) = (o.iter().peekable(), n.iter().peekable());
-        loop {
-            let pair_o = oi.peek().map(|i| old_pair[i.page]);
-            let pair_n = ni.peek().map(|i| new_pair[i.page]);
-            let (kind_text, pair, old_rects, new_rects) = match (pair_o, pair_n) {
-                (Some(a), Some(b)) if a == b => {
-                    let (x, y) = (oi.next().unwrap(), ni.next().unwrap());
-                    ("substituída", a, vec![x.rect], vec![y.rect])
-                }
-                (Some(a), b) if b.is_none_or(|b| a < b) => {
-                    ("excluída", a, vec![oi.next().unwrap().rect], vec![])
-                }
-                (_, Some(b)) => ("inserida", b, vec![], vec![ni.next().unwrap().rect]),
-                _ => break,
-            };
-            changes.push(Change {
-                kind: ChangeKind::Image,
-                pair,
-                old_rects,
-                new_rects,
-                anchor: None,
-                description: format!("Imagem {kind_text}"),
-            });
+        // por par; uma de cada lado, na ordem: substituída; o resto entra ou sai
+        let mut groups: BTreeMap<usize, (Vec<PdfRect>, Vec<PdfRect>)> = BTreeMap::new();
+        for i in &old.images[op.old_range()] {
+            groups.entry(old_pair[i.page]).or_default().0.push(i.rect);
+        }
+        for i in &new.images[op.new_range()] {
+            groups.entry(new_pair[i.page]).or_default().1.push(i.rect);
+        }
+        for (pair, (ol, nl)) in groups {
+            for k in 0..ol.len().max(nl.len()) {
+                let (a, b) = (ol.get(k).copied(), nl.get(k).copied());
+                let what = match (a, b) {
+                    (Some(_), Some(_)) => "substituída",
+                    (Some(_), None) => "excluída",
+                    _ => "inserida",
+                };
+                changes.push(Change {
+                    kind: ChangeKind::Image,
+                    pair,
+                    old_rects: a.into_iter().collect(),
+                    new_rects: b.into_iter().collect(),
+                    anchor: None,
+                    description: format!("Imagem {what}"),
+                });
+            }
         }
     }
 
@@ -635,12 +623,6 @@ mod tests {
         assert!(decodable(2000, 2000, 3));
         assert!(!decodable(5000, 5000, 1));
         assert!(!decodable(u32::MAX, u32::MAX, 4));
-    }
-
-    #[test]
-    fn subset_prefix_is_dropped() {
-        assert_eq!(base_font("ABCDEF+Helvetica"), "Helvetica");
-        assert_eq!(base_font("Abc+X"), "Abc+X");
     }
 
     #[test]

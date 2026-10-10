@@ -1,12 +1,17 @@
 //! Janela "Comparar arquivos" (como no Acrobat): o arquivo antigo e o novo, as páginas de cada um e as
 //! opções; o resultado é um PDF lado a lado aberto numa aba.
-use super::combine::Entry;
+use super::combine::{open_in_tab, Entry, OPEN_IN_TAB};
 use crate::open_dialog::{FileDialogs, Picked};
-use pdf_core::{CompareInput, CompareOptions, CompareStage};
+use pdf_core::{CompareInput, CompareOptions, CompareStage, PdfError};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// Intervalo mínimo entre avisos de progresso (milhares de páginas não inundam a janela).
+const PROGRESS_EVERY: Duration = Duration::from_millis(100);
 
 /// Qual dos dois arquivos.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -30,16 +35,19 @@ impl Pick {
             return Ok(None);
         }
         let total = self.file.as_ref().and_then(|f| f.pages).unwrap_or(0) as usize;
-        let mut out: Vec<i32> = Vec::new();
-        for (a, b) in pdf_core::parse_ranges(text, total)? {
-            for p in a..=b {
-                let p = p as i32 - 1;
-                if !out.contains(&p) {
-                    out.push(p);
-                }
-            }
-        }
-        Ok(Some(out))
+        let mut seen = HashSet::new();
+        let pages = pdf_core::parse_ranges(text, total)?
+            .into_iter()
+            .flat_map(|(a, b)| a..=b)
+            .map(|p| p as i32 - 1)
+            .filter(|p| seen.insert(*p))
+            .collect();
+        Ok(Some(pages))
+    }
+
+    /// Pronto para comparar: arquivo aberto e intervalo válido (sem montar as opções).
+    fn ready(&self) -> bool {
+        self.file.as_ref().is_some_and(Entry::ready) && self.pages().is_ok()
     }
 
     fn input(&self) -> Option<CompareInput> {
@@ -54,7 +62,7 @@ impl Pick {
 
 enum Msg {
     Stage(CompareStage),
-    Done(Result<PathBuf, String>),
+    Done(Result<PathBuf, PdfError>),
 }
 
 struct Job {
@@ -111,6 +119,13 @@ impl CompareWindow {
         }
     }
 
+    fn pick_mut(&mut self, slot: Slot) -> &mut Pick {
+        match slot {
+            Slot::Old => &mut self.old,
+            Slot::New => &mut self.new,
+        }
+    }
+
     pub fn swap(&mut self) {
         std::mem::swap(&mut self.old, &mut self.new);
     }
@@ -144,10 +159,7 @@ impl CompareWindow {
         match self.dialogs.poll() {
             Some(Picked::Open(paths)) => {
                 if let (Some(slot), Some(p)) = (self.picking.take(), paths.into_iter().next()) {
-                    let pick = match slot {
-                        Slot::Old => &mut self.old,
-                        Slot::New => &mut self.new,
-                    };
+                    let pick = self.pick_mut(slot);
                     pick.file = Some(Entry::new(p));
                     pick.range.clear();
                 }
@@ -186,7 +198,7 @@ impl CompareWindow {
                             self.open = false;
                             Some(path)
                         }
-                        Err(e) if e.contains("cancelada") => {
+                        Err(PdfError::Cancelled) => {
                             self.status = "Comparação cancelada.".into();
                             None
                         }
@@ -214,10 +226,7 @@ impl CompareWindow {
 
     fn side(&mut self, ui: &mut egui::Ui, slot: Slot) {
         let busy = self.busy();
-        let pick = match slot {
-            Slot::Old => &mut self.old,
-            Slot::New => &mut self.new,
-        };
+        let pick = self.pick_mut(slot);
         ui.strong(match slot {
             Slot::Old => "Arquivo antigo",
             Slot::New => "Arquivo novo",
@@ -267,10 +276,7 @@ impl CompareWindow {
             self.picking = Some(slot);
             self.dialogs.open(ui.ctx());
         }
-        let pick = match slot {
-            Slot::Old => &mut self.old,
-            Slot::New => &mut self.new,
-        };
+        let pick = self.pick_mut(slot);
         ui.horizontal(|ui| {
             ui.label("Páginas:");
             ui.add_enabled(
@@ -331,13 +337,13 @@ impl CompareWindow {
                 }
             }
             None => {
-                let ready = self.options();
+                let ready = self.old.ready() && self.new.ready();
                 if ui
-                    .add_enabled(ready.is_some(), egui::Button::new("Comparar"))
+                    .add_enabled(ready, egui::Button::new("Comparar"))
                     .clicked()
                 {
-                    if let Some(o) = ready {
-                        self.dialogs.save_to(ui.ctx(), suggested_dest(&o.new.path));
+                    if let Some(f) = &self.new.file {
+                        self.dialogs.save_to(ui.ctx(), suggested_dest(&f.path));
                     }
                 }
             }
@@ -346,10 +352,8 @@ impl CompareWindow {
 
     /// Compara numa thread e grava em `dest` (arquivos grandes não travam a janela).
     pub fn start(&mut self, ctx: &egui::Context, dest: PathBuf) {
-        let same = |p: &PathBuf| p.canonicalize().ok() == dest.canonicalize().ok() || *p == dest;
-        if self.open_docs.iter().any(same) {
-            self.status =
-                "Esse arquivo está aberto numa aba: feche-o ou escolha outro nome.".into();
+        if open_in_tab(&self.open_docs, &dest) {
+            self.status = OPEN_IN_TAB.into();
             return;
         }
         let Some(opts) = self.options() else {
@@ -362,13 +366,16 @@ impl CompareWindow {
         let spawned = std::thread::Builder::new()
             .name("comparar".into())
             .spawn(move || {
+                let mut last: Option<Instant> = None;
                 let r = pdf_core::compare_files(&opts, &dest, &mut |s| {
-                    let _ = tx.send(Msg::Stage(s));
-                    ctx.request_repaint();
+                    if last.is_none_or(|t| t.elapsed() >= PROGRESS_EVERY) {
+                        last = Some(Instant::now());
+                        let _ = tx.send(Msg::Stage(s));
+                        ctx.request_repaint();
+                    }
                     !stop.load(Ordering::Relaxed)
                 })
-                .map(|_| dest)
-                .map_err(|e| e.to_string());
+                .map(|_| dest);
                 let _ = tx.send(Msg::Done(r));
                 ctx.request_repaint();
             });

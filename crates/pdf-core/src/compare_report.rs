@@ -1,19 +1,17 @@
 //! O PDF do resultado da comparação, como o relatório do Acrobat: uma página de resumo e as páginas
 //! lado a lado (antiga à esquerda, nova à direita) com as alterações marcadas. Cada alteração é um
 //! destaque travado (aparece no painel Comentários); do outro lado, a marca vai no conteúdo.
-use crate::compare::{
-    cancelled, compare, Change, ChangeKind, CompareOptions, CompareStage, Comparison,
-};
-use crate::doc::{open_authenticated, rgb};
+use crate::compare::{compare, Change, ChangeKind, CompareOptions, CompareStage, Comparison};
+use crate::doc::{open_authenticated, rgb, write_atomic};
 use crate::error::{refused, Result};
 use crate::page_content::{form_xobject, matrix_ops, mul, num, page_parts, rgb_ops};
-use crate::pages::write_new;
+use crate::pages::same_file;
 use crate::stamp::literal;
 use crate::text_fit::text_width;
-use crate::PdfRect;
+use crate::{PdfError, PdfRect};
 use mupdf::document::Location;
 use mupdf::link::LinkDestination;
-use mupdf::pdf::{AnnotationFlags, PdfDocument, PdfObject};
+use mupdf::pdf::{AnnotationFlags, Encryption, PdfDocument, PdfObject, PdfWriteOptions};
 use mupdf::{Buffer, Font, Matrix, Outline, Rect, Size};
 use std::path::Path;
 
@@ -29,10 +27,6 @@ const CARET: f32 = 1.5;
 const SUMMARY: (f32, f32) = (595.0, 842.0);
 /// Nomes de arquivo mais longos que isto são cortados nos títulos.
 const NAME_CHARS: usize = 60;
-
-fn same_file(a: &Path, b: &Path) -> bool {
-    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
-}
 
 /// Compara e grava o resultado em `dest`.
 pub fn compare_files(
@@ -81,15 +75,42 @@ fn text_at(font: &str, size: f32, gray: f32, x: f32, y: f32, s: &str) -> String 
     )
 }
 
+fn rect_ops(x: f32, y: f32, w: f32, h: f32) -> String {
+    format!("{} {} {} {} re", num(x), num(y), num(w), num(h))
+}
+
+/// Retângulo preenchido com `color` (cada um define a própria cor: nada vaza).
 fn fill_rect(color: [f32; 3], x: f32, y: f32, w: f32, h: f32) -> String {
     format!(
-        "{} {} {} {} {} re f\n",
+        "{} {} f\n",
         rgb_ops(color.map(|c| (c * 255.0).round() as u8)),
-        num(x),
-        num(y),
-        num(w),
-        num(h)
+        rect_ops(x, y, w, h)
     )
+}
+
+/// Contorno de retângulo com `color` e espessura `width`.
+fn stroke_rect(color: [f32; 3], width: f32, x: f32, y: f32, w: f32, h: f32) -> String {
+    let [r, g, b] = color.map(num);
+    format!(
+        "q {r} {g} {b} RG {} w {} S Q\n",
+        num(width),
+        rect_ops(x, y, w, h)
+    )
+}
+
+/// Página nova com os recursos e o conteúdo.
+fn content_page(
+    out: &mut PdfDocument,
+    size: Size,
+    resources: PdfObject,
+    ops: &str,
+) -> Result<mupdf::pdf::PdfPage> {
+    let page = out.new_page(size)?;
+    let mut obj = page.object();
+    obj.dict_put("Resources", resources)?;
+    let contents = out.add_stream(&Buffer::from_bytes(ops.as_bytes())?, None, false)?;
+    obj.dict_put("Contents", contents)?;
+    Ok(page)
 }
 
 /// Um lado do par: a página de origem, o tamanho na tela e onde fica no resultado.
@@ -107,12 +128,7 @@ struct Placed {
 impl Placed {
     /// Da tela da página de origem para a tela do resultado.
     fn rect(&self, r: &PdfRect) -> PdfRect {
-        PdfRect {
-            x0: self.ox + r.x0 - self.bx,
-            y0: self.oy + r.y0 - self.by,
-            x1: self.ox + r.x1 - self.bx,
-            y1: self.oy + r.y1 - self.by,
-        }
+        r.translated(self.ox - self.bx, self.oy - self.by)
     }
 }
 
@@ -149,12 +165,12 @@ pub fn write_comparison(
         by_pair[c.pair].push(c);
     }
 
-    let link = summary_page(&mut out, cmp, &old_name, &new_name, &helv, &bold)?;
+    let link = summary_page(&mut out, cmp, &old_name, &new_name, &helv, &bold, &metrics)?;
     let mut outline = vec![outline_to(0, "Resumo")];
     let total = cmp.pairs.len();
     for (k, &(op, np)) in cmp.pairs.iter().enumerate() {
         if !progress(CompareStage::Writing(k + 1, total)) {
-            return Err(cancelled());
+            return Err(PdfError::Cancelled);
         }
         // tamanho de cada lado na tela; o lado vazio fica do tamanho do outro
         let size = |doc: &PdfDocument, p: Option<i32>| -> Result<Option<Rect>> {
@@ -181,7 +197,7 @@ pub fn write_comparison(
 
         let mut ops = String::new();
         let mut xobjects = out.new_dict()?;
-        for (name, doc, map, page, at, label, missing) in [
+        for (name, doc, map, page, at, label, file, missing) in [
             (
                 "P0",
                 &old,
@@ -189,6 +205,7 @@ pub fn write_comparison(
                 op,
                 &left,
                 "Antigo",
+                &old_name,
                 "Página inserida",
             ),
             (
@@ -198,6 +215,7 @@ pub fn write_comparison(
                 np,
                 &right,
                 "Novo",
+                &new_name,
                 "Página excluída",
             ),
         ] {
@@ -225,19 +243,11 @@ pub fn write_comparison(
                         0.3,
                         x,
                         height - 20.0,
-                        &format!(
-                            "{label} — página {} — {}",
-                            p + 1,
-                            if label == "Antigo" {
-                                &old_name
-                            } else {
-                                &new_name
-                            }
-                        ),
+                        &format!("{label} — página {} — {file}", p + 1),
                     ));
                 }
                 None => {
-                    ops.push_str(&format!("q {}Q\n", fill_rect([0.95; 3], x, y, w, h)));
+                    ops.push_str(&fill_rect([0.95; 3], x, y, w, h));
                     let tw = text_width(&metrics, missing, 14.0)?;
                     ops.push_str(&text_at(
                         "F1",
@@ -250,13 +260,7 @@ pub fn write_comparison(
                     ops.push_str(&text_at("F1", 9.0, 0.3, x, height - 20.0, missing));
                 }
             }
-            ops.push_str(&format!(
-                "q 0.75 G 0.5 w {} {} {} {} re S Q\n",
-                num(x),
-                num(y),
-                num(w),
-                num(h)
-            ));
+            ops.push_str(&stroke_rect([0.75; 3], 0.5, x, y, w, h));
         }
 
         // as marcas do lado sem anotação, por cima do conteúdo
@@ -284,37 +288,22 @@ pub fn write_comparison(
             if c.kind == ChangeKind::Image {
                 for r in marked.iter().chain(&other) {
                     let (x, y, w, h) = pdf_box(r, height);
-                    ops.push_str(&format!(
-                        "q {} {} {} RG 2 w {} {} {} {} re S Q\n",
-                        num(color[0]),
-                        num(color[1]),
-                        num(color[2]),
-                        num(x),
-                        num(y),
-                        num(w),
-                        num(h)
-                    ));
+                    ops.push_str(&stroke_rect(color, 2.0, x, y, w, h));
                 }
             }
             if let Some(a) = &c.anchor {
-                // o acento fica no lado oposto ao das palavras
-                let at = if c.kind == ChangeKind::Inserted {
-                    &left
-                } else {
+                // o acento fica no lado sem palavras
+                let at = if c.new_rects.is_empty() {
                     &right
+                } else {
+                    &left
                 };
-                let r = at.rect(a);
-                let (x, y, _, h) = pdf_box(&r, height);
-                ops.push_str(&format!(
-                    "q {}Q\n",
-                    fill_rect(color, x - CARET / 2.0, y, CARET, h)
-                ));
+                let (x, y, _, h) = pdf_box(&at.rect(a), height);
+                ops.push_str(&fill_rect(color, x - CARET / 2.0, y, CARET, h));
             }
             annots.push((c, marked));
         }
 
-        let mut page = out.new_page(Size { width, height })?;
-        let mut obj = page.object();
         let mut fonts = out.new_dict()?;
         fonts.dict_put("F1", helv.clone())?;
         let mut gs = out.new_dict()?;
@@ -323,9 +312,7 @@ pub fn write_comparison(
         res.dict_put("Font", fonts)?;
         res.dict_put("XObject", xobjects)?;
         res.dict_put("ExtGState", gs)?;
-        obj.dict_put("Resources", res)?;
-        let contents = out.add_stream(&Buffer::from_bytes(ops.as_bytes())?, None, false)?;
-        obj.dict_put("Contents", contents)?;
+        let mut page = content_page(&mut out, Size { width, height }, res, &ops)?;
         for (c, rects) in annots {
             let quads = rects
                 .iter()
@@ -362,7 +349,10 @@ pub fn write_comparison(
     info.dict_put("GeraCompare", PdfObject::new_bool(true))?;
     let info = out.add_object(&info)?;
     out.trailer()?.dict_put("Info", info)?;
-    write_new(&out, dest)
+    // comprimido: o conteúdo das páginas copiadas entra descomprimido no formulário
+    let mut w = PdfWriteOptions::default();
+    w.set_encryption(Encryption::None).set_compress(true);
+    write_atomic(&out, dest, w)
 }
 
 fn outline_to(page: u32, title: &str) -> Outline {
@@ -389,6 +379,7 @@ fn summary_page(
     new_name: &str,
     helv: &PdfObject,
     bold: &PdfObject,
+    metrics: &Font,
 ) -> Result<Option<([f32; 4], i32)>> {
     let (w, h) = SUMMARY;
     let x = 56.0;
@@ -431,10 +422,7 @@ fn summary_page(
         y -= 30.0;
         for kind in ChangeKind::ALL {
             let n = cmp.changes.iter().filter(|c| c.kind == kind).count();
-            ops.push_str(&format!(
-                "q {}Q\n",
-                fill_rect(kind.tint(), x, y - 2.0, 12.0, 12.0)
-            ));
+            ops.push_str(&fill_rect(kind.tint(), x, y - 2.0, 12.0, 12.0));
             ops.push_str(&text_at(
                 "F1",
                 11.0,
@@ -458,7 +446,7 @@ fn summary_page(
         ));
         y -= 32.0;
         let label = "Ir para a primeira alteração";
-        let lw = text_width(&Font::new("Helvetica")?, label, 11.0)?;
+        let lw = text_width(metrics, label, 11.0)?;
         ops.push_str(&format!(
             "BT /F1 11 Tf 0.1 0.35 0.8 rg {} {} Td ({}) Tj ET q 0.1 0.35 0.8 RG 0.75 w {} {} m {} {} l S Q\n",
             num(x),
@@ -480,19 +468,20 @@ fn summary_page(
         56.0,
         "Antigo à esquerda, novo à direita. A lista das alterações está no painel Comentários.",
     ));
-    let page = out.new_page(Size {
-        width: w,
-        height: h,
-    })?;
-    let mut obj = page.object();
     let mut fonts = out.new_dict()?;
     fonts.dict_put("F1", helv.clone())?;
     fonts.dict_put("F2", bold.clone())?;
     let mut res = out.new_dict()?;
     res.dict_put("Font", fonts)?;
-    obj.dict_put("Resources", res)?;
-    let contents = out.add_stream(&Buffer::from_bytes(ops.as_bytes())?, None, false)?;
-    obj.dict_put("Contents", contents)?;
+    content_page(
+        out,
+        Size {
+            width: w,
+            height: h,
+        },
+        res,
+        &ops,
+    )?;
     Ok(link)
 }
 

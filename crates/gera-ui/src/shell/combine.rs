@@ -1,7 +1,7 @@
 //! Janela "Combinar arquivos" (como no Acrobat): lista de PDFs para juntar num só, na ordem.
 use crate::open_dialog::{FileDialogs, Picked};
 use pdf_core::{PdfDoc, PdfError};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 /// Um arquivo da lista.
@@ -54,6 +54,17 @@ impl Entry {
     pub fn ready(&self) -> bool {
         self.pages.is_some()
     }
+}
+
+/// Aviso quando o destino escolhido está aberto numa aba.
+pub const OPEN_IN_TAB: &str = "Esse arquivo está aberto numa aba: feche-o ou escolha outro nome.";
+
+/// `dest` é um dos documentos abertos nas abas?
+pub fn open_in_tab(open_docs: &[PathBuf], dest: &Path) -> bool {
+    let dest_c = dest.canonicalize().ok();
+    open_docs
+        .iter()
+        .any(|p| p == dest || (dest_c.is_some() && p.canonicalize().ok() == dest_c))
 }
 
 /// Tamanho legível ("850 KB", "1,2 MB").
@@ -226,10 +237,8 @@ impl CombineWindow {
 
     /// Combina numa thread (arquivos grandes não travam a janela).
     fn start(&mut self, ctx: &egui::Context, dest: PathBuf) {
-        let same = |p: &PathBuf| p.canonicalize().ok() == dest.canonicalize().ok() || *p == dest;
-        if self.open_docs.iter().any(same) {
-            self.status =
-                "Esse arquivo está aberto numa aba: feche-o ou escolha outro nome.".into();
+        if open_in_tab(&self.open_docs, &dest) {
+            self.status = OPEN_IN_TAB.into();
             return;
         }
         let inputs: Vec<(PathBuf, Option<String>)> = self

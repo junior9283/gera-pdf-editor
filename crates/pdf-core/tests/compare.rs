@@ -189,7 +189,7 @@ fn cancelling_stops_the_comparison() {
     let dir = tempfile::tempdir().unwrap();
     let a = text_pdf(dir.path(), "a.pdf", &[pg(&["a"])], 0);
     let r = compare(&opts(&a, &a), &mut |_| false);
-    assert!(matches!(r, Err(PdfError::Refused(_))), "{r:?}");
+    assert!(matches!(r, Err(PdfError::Cancelled)), "{r:?}");
 }
 
 #[test]

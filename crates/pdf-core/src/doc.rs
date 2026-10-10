@@ -1199,16 +1199,14 @@ impl PdfDoc {
 
     /// Se o documento é um resultado do Comparar arquivos.
     fn is_comparison(&self) -> bool {
-        let flag = || -> Result<bool> {
-            Ok(match self.inner.trailer()?.get_dict("Info")? {
-                Some(info) => match info.get_dict("GeraCompare")? {
-                    Some(v) => v.as_bool()?,
-                    None => false,
-                },
-                None => false,
-            })
-        };
-        flag().unwrap_or(false)
+        let info = self
+            .inner
+            .trailer()
+            .ok()
+            .and_then(|t| t.get_dict("Info").ok().flatten());
+        info.and_then(|i| i.get_dict("GeraCompare").ok().flatten())
+            .and_then(|v| v.as_bool().ok())
+            .unwrap_or(false)
     }
 }
 

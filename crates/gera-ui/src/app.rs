@@ -900,13 +900,15 @@ impl eframe::App for GeraApp {
         if let Some(merged) = self.combine.show(ui) {
             self.open_path(ui.ctx(), merged);
         }
-        self.compare.open_docs = self.combine.open_docs.clone();
-        self.compare.dirty_docs = self
-            .docs
-            .iter()
-            .filter(|d| d.is_dirty())
-            .map(|d| d.path.clone())
-            .collect();
+        if self.compare.open {
+            self.compare.open_docs = self.docs.iter().map(|d| d.path.clone()).collect();
+            self.compare.dirty_docs = self
+                .docs
+                .iter()
+                .filter(|d| d.is_dirty())
+                .map(|d| d.path.clone())
+                .collect();
+        }
         if let Some(result) = self.compare.show(ui) {
             // a aba do resultado abre com a linha Comparação (o PDF diz que é uma comparação)
             self.open_path(ui.ctx(), result);
