@@ -58,6 +58,9 @@ pub struct PdfDoc {
     pub(crate) owner_unlocked: bool,
     /// Proteção a aplicar no próximo Salvar (`Some(None)`: remover a segurança).
     pub(crate) pending_protection: Option<Option<crate::security::Protection>>,
+    /// Números dos objetos das fontes que o Editar texto acrescentou nesta sessão: só elas são
+    /// reaproveitadas; nada do arquivo é confiado como "fonte do app".
+    pub(crate) added_fonts: Vec<i32>,
 }
 
 /// Abre o arquivo e, se for protegido, autentica com `password`.
@@ -86,6 +89,7 @@ impl PdfDoc {
             signed_on_disk: false,
             owner_unlocked: false,
             pending_protection: None,
+            added_fonts: Vec::new(),
         };
         doc.signed_on_disk = doc.has_signatures().unwrap_or(false);
         // abrir digitando a senha de permissões libera tudo (como no Acrobat)
@@ -127,6 +131,19 @@ impl PdfDoc {
                 Err(e)
             }
         }
+    }
+
+    /// Roda `edit` na página com as recusas de alteração; em erro o documento volta como
+    /// estava, e em sucesso o desfazer ganha o instantâneo de antes.
+    pub(crate) fn guarded_page_edit(
+        &mut self,
+        page: i32,
+        action: &str,
+        edit: impl FnOnce(&mut Self) -> Result<()>,
+    ) -> Result<()> {
+        self.require_modifiable(action)?;
+        self.check_page(page)?;
+        self.with_snapshot(edit)
     }
 
     /// Recusa alterar o conteúdo de um documento assinado (`action` invalidaria as assinaturas)
@@ -1048,6 +1065,7 @@ impl PdfDoc {
         Ok(Snapshot {
             bytes,
             hidden: self.history.hidden.clone(),
+            added_fonts: self.added_fonts.clone(),
         })
     }
 
@@ -1055,6 +1073,7 @@ impl PdfDoc {
     pub(crate) fn restore(&mut self, snap: &Snapshot) -> Result<()> {
         self.inner = reopen(&snap.bytes, self.password.as_deref())?;
         self.history.hidden = snap.hidden.clone();
+        self.added_fonts = snap.added_fonts.clone();
         Ok(())
     }
 

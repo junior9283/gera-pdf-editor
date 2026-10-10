@@ -271,17 +271,30 @@ impl DocTab {
 
     /// Confirma o texto que está sendo digitado num campo (antes de salvar ou imprimir).
     /// Devolve se havia o que gravar.
+    /// Confirma o que está sendo digitado (campo de formulário, texto do Editar PDF) antes de gravar,
+    /// imprimir ou desfazer: o worker atende em ordem. Devolve se havia o que confirmar.
     fn commit_field(&mut self) -> bool {
-        match self.form.commit() {
+        let field = match self.form.commit() {
             Some(crate::fields::FieldAction::Set { page, id, value }) => {
                 self.worker.send(Request::SetField { page, id, value });
                 true
             }
             _ => false,
-        }
+        };
+        let text = self.edit_pdf.commit().map(|action| {
+            send_edit_action(&self.worker, &mut self.status, action);
+        });
+        field || text.is_some()
     }
 
     pub fn run(&mut self, ctx: &egui::Context, cmd: DocCommand) {
+        if matches!(cmd, DocCommand::Undo | DocCommand::Redo) && self.commit_field() {
+            // o texto em edição entra no histórico; desfazer o tira (como no Acrobat)
+            if cmd == DocCommand::Undo {
+                self.worker.send(Request::Undo);
+            }
+            return;
+        }
         let page = self.last.current_page;
         let Some(view) = self.view.as_mut() else {
             return;
@@ -322,7 +335,7 @@ impl DocTab {
             }
             DocCommand::Delete if self.edit_pdf_tools => {
                 if let Some(action) = self.edit_pdf.delete_selected() {
-                    send_image_action(&self.worker, &mut self.status, action);
+                    send_edit_action(&self.worker, &mut self.status, action);
                 }
             }
             DocCommand::Delete => self.edit.delete_selected(),
@@ -766,6 +779,9 @@ impl DocTab {
                     self.status = format!("Não foi possível fazer a alteração: {msg}");
                 }
                 Response::PageImages { page, images } => self.edit_pdf.on_images(page, images),
+                Response::PageTextBlocks { page, blocks } => {
+                    self.edit_pdf.on_text_blocks(page, blocks)
+                }
             }
         }
     }
@@ -1278,14 +1294,16 @@ impl DocTab {
         self.prepare.set_tool(None);
         self.prepare.selected = None;
         self.edit_pdf_tools = id == tc::EDIT_PDF;
-        self.edit_pdf.reset();
+        if let Some(action) = self.edit_pdf.reset() {
+            send_edit_action(&self.worker, &mut self.status, action);
+        }
         self.edit.set_fill_tool(None);
     }
 
     /// Editar PDF: aplica `edit` à imagem selecionada.
     pub(crate) fn edit_image(&mut self, edit: pdf_core::ImageEdit) {
         if let Some(action) = self.edit_pdf.edit_selected(edit) {
-            send_image_action(&self.worker, &mut self.status, action);
+            send_edit_action(&self.worker, &mut self.status, action);
         }
     }
 
@@ -1773,17 +1791,13 @@ impl DocTab {
                     return;
                 };
                 match target {
-                    Some((page, name)) => send_image_action(
-                        &self.worker,
-                        &mut self.status,
-                        crate::edit_pdf::ImageAction::Edit {
-                            page,
-                            name,
-                            edit: pdf_core::ImageEdit::Replace { path },
-                        },
-                    ),
+                    Some((page, name)) => self.worker.send(Request::EditImage {
+                        page,
+                        name,
+                        edit: pdf_core::ImageEdit::Replace { path },
+                    }),
                     None => {
-                        self.edit_pdf.placing = Some(path);
+                        self.edit_pdf.placing = Some(crate::edit_pdf::Placing::Image(path));
                         self.status =
                             "Clique na página para colocar a imagem (Esc cancela).".into();
                     }
@@ -1888,7 +1902,7 @@ impl DocTab {
         let (form, fields) = (&mut self.form, &self.fields);
         let (prepare, preparing) = (&mut self.prepare, self.prepare_tools);
         let (edit_pdf, editing_pdf) = (&mut self.edit_pdf, self.edit_pdf_tools);
-        let mut image_actions = Vec::new();
+        let mut edit_actions = Vec::new();
         let signing = self.cert_tools && self.cert.placing;
         let cert = &mut self.cert;
         let mut sign_at = None;
@@ -1920,8 +1934,8 @@ impl DocTab {
                             return;
                         }
                         if editing_pdf {
-                            // Editar PDF: só as imagens (sem comentários nem campos)
-                            image_actions.extend(crate::edit_pdf::on_page(
+                            // Editar PDF: só o texto e as imagens (sem comentários nem campos)
+                            edit_actions.extend(crate::edit_pdf::on_page(
                                 ui,
                                 edit_pdf,
                                 worker,
@@ -1973,8 +1987,8 @@ impl DocTab {
         for op in prepare_ops {
             self.worker.send(Request::Prepare(op));
         }
-        for action in image_actions {
-            send_image_action(&self.worker, &mut self.status, action);
+        for action in edit_actions {
+            send_edit_action(&self.worker, &mut self.status, action);
         }
         if let Some((page, id)) = open_props {
             self.prepare.props_for = Some((page, id));
@@ -2089,16 +2103,10 @@ impl Drop for DocTab {
 }
 
 /// Editar PDF: a edição vai ao worker; os avisos, para a barra de status.
-fn send_image_action(worker: &Worker, status: &mut String, action: crate::edit_pdf::ImageAction) {
-    use crate::edit_pdf::ImageAction;
+fn send_edit_action(worker: &Worker, status: &mut String, action: crate::edit_pdf::EditAction) {
     match action {
-        ImageAction::Edit { page, name, edit } => {
-            worker.send(Request::EditImage { page, name, edit })
-        }
-        ImageAction::Add { page, path, center } => {
-            worker.send(Request::AddImage { page, path, center })
-        }
-        ImageAction::Notice(msg) => *status = msg,
+        crate::edit_pdf::EditAction::Send(request) => worker.send(request),
+        crate::edit_pdf::EditAction::Notice(msg) => *status = msg,
     }
 }
 
@@ -2136,6 +2144,26 @@ mod tests {
             b.scroll_id(),
             "rolar uma aba não pode mover a outra"
         );
+    }
+
+    #[test]
+    fn saving_or_undoing_first_commits_the_text_being_edited() {
+        let ctx = egui::Context::default();
+        let mut tab = DocTab::new(&ctx, PathBuf::from("/a.pdf"), false);
+        tab.edit_pdf.on_text_blocks(
+            0,
+            vec![pdf_core::PageTextBlock {
+                rect: pdf_core::PdfRect::new(10.0, 10.0, 90.0, 25.0),
+                text: "Olá".into(),
+                size: 12.0,
+                color: [0, 0, 0],
+                font: "Helvetica".into(),
+            }],
+        );
+        tab.edit_pdf.click(0, (50.0, 18.0));
+        tab.edit_pdf.editing.as_mut().unwrap().buffer = "Oi".into();
+        assert!(tab.commit_field(), "o texto em edição vai antes de gravar");
+        assert!(tab.edit_pdf.editing.is_none());
     }
 
     #[test]

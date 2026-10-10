@@ -155,12 +155,21 @@ pub fn prepare_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     out
 }
 
-/// Linha do Editar PDF: acrescentar, girar, substituir e excluir imagens, desfazer/refazer e
-/// Fechar.
+/// Linha do Editar PDF: acrescentar texto e imagens, girar, substituir e excluir imagens,
+/// desfazer/refazer e Fechar.
 pub fn edit_pdf_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     let mut out = None;
     ui.horizontal(|ui| {
-        let placing = doc.edit_pdf.placing.is_some();
+        use crate::edit_pdf::Placing;
+        let adding = matches!(doc.edit_pdf.placing, Some(Placing::Text));
+        if ui
+            .add(egui::Button::selectable(adding, "T Adicionar texto"))
+            .on_hover_text("Clique na página onde o texto deve começar")
+            .clicked()
+        {
+            doc.edit_pdf.placing = (!adding).then_some(Placing::Text);
+        }
+        let placing = matches!(doc.edit_pdf.placing, Some(Placing::Image(_)));
         if ui
             .add(egui::Button::selectable(placing, "🖼 Adicionar imagem"))
             .on_hover_text("Escolha a imagem e clique na página para colocá-la")

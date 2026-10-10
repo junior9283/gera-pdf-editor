@@ -114,6 +114,22 @@ pub enum Request {
         path: PathBuf,
         center: (f32, f32),
     },
+    /// Blocos de texto da página (Editar PDF).
+    PageTextBlocks {
+        page: i32,
+    },
+    /// Editar PDF: troca o texto do bloco de caixa `rect` (vazio apaga).
+    EditTextBlock {
+        page: i32,
+        rect: crate::PdfRect,
+        text: String,
+    },
+    /// Editar PDF: acrescenta texto com o canto superior esquerdo em `at` (pontos da página).
+    AddText {
+        page: i32,
+        at: (f32, f32),
+        text: String,
+    },
     /// Organizar páginas (girar, excluir, mover, inserir, substituir, recortar).
     Pages(PageOp),
     /// Divide o documento em arquivos na pasta `dir`; o documento não muda.
@@ -252,6 +268,11 @@ pub enum Response {
     PageImages {
         page: i32,
         images: Vec<crate::PageImage>,
+    },
+    /// Blocos de texto de uma página (vazio se não deu para ler).
+    PageTextBlocks {
+        page: i32,
+        blocks: Vec<crate::PageTextBlock>,
     },
     /// Propriedades de um campo (Preparar formulário).
     FieldProps {
@@ -454,6 +475,20 @@ impl State {
             }),
             Request::AddImage { page, path, center } => self.edit(send, |d| {
                 d.add_image(page, &path, center)
+                    .map(|()| Changed::Pages(vec![page]))
+            }),
+            Request::PageTextBlocks { page } => send(Response::PageTextBlocks {
+                page,
+                blocks: self
+                    .with_doc(|d| d.page_text_blocks(page))
+                    .unwrap_or_default(),
+            }),
+            Request::EditTextBlock { page, rect, text } => self.edit(send, |d| {
+                d.edit_text_block(page, rect, &text)
+                    .map(|()| Changed::Pages(vec![page]))
+            }),
+            Request::AddText { page, at, text } => self.edit(send, |d| {
+                d.add_text(page, at, &text)
                     .map(|()| Changed::Pages(vec![page]))
             }),
             Request::Pages(op) => {

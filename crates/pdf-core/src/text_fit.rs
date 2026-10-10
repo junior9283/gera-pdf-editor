@@ -6,7 +6,7 @@ use crate::types::PdfRect;
 use mupdf::Font;
 
 /// Altura de uma linha em relação ao tamanho da fonte (a mesma do MuPDF).
-const LINE_HEIGHT: f32 = 1.2;
+pub(crate) const LINE_HEIGHT: f32 = 1.2;
 
 /// Largura do texto em pontos, na fonte e no tamanho dados.
 pub(crate) fn text_width(font: &Font, s: &str, size: f32) -> Result<f32> {

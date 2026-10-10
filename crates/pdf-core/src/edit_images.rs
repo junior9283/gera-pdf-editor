@@ -8,6 +8,7 @@
 use crate::create_export::{oriented, UprightImage};
 use crate::doc::PdfDoc;
 use crate::error::{refused, Result};
+use crate::page_content::{invert, num, own_resource};
 use crate::types::PdfRect;
 use mupdf::pdf::{PdfDocument, PdfObject};
 use mupdf::text_page::TextBlockType;
@@ -51,11 +52,6 @@ fn mul(a: &Matrix, b: &Matrix) -> Matrix {
     let mut m = a.clone();
     m.concat(b.clone());
     m
-}
-
-fn invert(m: &Matrix) -> Result<Matrix> {
-    m.invert()
-        .ok_or_else(|| refused("imagem com transformação inválida"))
 }
 
 /// Caixa do quadrado unitário pela matriz.
@@ -408,25 +404,6 @@ fn xobject_kind(xobjects: Option<&PdfObject>, name: &[u8]) -> Result<Option<Vec<
     Ok(x.get_dict("Subtype")?.and_then(|s| s.as_name().ok()))
 }
 
-/// O /XObject próprio da página, para acrescentar ou tirar imagens: os recursos (herdados ou de
-/// outras páginas) são copiados, para não mudar as outras páginas.
-fn own_xobjects(doc: &PdfDocument, page_obj: &mut PdfObject) -> Result<PdfObject> {
-    let copy = |o: Option<PdfObject>| -> Result<PdfObject> {
-        Ok(match o {
-            Some(d) if d.is_dict()? => d.copy_dict()?,
-            _ => doc.new_dict()?,
-        })
-    };
-    let mut res = copy(page_obj.get_dict_inheritable("Resources")?)?;
-    let xobjects = copy(res.get_dict("XObject")?)?;
-    res.dict_put("XObject", xobjects)?;
-    page_obj.dict_put("Resources", res)?;
-    Ok(page_obj
-        .get_dict("Resources")?
-        .and_then(|r| r.get_dict("XObject").ok().flatten())
-        .expect("acabou de ser posto"))
-}
-
 /// Acrescenta a imagem do arquivo aos recursos da página com um nome livre; devolve o nome.
 fn add_xobject(
     doc: &mut PdfDocument,
@@ -434,24 +411,13 @@ fn add_xobject(
     up: &UprightImage,
 ) -> Result<String> {
     let image = doc.add_image(&up.img)?;
-    let mut xobjects = own_xobjects(doc, page_obj)?;
+    let mut xobjects = own_resource(doc, page_obj, "XObject")?;
     let name = (0..)
         .map(|n| format!("GeraIm{n}"))
         .find(|n| xobjects.get_dict(n.as_str()).ok().flatten().is_none())
         .expect("sempre há um nome livre");
     xobjects.dict_put(name.as_str(), image)?;
     Ok(name)
-}
-
-/// Número para o conteúdo da página: até 6 casas, sem zeros sobrando.
-fn num(v: f32) -> String {
-    let s = format!("{v:.6}");
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s == "-0" {
-        "0".into()
-    } else {
-        s.into()
-    }
 }
 
 /// Com espaço dos dois lados: o vizinho pode estar colado (`cm/Im0 Do`, válido no PDF).
@@ -537,19 +503,6 @@ impl PdfDoc {
         })
     }
 
-    /// Roda `edit` na página com as recusas de alteração; em erro o documento volta como
-    /// estava, e em sucesso o desfazer ganha o instantâneo de antes.
-    fn guarded_page_edit(
-        &mut self,
-        page: i32,
-        action: &str,
-        edit: impl FnOnce(&mut Self) -> Result<()>,
-    ) -> Result<()> {
-        self.require_modifiable(action)?;
-        self.check_page(page)?;
-        self.with_snapshot(edit)
-    }
-
     fn apply_image_edit(&mut self, page: i32, name: &str, edit: ImageEdit) -> Result<()> {
         let mut page_obj = self.inner.find_page(page)?;
         let to_screen = page_obj.page_ctm()?;
@@ -617,7 +570,7 @@ impl PdfDoc {
         page_obj.dict_put("Contents", stream)?;
         if new_name != name {
             // excluída ou substituída: a imagem antiga sai dos recursos (e do arquivo, ao salvar)
-            own_xobjects(&self.inner, &mut page_obj)?.dict_delete(name)?;
+            own_resource(&self.inner, &mut page_obj, "XObject")?.dict_delete(name)?;
         }
         Ok(())
     }

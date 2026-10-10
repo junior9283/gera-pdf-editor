@@ -79,7 +79,7 @@ const fn tool(
 #[rustfmt::skip]
 pub const CATALOG: &[ToolEntry] = &[
     tool(CREATE, "Criar PDF", "📄", CreateEdit, Ready, "PDF a partir de imagens"),
-    tool(EDIT_PDF, "Editar PDF", "✏", CreateEdit, Ready, "Mover, redimensionar e trocar imagens"),
+    tool(EDIT_PDF, "Editar PDF", "✏", CreateEdit, Ready, "Editar texto e imagens"),
     tool(EXPORT, "Exportar PDF", "📤", CreateEdit, Ready, "Converter para Word, texto ou imagens"),
     tool(OCR, "Digitalizar e OCR", "🔎", CreateEdit, Ready, "Reconhecer texto em páginas escaneadas"),
     tool(COMBINE, "Combinar arquivos", "🗐", CreateEdit, Ready, "Juntar vários PDFs em um"),
