@@ -45,8 +45,9 @@ pub struct PrepareState {
     place: Option<Placing>,
     /// Grupo dos botões de opção colocados enquanto a ferramenta segue ativa.
     radio_group: Option<String>,
-    /// Campo recém-criado a selecionar quando a lista de campos chegar: (página, nome).
-    pub pending_select: Option<(i32, String)>,
+    /// Campo recém-criado a selecionar quando a lista de campos chegar: (página, ids que a página
+    /// já tinha — o novo é o que aparecer).
+    pub pending_select: Option<(i32, Vec<i32>)>,
     /// Janela Propriedades aberta (ou esperando as propriedades do worker).
     pub props: Option<FieldPropsWindow>,
     /// Propriedades pedidas ao worker para este campo.
@@ -70,11 +71,10 @@ impl PrepareState {
 
     /// A lista de campos chegou: seleciona o recém-criado.
     pub fn on_fields(&mut self, fields: &[FieldInfo]) {
-        if let Some((page, name)) = self.pending_select.take() {
+        if let Some((page, before)) = self.pending_select.take() {
             self.selected = fields
                 .iter()
-                .rev()
-                .find(|f| f.page == page && f.name == name)
+                .find(|f| f.page == page && !before.contains(&f.id))
                 .map(|f| (f.page, f.id));
         }
         if let Some((p, id)) = self.selected {
@@ -141,15 +141,17 @@ pub fn on_page(
                 None
             };
             if let Some((from, to)) = finished {
-                let names = fields.iter().map(|f| f.name.as_str());
+                // o nome automático é do pdf-core (cliques rápidos não repetem nome); o grupo de
+                // opção é escolhido aqui para os próximos botões entrarem nele
                 let name = if kind == NewFieldKind::Radio {
+                    let names = fields.iter().map(|f| f.name.as_str());
                     st.radio_group
                         .get_or_insert_with(|| next_name(kind, names))
                         .clone()
                 } else {
-                    next_name(kind, names)
+                    String::new()
                 };
-                st.pending_select = Some((page, name.clone()));
+                st.pending_select = Some((page, on_page.iter().map(|f| f.id).collect()));
                 ops.push(PrepareOp::Add {
                     page,
                     rect: placed_rect(kind, from, to),
@@ -275,8 +277,9 @@ mod tests {
 
     #[test]
     fn a_new_field_is_selected_when_the_list_arrives() {
+        // antes do campo novo havia só o 1: o que aparecer na página é o novo
         let mut st = PrepareState {
-            pending_select: Some((0, "Texto2".into())),
+            pending_select: Some((0, vec![1])),
             ..Default::default()
         };
         let field = |id, name: &str| FieldInfo {

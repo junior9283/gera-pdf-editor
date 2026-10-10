@@ -195,7 +195,6 @@ fn bad_or_repeated_names_are_refused() {
         .add_field(0, r(140.0), NewFieldKind::Text, "Nome")
         .is_err());
     assert!(d.add_field(0, r(140.0), NewFieldKind::Text, "a.b").is_err());
-    assert!(d.add_field(0, r(140.0), NewFieldKind::Text, "  ").is_err());
     let id = d
         .add_field(0, r(180.0), NewFieldKind::Text, "Outro")
         .unwrap();
@@ -322,4 +321,167 @@ fn a_broken_field_does_not_block_new_ones() {
         .recv_timeout(std::time::Duration::from_secs(10))
         .expect("travou");
     assert!(ok, "campo novo criado apesar do campo defeituoso");
+}
+
+/// Formulário de amostra com o campo "nome" pendurado num nó "endereco" (nome completo
+/// "endereco.nome"), como os formulários de outros programas.
+fn hierarchical() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("h.pdf");
+    std::fs::write(&path, pdf_core::sample::form_pdf()).unwrap();
+    let mut doc = mupdf::pdf::PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let mut fields = doc
+        .catalog()
+        .unwrap()
+        .get_dict("AcroForm")
+        .unwrap()
+        .unwrap()
+        .get_dict("Fields")
+        .unwrap()
+        .unwrap();
+    let nome = fields.get_array(0).unwrap().unwrap();
+    let parent = doc
+        .add_object(&doc.new_object_from_str("<</T(endereco)/Kids[]>>").unwrap())
+        .unwrap();
+    parent
+        .get_dict("Kids")
+        .unwrap()
+        .unwrap()
+        .array_push(nome.clone())
+        .unwrap();
+    let mut n = nome.clone();
+    n.dict_put("Parent", parent.clone()).unwrap();
+    fields.array_put(0, parent).unwrap();
+    doc.save(path.to_str().unwrap()).unwrap();
+    (dir, path)
+}
+
+#[test]
+fn hierarchical_fields_keep_their_properties_editable() {
+    let (_dir, path) = hierarchical();
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let f = by_name(&d.fields(0).unwrap(), "endereco.nome").clone();
+    let mut p = d.field_props(0, f.id).unwrap();
+    assert_eq!(p.name, "nome", "Propriedades mostram o nome do nó");
+    p.tooltip = "Rua".into();
+    d.set_field_props(0, f.id, &p).unwrap();
+    assert_eq!(
+        by_name(&d.fields(0).unwrap(), "endereco.nome").tooltip,
+        "Rua"
+    );
+    assert!(
+        d.add_field(0, r(300.0), NewFieldKind::Text, "endereco")
+            .is_err(),
+        "nome já é um nó"
+    );
+}
+
+#[test]
+fn ok_in_properties_keeps_the_typed_value_and_the_font() {
+    let (_d, _p, mut d) = doc();
+    let id = d
+        .add_field(0, r(100.0), NewFieldKind::Text, "Nome")
+        .unwrap();
+    d.set_field(0, id, "João").unwrap();
+    let mut p = d.field_props(0, id).unwrap();
+    p.tooltip = "Seu nome".into();
+    d.set_field_props(0, id, &p).unwrap();
+    assert_eq!(by_name(&d.fields(0).unwrap(), "Nome").value, "João");
+    // fonte de outro programa: só o tamanho muda, e só se mudou
+    let dir = tempfile::tempdir().unwrap();
+    let s = String::from_utf8(pdf_core::sample::form_pdf())
+        .unwrap()
+        .replace(
+            "/DA (/Helv 12 Tf 0 g) /P 3 0 R /F 4",
+            "/DA (/TiRo 9 Tf 1 0 0 rg) /P 3 0 R /F 4",
+        );
+    assert!(s.contains("/TiRo"));
+    let p2 = dir.path().join("tiro.pdf");
+    std::fs::write(&p2, s.as_bytes()).unwrap();
+    let mut d = PdfDoc::open(&p2, None).unwrap();
+    let f = by_name(&d.fields(0).unwrap(), "nome").clone();
+    let mut p = d.field_props(0, f.id).unwrap();
+    assert_eq!(p.font_size, 9.0);
+    p.tooltip = "x".into();
+    d.set_field_props(0, f.id, &p).unwrap();
+    p.font_size = 11.0;
+    d.set_field_props(0, f.id, &p).unwrap();
+    d.save(&p2).unwrap();
+    let b = std::fs::read(&p2).unwrap();
+    assert!(
+        b.windows(19).any(|w| w == b"/TiRo 11 Tf 1 0 0 r"),
+        "fonte e cor mantidas"
+    );
+}
+
+#[test]
+fn merged_radio_from_another_program_does_not_crash() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("m.pdf");
+    // "aceito" vira um botão de opção mesclado (campo e widget no mesmo objeto, sem /Kids)
+    let s = String::from_utf8(pdf_core::sample::form_pdf()).unwrap();
+    let s = s.replacen("/T (aceito)", "/Ff 49152 /T (aceito)", 1);
+    std::fs::write(&path, s).unwrap();
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let r = d.add_field(
+        0,
+        PdfRect::new(400.0, 400.0, 414.0, 414.0),
+        NewFieldKind::Radio,
+        "aceito",
+    );
+    assert!(r.is_err(), "recusado com aviso, sem derrubar o worker");
+}
+
+#[test]
+fn xfa_is_dropped_when_the_form_is_edited() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("x.pdf");
+    let s = String::from_utf8(pdf_core::sample::form_pdf())
+        .unwrap()
+        .replacen("/AcroForm <<", "/AcroForm << /XFA (x)", 1);
+    std::fs::write(&path, s).unwrap();
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    d.add_field(0, r(400.0), NewFieldKind::Text, "Novo")
+        .unwrap();
+    assert!(!d.form_notes().unwrap().xfa);
+}
+
+#[test]
+fn an_empty_name_gets_the_next_automatic_one() {
+    let (_d, _p, mut d) = doc();
+    d.add_field(0, r(100.0), NewFieldKind::Text, "").unwrap();
+    d.add_field(0, r(140.0), NewFieldKind::Text, "").unwrap();
+    let names: Vec<_> = d.fields(0).unwrap().into_iter().map(|f| f.name).collect();
+    assert_eq!(names, ["Texto1", "Texto2"]);
+}
+
+#[test]
+fn editing_one_radio_keeps_the_group_default() {
+    let (_d, _p, mut d) = doc();
+    let a = d
+        .add_field(
+            0,
+            PdfRect::new(100.0, 100.0, 114.0, 114.0),
+            NewFieldKind::Radio,
+            "G",
+        )
+        .unwrap();
+    let b = d
+        .add_field(
+            0,
+            PdfRect::new(200.0, 100.0, 214.0, 114.0),
+            NewFieldKind::Radio,
+            "G",
+        )
+        .unwrap();
+    let mut pa = d.field_props(0, a).unwrap();
+    pa.checked_default = true;
+    d.set_field_props(0, a, &pa).unwrap();
+    let mut pb = d.field_props(0, b).unwrap();
+    pb.tooltip = "segunda".into();
+    d.set_field_props(0, b, &pb).unwrap();
+    assert!(
+        d.field_props(0, a).unwrap().checked_default,
+        "o padrão do grupo continua"
+    );
 }

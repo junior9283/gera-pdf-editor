@@ -6,7 +6,7 @@ use crate::error::{PdfError, Result};
 use crate::forms::{field_head, kids_of, on_state, options_of};
 use crate::types::PdfRect;
 use mupdf::pdf::{PdfAnnotationType, PdfDocument, PdfObject, PdfWidget};
-use mupdf::{Buffer, Matrix, Rect};
+use mupdf::{Buffer, Rect};
 
 /// Tipo do campo a criar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -17,6 +17,20 @@ pub enum NewFieldKind {
     Combo,
     List,
     Signature,
+}
+
+impl NewFieldKind {
+    /// Prefixo do nome automático ("Texto1", "Caixa1"…).
+    pub fn prefix(self) -> &'static str {
+        match self {
+            Self::Text => "Texto",
+            Self::Checkbox => "Caixa",
+            Self::Radio => "Grupo",
+            Self::Combo => "Lista suspensa",
+            Self::List => "Lista",
+            Self::Signature => "Assinatura",
+        }
+    }
 }
 
 /// Uma alteração do Preparar formulário (pelo worker).
@@ -162,6 +176,9 @@ fn acroform(doc: &mut PdfDocument) -> Result<PdfObject> {
     if acro.get_dict("Fields")?.is_none() {
         acro.dict_put("Fields", doc.new_array()?)?;
     }
+    // com XFA, o Acrobat desenha pelo modelo XFA e o campo novo ficaria invisível: editar o
+    // formulário o torna um AcroForm comum (como o pdf.js e o pdf-lib fazem)
+    acro.dict_delete("XFA")?;
     if acro.get_dict("DA")?.is_none() {
         acro.dict_put("DA", PdfObject::new_string("/Helv 0 Tf 0 g")?)?;
     }
@@ -169,14 +186,16 @@ fn acroform(doc: &mut PdfDocument) -> Result<PdfObject> {
         Some(dr) => dr,
         None => {
             acro.dict_put("DR", doc.new_dict()?)?;
-            acro.get_dict("DR")?.expect("acabou de ser posto")
+            acro.get_dict("DR")?
+                .ok_or_else(|| invalid("/AcroForm inválido"))?
         }
     };
     let mut fonts = match dr.get_dict("Font")? {
         Some(f) => f,
         None => {
             dr.dict_put("Font", doc.new_dict()?)?;
-            dr.get_dict("Font")?.expect("acabou de ser posto")
+            dr.get_dict("Font")?
+                .ok_or_else(|| invalid("/DR inválido"))?
         }
     };
     for (key, base, enc) in [
@@ -193,41 +212,68 @@ fn acroform(doc: &mut PdfDocument) -> Result<PdfObject> {
     Ok(acro)
 }
 
-/// Aparências "ligado" (símbolo ZapfDingbats `glyph`) e "Off" (vazia) de uma caixa ou botão de
-/// opção. A /Matrix contra-gira a rotação da página, como os campos do Acrobat (/MK /R).
-fn button_ap(
-    doc: &mut PdfDocument,
-    w: f32,
-    h: f32,
-    rotation: i32,
-    state: &str,
-    glyph: char,
-) -> Result<PdfObject> {
-    // em pé na tela: numa página girada a caixa da aparência tem os lados trocados
-    let (bw, bh) = if rotation % 180 == 0 { (w, h) } else { (h, w) };
-    let size = bw.min(bh) * 0.8;
-    // larguras do ZapfDingbats: ✔ ("4") 0,846 em; ● ("l") 0,791 em
-    let glyph_w = if glyph == '4' { 0.846 } else { 0.791 } * size;
-    let (x, y) = ((bw - glyph_w) / 2.0, (bh - size * 0.7) / 2.0);
-    let m = Matrix::new_rotate(rotation as f32);
-    let mut make = |ops: &str| -> Result<PdfObject> {
-        let dict = doc.new_object_from_str(&format!(
-            "<</Type/XObject/Subtype/Form/BBox[0 0 {bw} {bh}]/Matrix[{} {} {} {} 0 0]\
-             /Resources<</Font<</ZaDb<</Type/Font/Subtype/Type1/BaseFont/ZapfDingbats>>>>>>>>",
-            m.a, m.b, m.c, m.d
-        ))?;
-        Ok(doc.add_stream(&Buffer::from_bytes(ops.as_bytes())?, Some(&dict), false)?)
-    };
-    let on = make(&format!(
-        "q 0 g BT /ZaDb {size:.2} Tf {x:.2} {y:.2} Td ({glyph}) Tj ET Q"
-    ))?;
-    let off = make("")?;
+/// /AP com os nomes dos estados ("ligado" e "Off") de uma caixa ou botão de opção. O desenho é do
+/// MuPDF (a partir de /MK /CA, já em pé na página girada por /MK /R); aqui só ficam os nomes.
+fn state_ap(doc: &mut PdfDocument, state: &str) -> Result<PdfObject> {
     let mut normal = doc.new_dict()?;
-    normal.dict_put(state, on)?;
-    normal.dict_put("Off", off)?;
+    for key in [state, "Off"] {
+        let empty = doc.new_object_from_str("<</Type/XObject/Subtype/Form/BBox[0 0 1 1]>>")?;
+        normal.dict_put(
+            key,
+            doc.add_stream(&Buffer::from_bytes(b"")?, Some(&empty), false)?,
+        )?;
+    }
     let mut ap = doc.new_dict()?;
     ap.dict_put("N", normal)?;
     Ok(ap)
+}
+
+/// /Fields do /AcroForm.
+fn fields_of(acro: &PdfObject) -> Result<PdfObject> {
+    acro.get_dict("Fields")?
+        .filter(|f| f.is_array().unwrap_or(false))
+        .ok_or_else(|| invalid("/AcroForm sem /Fields válido"))
+}
+
+/// /Kids de um grupo de botões de opção.
+fn kids_array(head: &PdfObject) -> Result<PdfObject> {
+    head.get_dict("Kids")?
+        .ok_or_else(|| invalid("grupo de opção de outro programa sem /Kids: crie outro grupo"))
+}
+
+/// Nome parcial (/T) do nó do campo.
+fn partial_name(head: &PdfObject) -> Result<String> {
+    Ok(head
+        .get_dict("T")?
+        .map(|t| t.as_string())
+        .transpose()?
+        .unwrap_or_default())
+}
+
+/// /DA com o tamanho da fonte trocado (o resto — fonte e cor — fica).
+fn with_da_size(da: &str, size: f32) -> String {
+    let mut words: Vec<String> = da.split_whitespace().map(str::to_owned).collect();
+    match words.iter().position(|w| w == "Tf") {
+        Some(i) if i > 0 => {
+            words[i - 1] = format!("{size}");
+            words.join(" ")
+        }
+        _ => format!("/Helv {size} Tf 0 g"),
+    }
+}
+
+/// Troca o nome de um estado em /AP /N (valor de exportação).
+fn rename_state(obj: &mut PdfObject, old: &str, new: &str) -> Result<()> {
+    if let Some(mut normal) = obj
+        .get_dict("AP")?
+        .and_then(|ap| ap.get_dict("N").ok().flatten())
+    {
+        if let Some(stream) = normal.get_dict(old)? {
+            normal.dict_put(new, stream)?;
+            normal.dict_delete(old)?;
+        }
+    }
+    Ok(())
 }
 
 /// Estado novo para o próximo botão do grupo: "Opção1", "Opção2"… sem repetir.
@@ -256,6 +302,39 @@ impl PdfDoc {
                 Err(e)
             }
         }
+    }
+
+    /// Nomes completos de todos os campos (inclusive ocultos e de outros programas).
+    fn field_names(&self) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        for p in 0..self.page_count()? {
+            for w in self.inner.load_pdf_page(p)?.widgets() {
+                if let Some(n) = w.name().ok().flatten() {
+                    out.push(n);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Primeiro nome automático livre do tipo ("Texto1", "Texto2"…).
+    fn auto_name(&self, kind: NewFieldKind) -> Result<String> {
+        let taken = self.field_names()?;
+        let p = kind.prefix();
+        Ok((1..)
+            .map(|n| format!("{p}{n}"))
+            .find(|n| {
+                !taken
+                    .iter()
+                    .any(|t| t == n || t.starts_with(&format!("{n}.")))
+            })
+            .expect("sequência infinita"))
+    }
+
+    /// `name` já é o nó pai de outros campos ("a" com "a.b" existindo)?
+    fn is_node(&self, name: &str) -> Result<bool> {
+        let prefix = format!("{name}.");
+        Ok(self.field_names()?.iter().any(|n| n.starts_with(&prefix)))
     }
 
     /// Cabeça (nó com /T) do campo de nome `name`, se existir.
@@ -299,10 +378,23 @@ impl PdfDoc {
         name: &str,
     ) -> Result<i32> {
         self.check_page(page)?;
-        let name = valid_name(name)?;
+        // sem nome: o próximo automático (cliques rápidos não repetem nome)
+        let auto;
+        let name = if name.trim().is_empty() {
+            auto = self.auto_name(kind)?;
+            auto.as_str()
+        } else {
+            valid_name(name)?
+        };
+        if self.is_node(name)? {
+            return Err(invalid("já existe um grupo de campos com esse nome"));
+        }
         let group = match (self.field_named(name)?, kind) {
             (None, _) => None,
-            (Some(head), NewFieldKind::Radio) if flags_of(&head)? & RADIO != 0 => Some(head),
+            (Some(head), NewFieldKind::Radio) if flags_of(&head)? & RADIO != 0 => {
+                kids_array(&head)?; // botão "mesclado" de outro programa: não dá para crescer
+                Some(head)
+            }
             (Some(_), _) => return Err(invalid("já existe um campo com esse nome")),
         };
         self.edit_form(|d| d.create_field(page, rect, kind, name, group))
@@ -325,12 +417,15 @@ impl PdfDoc {
         let me = self.inner.new_indirect(id, 0)?;
         let mut w = annot.object();
         w.dict_put("F", int(4)?)?; // imprimir
-        w.dict_put("DA", PdfObject::new_string("/Helv 0 Tf 0 g")?)?;
+        let font = match kind {
+            NewFieldKind::Checkbox | NewFieldKind::Radio => "ZaDb",
+            _ => "Helv",
+        };
+        w.dict_put("DA", PdfObject::new_string(&format!("/{font} 0 Tf 0 g"))?)?;
         let mut mk = self.inner.new_dict()?;
         if rotation != 0 {
             mk.dict_put("R", int(rotation)?)?;
         }
-        let (rw, rh) = (rect.width(), rect.height());
         // o nó do campo: o próprio widget, ou o grupo de botões de opção
         let head_is_widget = kind != NewFieldKind::Radio;
         match kind {
@@ -343,36 +438,19 @@ impl PdfDoc {
                 w.dict_put("V", name_obj("Off")?)?;
                 w.dict_put("AS", name_obj("Off")?)?;
                 mk.dict_put("CA", PdfObject::new_string("4")?)?;
-                let ap = button_ap(&mut self.inner, rw, rh, rotation, CHECK_ON, '4')?;
-                w.dict_put("AP", ap)?;
+                w.dict_put("AP", state_ap(&mut self.inner, CHECK_ON)?)?;
             }
             NewFieldKind::Radio => {
                 let head = match group {
                     Some(g) => g,
-                    None => {
-                        let g =
-                            self.inner
-                                .add_object(&self.inner.new_object_from_str(&format!(
-                                    "<</FT/Btn/Ff {}/V/Off/Kids[]>>",
-                                    RADIO | NO_TOGGLE_TO_OFF
-                                ))?)?;
-                        let mut g2 = g.clone();
-                        g2.dict_put("T", PdfObject::new_string(name)?)?;
-                        acro.get_dict("Fields")?
-                            .expect("acroform() garante /Fields")
-                            .array_push(g.clone())?;
-                        g
-                    }
+                    None => self.new_radio_group(&acro, name, RADIO | NO_TOGGLE_TO_OFF)?,
                 };
                 let state = next_choice(&head)?;
                 w.dict_put("Parent", head.clone())?;
                 w.dict_put("AS", name_obj("Off")?)?;
                 mk.dict_put("CA", PdfObject::new_string("l")?)?;
-                let ap = button_ap(&mut self.inner, rw, rh, rotation, &state, 'l')?;
-                w.dict_put("AP", ap)?;
-                head.get_dict("Kids")?
-                    .expect("grupo tem /Kids")
-                    .array_push(me.clone())?;
+                w.dict_put("AP", state_ap(&mut self.inner, &state)?)?;
+                kids_array(&head)?.array_push(me.clone())?;
             }
             NewFieldKind::Combo | NewFieldKind::List => {
                 w.dict_put("FT", name_obj("Ch")?)?;
@@ -387,14 +465,24 @@ impl PdfDoc {
         w.dict_put("MK", mk)?;
         if head_is_widget {
             w.dict_put("T", PdfObject::new_string(name)?)?;
-            acro.get_dict("Fields")?
-                .expect("acroform() garante /Fields")
-                .array_push(me)?;
+            fields_of(&acro)?.array_push(me)?;
         }
         annot.update()?;
         page_ref.update()?;
         self.refresh_widgets(page)?;
         Ok(id)
+    }
+
+    /// Grupo novo de botões de opção, em /Fields.
+    fn new_radio_group(&mut self, acro: &PdfObject, name: &str, flags: i32) -> Result<PdfObject> {
+        let mut g = self.inner.add_object(
+            &self
+                .inner
+                .new_object_from_str(&format!("<</FT/Btn/Ff {flags}/V/Off/Kids[]>>"))?,
+        )?;
+        g.dict_put("T", PdfObject::new_string(name)?)?;
+        fields_of(acro)?.array_push(g.clone())?;
+        Ok(g)
     }
 
     /// Aplica uma alteração do Preparar formulário.
@@ -437,7 +525,7 @@ impl PdfDoc {
         };
         let default = text(head.get_dict("DV")?)?;
         Ok(FieldProps {
-            name: w.name()?.unwrap_or_default(),
+            name: partial_name(&head)?,
             tooltip: text(head.get_dict("TU")?)?,
             required: flags & REQUIRED != 0,
             readonly: flags & READ_ONLY != 0,
@@ -458,20 +546,30 @@ impl PdfDoc {
         })
     }
 
-    /// Troca as propriedades do campo `id` (desfazer volta tudo).
+    /// Troca as propriedades do campo `id` (desfazer volta tudo). O nome é o do nó (/T): num campo
+    /// "endereco.rua", só "rua".
     pub fn set_field_props(&mut self, page: i32, id: i32, p: &FieldProps) -> Result<()> {
         let w = self.widget(page, id)?;
-        let obj = w.annotation().object();
-        let head = field_head(&obj)?;
+        let head = field_head(&w.annotation().object())?;
         let radio = flags_of(&head)? & RADIO != 0;
         let name = valid_name(&p.name)?.to_owned();
-        let current = w.name()?.unwrap_or_default();
-        let target = if name == current {
+        let partial = partial_name(&head)?;
+        let full = w.name().ok().flatten().unwrap_or_default();
+        // "endereco.rua" → prefixo "endereco."
+        let prefix = full.strip_suffix(partial.as_str()).unwrap_or_default();
+        let target = if name == partial {
             None
         } else {
-            match self.field_named(&name)? {
+            let new_full = format!("{prefix}{name}");
+            if self.is_node(&new_full)? {
+                return Err(invalid("já existe um grupo de campos com esse nome"));
+            }
+            match self.field_named(&new_full)? {
                 None => Some(None),
-                Some(g) if radio && flags_of(&g)? & RADIO != 0 => Some(Some(g)),
+                Some(g) if radio && flags_of(&g)? & RADIO != 0 => {
+                    kids_array(&g)?;
+                    Some(Some(g))
+                }
                 Some(_) => return Err(invalid("já existe um campo com esse nome")),
             }
         };
@@ -491,39 +589,14 @@ impl PdfDoc {
         name: &str,
         target: Option<Option<PdfObject>>,
     ) -> Result<()> {
+        let before = self.field_props(page, id)?;
         let w = self.widget(page, id)?;
         let mut obj = w.annotation().object();
         let mut head = field_head(&obj)?;
         let radio = flags_of(&head)? & RADIO != 0;
         match target {
             // botão de opção trocado de grupo: sai do atual (que some se ficar vazio) e entra no outro
-            Some(group) if radio => {
-                let old = head.clone();
-                remove_ref(&mut old.get_dict("Kids")?.expect("grupo tem /Kids"), id)?;
-                if old.get_dict("Kids")?.map_or(Ok(0), |k| k.len())? == 0 {
-                    self.unlink_field(&old)?;
-                }
-                head =
-                    match group {
-                        Some(g) => g,
-                        None => {
-                            let acro = acroform(&mut self.inner)?;
-                            let g = self.inner.add_object(&self.inner.new_object_from_str(
-                                &format!("<</FT/Btn/Ff {}/V/Off/Kids[]>>", flags_of(&old)?),
-                            )?)?;
-                            let mut g2 = g.clone();
-                            g2.dict_put("T", PdfObject::new_string(name)?)?;
-                            acro.get_dict("Fields")?
-                                .expect("acroform() garante /Fields")
-                                .array_push(g.clone())?;
-                            g
-                        }
-                    };
-                obj.dict_put("Parent", head.clone())?;
-                head.get_dict("Kids")?
-                    .expect("grupo tem /Kids")
-                    .array_push(self.inner.new_indirect(id, 0)?)?;
-            }
+            Some(group) if radio => head = self.move_to_group(&mut obj, &head, id, name, group)?,
             Some(_) => head.dict_put("T", PdfObject::new_string(name)?)?,
             None => {}
         }
@@ -540,11 +613,16 @@ impl PdfDoc {
         } else {
             head.dict_put("TU", PdfObject::new_string(&p.tooltip)?)?;
         }
-        let size = if p.font_size > 0.0 { p.font_size } else { 0.0 };
-        obj.dict_put(
-            "DA",
-            PdfObject::new_string(&format!("/Helv {size} Tf 0 g"))?,
-        )?;
+        // só o tamanho muda, e só se mudou: fonte e cor de outro programa ficam
+        if p.font_size != before.font_size {
+            let da = obj
+                .get_dict_inheritable("DA")?
+                .map(|d| d.as_string())
+                .transpose()?
+                .unwrap_or_default();
+            let da = with_da_size(&da, p.font_size.max(0.0));
+            obj.dict_put("DA", PdfObject::new_string(&da)?)?;
+        }
         match ft.as_slice() {
             b"Tx" => {
                 set_flag(&mut flags, MULTILINE, p.multiline);
@@ -553,31 +631,100 @@ impl PdfDoc {
                     Some(n) if n > 0 => head.dict_put("MaxLen", int(n as i32)?)?,
                     _ => head.dict_delete("MaxLen")?,
                 }
-                head.dict_put("DV", PdfObject::new_string(&p.default)?)?;
-                head.dict_put("V", PdfObject::new_string(&p.default)?)?;
+                // o valor preenchido só é trocado quando o padrão muda (como no Acrobat)
+                if p.default != before.default {
+                    head.dict_put("DV", PdfObject::new_string(&p.default)?)?;
+                    head.dict_put("V", PdfObject::new_string(&p.default)?)?;
+                }
             }
             b"Ch" => {
                 if flags & COMBO != 0 {
                     set_flag(&mut flags, EDIT, p.editable);
                 }
-                let mut opt = self.inner.new_array()?;
-                for (export, label) in &p.options {
-                    if export == label || label.is_empty() {
-                        opt.array_push(PdfObject::new_string(export)?)?;
-                    } else {
-                        let mut pair = self.inner.new_array()?;
-                        pair.array_push(PdfObject::new_string(export)?)?;
-                        pair.array_push(PdfObject::new_string(label)?)?;
-                        opt.array_push(pair)?;
-                    }
+                if p.options != before.options {
+                    self.write_options(&mut head, &p.options)?;
                 }
-                head.dict_put("Opt", opt)?;
             }
             b"Btn" => self.write_export(&mut obj, &mut head, p)?,
             _ => {}
         }
         head.dict_put("Ff", int(flags)?)?;
         self.refresh_widgets(page)
+    }
+
+    /// Botão de opção `id` sai do grupo atual (que some se ficar vazio; o valor dele deixa de
+    /// apontar para o botão) e entra em `group` (ou num grupo novo `name`), com um estado que não
+    /// colida com os de lá. Devolve o grupo de destino.
+    fn move_to_group(
+        &mut self,
+        obj: &mut PdfObject,
+        old: &PdfObject,
+        id: i32,
+        name: &str,
+        group: Option<PdfObject>,
+    ) -> Result<PdfObject> {
+        let state = on_state(obj)?;
+        remove_ref(&mut kids_array(old)?, id)?;
+        let mut old = old.clone();
+        let points_here = old
+            .get_dict("V")?
+            .map(|v| v.as_name())
+            .transpose()?
+            .as_deref()
+            == Some(state.as_bytes());
+        if points_here {
+            old.dict_put("V", name_obj("Off")?)?;
+        }
+        if kids_array(&old)?.len()? == 0 {
+            self.unlink_field(&old)?;
+        }
+        let head = match group {
+            Some(g) => g,
+            None => {
+                let acro = acroform(&mut self.inner)?;
+                self.new_radio_group(&acro, name, flags_of(&old)?)?
+            }
+        };
+        let taken: Vec<String> = kids_of(&head)?
+            .iter()
+            .map(on_state)
+            .collect::<Result<_>>()?;
+        if taken.contains(&state) {
+            rename_state(obj, &state, &next_choice(&head)?)?;
+        }
+        obj.dict_put("AS", name_obj("Off")?)?;
+        obj.dict_put("Parent", head.clone())?;
+        kids_array(&head)?.array_push(self.inner.new_indirect(id, 0)?)?;
+        Ok(head)
+    }
+
+    /// Opções da lista; a seleção (/I) é refeita pelo leitor e o valor que sumiu das opções é limpo.
+    fn write_options(&mut self, head: &mut PdfObject, options: &[(String, String)]) -> Result<()> {
+        let mut opt = self.inner.new_array()?;
+        for (export, label) in options {
+            if export == label || label.is_empty() {
+                opt.array_push(PdfObject::new_string(export)?)?;
+            } else {
+                let mut pair = self.inner.new_array()?;
+                pair.array_push(PdfObject::new_string(export)?)?;
+                pair.array_push(PdfObject::new_string(label)?)?;
+                opt.array_push(pair)?;
+            }
+        }
+        head.dict_put("Opt", opt)?;
+        head.dict_delete("I")?;
+        let value = head
+            .get_dict("V")?
+            .filter(|v| v.is_string().unwrap_or(false))
+            .map(|v| v.as_string())
+            .transpose()?;
+        let editable = flags_of(head)? & EDIT != 0;
+        if let Some(v) = value.filter(|v| !v.is_empty()) {
+            if !editable && !options.iter().any(|(e, _)| *e == v) {
+                head.dict_put("V", PdfObject::new_string("")?)?;
+            }
+        }
+        Ok(())
     }
 
     /// Valor de exportação e "marcada por padrão" da caixa ou do botão de opção.
@@ -594,25 +741,18 @@ impl PdfDoc {
             p.export.trim().to_owned()
         };
         if export != old {
-            if let Some(mut normal) = obj
-                .get_dict("AP")?
-                .and_then(|ap| ap.get_dict("N").ok().flatten())
-            {
-                if let Some(stream) = normal.get_dict(old.as_str())? {
-                    normal.dict_put(export.as_str(), stream)?;
-                    normal.dict_delete(old.as_str())?;
-                }
-            }
+            rename_state(obj, &old, &export)?;
         }
-        let on = |v: Option<PdfObject>| -> Result<bool> {
+        let is_old = |v: Option<PdfObject>| -> Result<bool> {
             Ok(v.map(|v| v.as_name()).transpose()?.as_deref() == Some(old.as_bytes()))
         };
         // marcada por padrão liga; senão o valor atual fica (com o nome novo, se mudou)
-        let checked = p.checked_default || on(head.get_dict("V")?)?;
+        let checked = p.checked_default || is_old(head.get_dict("V")?)?;
         let value = if checked { export.as_str() } else { "Off" };
         if p.checked_default {
             head.dict_put("DV", name_obj(&export)?)?;
-        } else {
+        } else if is_old(head.get_dict("DV")?)? {
+            // só o padrão que era deste botão sai (o de outro botão do grupo fica)
             head.dict_delete("DV")?;
         }
         head.dict_put("V", name_obj(value)?)?;
@@ -668,7 +808,7 @@ impl PdfDoc {
             if head.as_indirect()? == id {
                 d.unlink_field(&head)?;
             } else {
-                let mut kids = head.get_dict("Kids")?.expect("pai tem /Kids");
+                let mut kids = kids_array(&head)?;
                 remove_ref(&mut kids, id)?;
                 if kids.len()? == 0 {
                     d.unlink_field(&head)?;

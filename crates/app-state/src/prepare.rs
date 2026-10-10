@@ -3,14 +3,7 @@ use pdf_core::{NewFieldKind, PdfRect};
 
 /// Prefixo do nome automático de cada tipo ("Texto1", "Caixa1"…).
 pub fn prefix(kind: NewFieldKind) -> &'static str {
-    match kind {
-        NewFieldKind::Text => "Texto",
-        NewFieldKind::Checkbox => "Caixa",
-        NewFieldKind::Radio => "Grupo",
-        NewFieldKind::Combo => "Lista suspensa",
-        NewFieldKind::List => "Lista",
-        NewFieldKind::Signature => "Assinatura",
-    }
+    kind.prefix()
 }
 
 /// Rótulo da ferramenta na linha Preparar formulário.
