@@ -45,6 +45,7 @@ pub const COMMENT: &str = "comentar";
 pub const FILL_SIGN: &str = "assinar";
 pub const PREPARE_FORM: &str = "formulario";
 pub const CERTIFICATES: &str = "certificados";
+pub const COMPARE: &str = "comparar";
 pub const PROTECT: &str = "proteger";
 pub const COMPRESS: &str = "comprimir";
 pub const CREATE: &str = "criar";
@@ -89,7 +90,7 @@ pub const CATALOG: &[ToolEntry] = &[
     tool(COMMENT, "Comentar", "💬", Review, Ready, "Destacar, sublinhar, notas e desenho"),
     tool(FILL_SIGN, "Preencher e assinar", "🖊", Review, Ready, "Texto, marcas, assinatura e iniciais"),
     tool(CERTIFICATES, "Certificados", "🔏", Review, Ready, "Assinatura digital com certificado e validação"),
-    tool("comparar", "Comparar arquivos", "⚖", Review, Planned("v5"), "Diferenças entre duas versões"),
+    tool(COMPARE, "Comparar arquivos", "⚖", Review, Ready, "Diferenças entre duas versões"),
     tool(PROTECT, "Proteger PDF", "🔒", Protect, Ready, "Senha e permissões"),
     tool(REDACT, "Redigir", "⬛", Protect, Ready, "Apagar informações sensíveis de vez"),
     tool(COMPRESS, "Comprimir PDF", "⛃", Protect, Ready, "Reduzir o tamanho do arquivo"),
@@ -160,6 +161,7 @@ mod tests {
                 COMMENT,
                 FILL_SIGN,
                 CERTIFICATES,
+                COMPARE,
                 PROTECT,
                 REDACT,
                 COMPRESS,
@@ -173,12 +175,8 @@ mod tests {
             ]
         );
         assert_eq!(find(COMMENT).map(badge).as_deref(), Some(""));
-        assert_eq!(
-            find("comparar").map(badge).as_deref(),
-            Some("Em breve · v5")
-        );
         assert!(find("inexistente").is_none());
-        assert!(CATALOG.iter().all(|t| t.status == Status::Ready
-            || matches!(t.status, Status::Planned(p) if p.starts_with('v'))));
+        // todas as ferramentas do Acrobat prontas: nenhuma "Em breve"
+        assert!(CATALOG.iter().all(|t| t.status == Status::Ready));
     }
 }
