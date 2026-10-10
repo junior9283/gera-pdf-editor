@@ -8,6 +8,14 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 - Comparar arquivos (rumo à 1.0.0).
 
+## [0.11.1] — 2026-10-10 · Correções de segurança da redação
+
+### Corrigido
+- "Aplicar e salvar" só grava depois da confirmação da própria redação (antes, outra operação em
+  andamento podia disparar a gravação).
+- O texto alternativo (/ActualText, /Alt) também sai de formulários dentro de formulários, das
+  propriedades nomeadas deles e da árvore de estrutura (PDF marcado) das páginas redigidas.
+
 ## [0.11.0] — 2026-10-10 · Redigir (v5e)
 
 ### Adicionado
@@ -106,7 +114,8 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 ### Adicionado
 - Visualizador leve: abrir, rolar, zoom, miniaturas, busca, destaque, sublinhado, notas e desenho.
 
-[Não lançado]: https://github.com/junior9283/gera-pdf-editor/compare/v0.11.0...HEAD
+[Não lançado]: https://github.com/junior9283/gera-pdf-editor/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/junior9283/gera-pdf-editor/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/junior9283/gera-pdf-editor/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/junior9283/gera-pdf-editor/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/junior9283/gera-pdf-editor/compare/v0.8.0...v0.9.0
