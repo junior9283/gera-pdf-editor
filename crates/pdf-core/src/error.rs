@@ -34,3 +34,8 @@ impl From<mupdf::Error> for PdfError {
 }
 
 pub type Result<T> = std::result::Result<T, PdfError>;
+
+/// Recusa com o motivo para o usuário.
+pub(crate) fn refused(msg: impl Into<String>) -> PdfError {
+    PdfError::Refused(msg.into())
+}

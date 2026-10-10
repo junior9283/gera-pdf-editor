@@ -36,6 +36,14 @@ impl PdfRect {
         (self.x0..=self.x1).contains(&x) && (self.y0..=self.y1).contains(&y)
     }
 
+    /// Os cantos estão a menos de `tol` dos de `o`.
+    pub fn near(&self, o: &PdfRect, tol: f32) -> bool {
+        (self.x0 - o.x0).abs() < tol
+            && (self.y0 - o.y0).abs() < tol
+            && (self.x1 - o.x1).abs() < tol
+            && (self.y1 - o.y1).abs() < tol
+    }
+
     pub fn intersects(&self, o: &PdfRect) -> bool {
         self.x0 < o.x1 && o.x0 < self.x1 && self.y0 < o.y1 && o.y0 < self.y1
     }

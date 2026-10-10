@@ -3,7 +3,7 @@
 //! reconhecimento é do Tesseract embutido no MuPDF.
 use crate::annot_edit::SNAPSHOT_BUDGET;
 use crate::doc::PdfDoc;
-use crate::error::{PdfError, Result};
+use crate::error::{refused, Result};
 use mupdf::{Buffer, Colorspace, DocumentWriter, Font, Image, Matrix, Rect, TextPageFlags};
 use std::path::{Path, PathBuf};
 
@@ -65,10 +65,6 @@ fn reading_score(words: &[Word]) -> f32 {
 /// Resolução do reconhecimento e o limite de pixels do render.
 const OCR_DPI: f32 = 300.0;
 const MAX_PIXELS: f32 = 16_000_000.0;
-
-fn refused(msg: impl Into<String>) -> PdfError {
-    PdfError::Refused(msg.into())
-}
 
 /// Pasta com os dados de idioma do Tesseract que têm todos os idiomas de `lang`.
 pub fn tessdata_dir(lang: OcrLanguage) -> Option<PathBuf> {

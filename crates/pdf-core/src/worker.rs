@@ -200,7 +200,7 @@ pub enum Response {
         annots: Vec<AnnotInfo>,
         history: HistoryState,
     },
-    AnnotFailed(String),
+    EditFailed(String),
     /// As páginas mudaram (organizar, ou desfazer/refazer de uma operação de página): o resumo
     /// novo do documento inteiro.
     PagesChanged {
@@ -248,12 +248,12 @@ pub enum Response {
     /// Arquivos criados pelo Exportar PDF.
     ExportedTo(Vec<PathBuf>),
     ExportToFailed(String),
-    /// Propriedades de um campo (Preparar formulário).
     /// Imagens de uma página (vazio se não deu para ler).
     PageImages {
         page: i32,
         images: Vec<crate::PageImage>,
     },
+    /// Propriedades de um campo (Preparar formulário).
     FieldProps {
         page: i32,
         id: i32,
@@ -525,7 +525,7 @@ impl State {
         f: impl FnOnce(&mut PdfDoc) -> crate::Result<Changed>,
     ) {
         let Some(d) = self.doc.as_mut() else {
-            send(Response::AnnotFailed(NO_DOC.into()));
+            send(Response::EditFailed(NO_DOC.into()));
             return;
         };
         match f(d) {
@@ -548,7 +548,7 @@ impl State {
                 pages,
                 history: d.history_state(),
             }),
-            Err(e) => send(Response::AnnotFailed(e.to_string())),
+            Err(e) => send(Response::EditFailed(e.to_string())),
         }
     }
 

@@ -9,7 +9,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 /// Arrasto em andamento: mover ou redimensionar a imagem selecionada.
-#[derive(Clone)]
 struct Drag {
     page: i32,
     name: String,
@@ -20,8 +19,23 @@ struct Drag {
 }
 
 impl Drag {
+    fn new(page: i32, img: &PageImage, grab: Option<Handle>, at: (f32, f32)) -> Self {
+        Self {
+            page,
+            name: img.name.clone(),
+            rect: img.rect,
+            grab,
+            from: at,
+            to: at,
+        }
+    }
+
+    fn delta(&self) -> (f32, f32) {
+        (self.to.0 - self.from.0, self.to.1 - self.from.1)
+    }
+
     fn preview(&self) -> PdfRect {
-        let (dx, dy) = (self.to.0 - self.from.0, self.to.1 - self.from.1);
+        let (dx, dy) = self.delta();
         match self.grab {
             None => self.rect.translated(dx, dy),
             Some(h) => {
@@ -33,7 +47,7 @@ impl Drag {
 
     /// A edição que o arrasto pede (nenhuma se nada mudou).
     fn edit(&self) -> Option<ImageEdit> {
-        let (dx, dy) = (self.to.0 - self.from.0, self.to.1 - self.from.1);
+        let (dx, dy) = self.delta();
         if dx.abs() < 0.01 && dy.abs() < 0.01 {
             return None;
         }
@@ -47,7 +61,6 @@ impl Drag {
 }
 
 /// O que a página pede à aba.
-#[derive(Debug, PartialEq)]
 pub enum ImageAction {
     Edit {
         page: i32,
@@ -110,16 +123,31 @@ impl EditPdfState {
         self.drag = None;
     }
 
+    /// Outra ferramenta: nada selecionado nem a colocar.
+    pub fn reset(&mut self) {
+        self.selected = None;
+        self.placing = None;
+    }
+
+    /// Excluir: a imagem selecionada sai (e a seleção com ela).
+    pub fn delete_selected(&mut self) -> Option<ImageAction> {
+        let (page, name) = self.selected.take()?;
+        Some(ImageAction::Edit {
+            page,
+            name,
+            edit: ImageEdit::Delete,
+        })
+    }
+
     /// Esc: solta a imagem a colocar, depois a seleção. Devolve se havia o que soltar.
     pub fn escape(&mut self) -> bool {
         self.placing.take().is_some() || self.selected.take().is_some()
     }
 
-    /// A imagem selecionada e a caixa dela.
-    pub fn selected_image(&self) -> Option<(i32, &PageImage)> {
-        let (page, name) = self.selected.as_ref()?;
-        let img = self.images.get(page)?.iter().find(|i| &i.name == name)?;
-        Some((*page, img))
+    /// A imagem selecionada, se estiver na página.
+    fn selected_on(&self, page: i32) -> Option<&PageImage> {
+        let (p, name) = self.selected.as_ref().filter(|(p, _)| *p == page)?;
+        self.images.get(p)?.iter().find(|i| &i.name == name)
     }
 
     /// A edição pedida para a imagem selecionada.
@@ -139,34 +167,23 @@ impl EditPdfState {
 
     /// Começo de um arrasto em `p`: alça da selecionada, ou o corpo de uma imagem editável.
     fn start_drag(&mut self, page: i32, p: (f32, f32), handle_size: f32) -> Option<ImageAction> {
-        let selected = self
-            .selected_image()
-            .filter(|(sp, _)| *sp == page)
-            .map(|(_, i)| (i.name.clone(), i.rect));
-        if let Some((name, rect)) = &selected {
-            if let Some(h) = handle_at(*rect, p, handle_size) {
-                self.drag = Some(Drag {
-                    page,
-                    name: name.clone(),
-                    rect: *rect,
-                    grab: Some(h),
-                    from: p,
-                    to: p,
-                });
-                return None;
-            }
+        let on_handle = self.selected_on(page).and_then(|i| {
+            Some(Drag::new(
+                page,
+                i,
+                Some(handle_at(i.rect, p, handle_size)?),
+                p,
+            ))
+        });
+        if on_handle.is_some() {
+            self.drag = on_handle;
+            return None;
         }
-        match self.hit(page, p).cloned() {
+        match self.hit(page, p) {
             Some(img) if img.editable => {
-                self.selected = Some((page, img.name.clone()));
-                self.drag = Some(Drag {
-                    page,
-                    name: img.name,
-                    rect: img.rect,
-                    grab: None,
-                    from: p,
-                    to: p,
-                });
+                let drag = Drag::new(page, img, None, p);
+                self.selected = Some((page, drag.name.clone()));
+                self.drag = Some(drag);
                 None
             }
             Some(_) => Some(locked_notice()),
@@ -222,12 +239,10 @@ pub fn on_page(
         .interact_pointer_pos()
         .map(|p| map.to_page(p.into()));
     let handle_size = HANDLE / map.zoom;
-    if let Some(path) = st.placing.clone() {
-        if response.clicked() {
-            if let Some(center) = pointer {
-                st.placing = None;
-                actions.push(ImageAction::Add { page, path, center });
-            }
+    if st.placing.is_some() {
+        if let Some(center) = pointer.filter(|_| response.clicked()) {
+            let path = st.placing.take().expect("conferido acima");
+            actions.push(ImageAction::Add { page, path, center });
         }
         if response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -274,9 +289,8 @@ fn hover_cursor(
         return;
     };
     let on_handle = st
-        .selected_image()
-        .filter(|(sp, _)| *sp == page)
-        .and_then(|(_, i)| handle_at(i.rect, p, handle_size));
+        .selected_on(page)
+        .and_then(|i| handle_at(i.rect, p, handle_size));
     let icon = match on_handle {
         Some(Handle::TopLeft | Handle::BottomRight) => egui::CursorIcon::ResizeNwSe,
         Some(Handle::TopRight | Handle::BottomLeft) => egui::CursorIcon::ResizeNeSw,
@@ -300,7 +314,7 @@ fn paint(painter: &egui::Painter, st: &EditPdfState, page: i32, map: &PageMap) {
             egui::StrokeKind::Outside,
         );
     }
-    let Some((_, img)) = st.selected_image().filter(|(p, _)| *p == page) else {
+    let Some(img) = st.selected_on(page) else {
         return;
     };
     let dragging = st
@@ -310,11 +324,7 @@ fn paint(painter: &egui::Painter, st: &EditPdfState, page: i32, map: &PageMap) {
     let rect = dragging.map_or(img.rect, Drag::preview);
     let r = screen_rect(&rect, map);
     if dragging.is_some() {
-        painter.rect_filled(
-            r,
-            0.0,
-            egui::Color32::from_rgba_unmultiplied(40, 120, 230, 40),
-        );
+        painter.rect_filled(r, 0.0, OUTLINE.gamma_multiply(0.15));
     }
     painter.rect_stroke(
         r,
@@ -323,15 +333,7 @@ fn paint(painter: &egui::Painter, st: &EditPdfState, page: i32, map: &PageMap) {
         egui::StrokeKind::Outside,
     );
     for h in Handle::ALL {
-        let c: egui::Pos2 = map.to_screen(h.point(rect)).into();
-        let square = egui::Rect::from_center_size(c, egui::vec2(8.0, 8.0));
-        painter.rect_filled(square, 0.0, egui::Color32::WHITE);
-        painter.rect_stroke(
-            square,
-            0.0,
-            egui::Stroke::new(1.0, OUTLINE),
-            egui::StrokeKind::Inside,
-        );
+        crate::edit::paint_handle(painter, map.to_screen(h.point(rect)).into(), OUTLINE);
     }
 }
 
@@ -413,5 +415,19 @@ mod tests {
         assert!(st.escape() && st.placing.is_none() && st.selected.is_some());
         assert!(st.escape() && st.selected.is_none());
         assert!(!st.escape());
+    }
+
+    #[test]
+    fn delete_takes_the_selection() {
+        let mut st = state();
+        st.click(0, (50.0, 30.0));
+        assert!(matches!(
+            st.delete_selected(),
+            Some(ImageAction::Edit {
+                edit: ImageEdit::Delete,
+                ..
+            })
+        ));
+        assert!(st.selected.is_none() && st.delete_selected().is_none());
     }
 }

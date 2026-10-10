@@ -321,9 +321,9 @@ impl DocTab {
                 }
             }
             DocCommand::Delete if self.edit_pdf_tools => {
-                let action = self.edit_pdf.edit_selected(pdf_core::ImageEdit::Delete);
-                self.edit_pdf.selected = None;
-                self.image_actions(action);
+                if let Some(action) = self.edit_pdf.delete_selected() {
+                    send_image_action(&self.worker, &mut self.status, action);
+                }
             }
             DocCommand::Delete => self.edit.delete_selected(),
             DocCommand::ZoomIn | DocCommand::ZoomOut | DocCommand::ZoomReset => {
@@ -762,7 +762,7 @@ impl DocTab {
                         many => format!("{} arquivos extraídos", many.len()),
                     };
                 }
-                Response::AnnotFailed(msg) => {
+                Response::EditFailed(msg) => {
                     self.status = format!("Não foi possível fazer a alteração: {msg}");
                 }
                 Response::PageImages { page, images } => self.edit_pdf.on_images(page, images),
@@ -851,54 +851,52 @@ impl DocTab {
     /// Setas movem a anotação selecionada (1 pt; Shift, 10 pt), como no Acrobat.
     fn nudge_selected(&mut self, ctx: &egui::Context) {
         // com a janela de assinatura aberta, as setas são dela; no Preparar, movem o campo; no
-        // Editar PDF, a imagem
-        if self.edit_pdf_tools {
-            let rotation = self
-                .view
-                .as_ref()
-                .map_or_else(Default::default, |v| v.rotation);
-            if let Some((dir, shift)) = arrow_pressed(ctx) {
-                let (dx, dy) = app_state::fill_sign::nudge(dir, shift, rotation);
-                let action = self
-                    .edit_pdf
-                    .edit_selected(pdf_core::ImageEdit::Move { dx, dy });
-                self.image_actions(action);
-            }
+        // Editar PDF, só a imagem
+        let image = self.edit_pdf.selected.is_some();
+        let field = self.prepare.selected.filter(|_| self.prepare_tools);
+        let target = field
+            .or(self.edit.selected)
+            .filter(|_| self.edit.fill.dialog.is_none() && self.prepare.props.is_none());
+        if !(if self.edit_pdf_tools {
+            image
+        } else {
+            target.is_some()
+        }) {
             return;
         }
-        let field = self.prepare.selected.filter(|_| self.prepare_tools);
-        let Some((page, id)) = field
-            .or(self.edit.selected)
-            .filter(|_| self.edit.fill.dialog.is_none() && self.prepare.props.is_none())
-        else {
+        let Some((dir, shift)) = arrow_pressed(ctx) else {
             return;
         };
-        if let Some((dir, shift)) = arrow_pressed(ctx) {
-            let rotation = self
-                .view
-                .as_ref()
-                .map_or_else(Default::default, |v| v.rotation);
-            let (dx, dy) = app_state::fill_sign::nudge(dir, shift, rotation);
-            let rect = field.and_then(|_| {
-                self.fields
-                    .iter()
-                    .find(|f| f.page == page && f.id == id)
-                    .map(|f| f.rect.translated(dx, dy))
-            });
-            match rect {
-                Some(rect) => self
-                    .worker
-                    .send(Request::Prepare(pdf_core::PrepareOp::Move {
-                        page,
-                        id,
-                        rect,
-                    })),
-                None if !self.security.permissions.annotate => self.deny("mover comentários"),
-                None => {
-                    self.worker
-                        .send(Request::Annot(pdf_core::AnnotOp::Move { page, id, dx, dy }))
-                }
-            }
+        let rotation = self
+            .view
+            .as_ref()
+            .map_or_else(Default::default, |v| v.rotation);
+        let (dx, dy) = app_state::fill_sign::nudge(dir, shift, rotation);
+        if self.edit_pdf_tools {
+            self.edit_image(pdf_core::ImageEdit::Move { dx, dy });
+            return;
+        }
+        let Some((page, id)) = target else {
+            return;
+        };
+        let rect = field.and_then(|_| {
+            self.fields
+                .iter()
+                .find(|f| f.page == page && f.id == id)
+                .map(|f| f.rect.translated(dx, dy))
+        });
+        match rect {
+            Some(rect) => self
+                .worker
+                .send(Request::Prepare(pdf_core::PrepareOp::Move {
+                    page,
+                    id,
+                    rect,
+                })),
+            None if !self.security.permissions.annotate => self.deny("mover comentários"),
+            None => self
+                .worker
+                .send(Request::Annot(pdf_core::AnnotOp::Move { page, id, dx, dy })),
         }
     }
 
@@ -1280,24 +1278,15 @@ impl DocTab {
         self.prepare.set_tool(None);
         self.prepare.selected = None;
         self.edit_pdf_tools = id == tc::EDIT_PDF;
-        self.edit_pdf.selected = None;
-        self.edit_pdf.placing = None;
+        self.edit_pdf.reset();
         self.edit.set_fill_tool(None);
     }
 
-    /// Editar PDF: manda a edição de imagem ao worker.
-    fn image_actions(&mut self, action: Option<crate::edit_pdf::ImageAction>) {
-        if let Some(a) = action {
-            send_image_action(&self.worker, &mut self.status, a);
+    /// Editar PDF: aplica `edit` à imagem selecionada.
+    pub(crate) fn edit_image(&mut self, edit: pdf_core::ImageEdit) {
+        if let Some(action) = self.edit_pdf.edit_selected(edit) {
+            send_image_action(&self.worker, &mut self.status, action);
         }
-    }
-
-    /// Editar PDF: gira a imagem selecionada 90°.
-    pub(crate) fn rotate_image(&mut self, clockwise: bool) {
-        let action = self
-            .edit_pdf
-            .edit_selected(pdf_core::ImageEdit::Rotate { clockwise });
-        self.image_actions(action);
     }
 
     /// Editar PDF: escolhe a imagem para substituir a selecionada (`replace`) ou para acrescentar.
@@ -1305,18 +1294,13 @@ impl DocTab {
         if self.files.busy() {
             return;
         }
-        let target = if replace {
-            match self.edit_pdf.selected.clone() {
-                Some(sel) => Some(sel),
-                None => return,
-            }
+        let (target, title) = if replace {
+            let Some(sel) = self.edit_pdf.selected.clone() else {
+                return;
+            };
+            (Some(sel), "Substituir imagem")
         } else {
-            None
-        };
-        let title = if replace {
-            "Substituir imagem"
-        } else {
-            "Adicionar imagem"
+            (None, "Adicionar imagem")
         };
         self.picking = Some(PickFor::Image(target));
         self.files
@@ -1789,11 +1773,15 @@ impl DocTab {
                     return;
                 };
                 match target {
-                    Some((page, name)) => self.worker.send(Request::EditImage {
-                        page,
-                        name,
-                        edit: pdf_core::ImageEdit::Replace { path },
-                    }),
+                    Some((page, name)) => send_image_action(
+                        &self.worker,
+                        &mut self.status,
+                        crate::edit_pdf::ImageAction::Edit {
+                            page,
+                            name,
+                            edit: pdf_core::ImageEdit::Replace { path },
+                        },
+                    ),
                     None => {
                         self.edit_pdf.placing = Some(path);
                         self.status =

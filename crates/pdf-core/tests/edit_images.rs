@@ -106,6 +106,17 @@ fn moving_resizing_rotating_and_deleting_keep_the_rest() {
     assert!(d.page_images(0).unwrap().is_empty());
     assert!(d.page_text(0).unwrap().contains("Texto abaixo"));
     d.save(&path).unwrap();
+    // a imagem excluída não fica escondida no arquivo
+    let raw = std::fs::read(&path).unwrap();
+    assert!(
+        !String::from_utf8_lossy(&raw).contains("/Image"),
+        "imagem ainda no arquivo"
+    );
+    assert!(
+        !raw.windows(8).any(|w| w == b"/Subtype")
+            || !String::from_utf8_lossy(&raw).contains("/Image"),
+        "imagem ainda no arquivo"
+    );
     let d = PdfDoc::open(&path, None).unwrap();
     assert!(d.page_images(0).unwrap().is_empty());
 }

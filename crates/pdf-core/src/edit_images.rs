@@ -5,14 +5,14 @@
 //! operador por `q X cm /Nome Do Q` (ou o apaga), no mesmo lugar: a ordem de empilhamento, o
 //! objeto da imagem e o resto da página ficam como estavam. Imagem desenhada mais de uma vez,
 //! dentro de um formulário (Form XObject) ou embutida (BI/EI) não é editável.
-use crate::annot_edit::SNAPSHOT_BUDGET;
 use crate::create_export::{oriented, UprightImage};
 use crate::doc::PdfDoc;
-use crate::error::{PdfError, Result};
+use crate::error::{refused, Result};
 use crate::types::PdfRect;
 use mupdf::pdf::{PdfDocument, PdfObject};
 use mupdf::text_page::TextBlockType;
-use mupdf::{Buffer, Matrix, TextPageFlags};
+use mupdf::{Buffer, Matrix, Rect, TextPageFlags};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Imagem da página.
@@ -47,10 +47,6 @@ pub enum ImageEdit {
     },
 }
 
-fn refused(msg: impl Into<String>) -> PdfError {
-    PdfError::Refused(msg.into())
-}
-
 fn mul(a: &Matrix, b: &Matrix) -> Matrix {
     let mut m = a.clone();
     m.concat(b.clone());
@@ -64,15 +60,7 @@ fn invert(m: &Matrix) -> Result<Matrix> {
 
 /// Caixa do quadrado unitário pela matriz.
 fn unit_bbox(m: &Matrix) -> PdfRect {
-    let pts = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)].map(|(x, y)| m.transform_xy(x, y));
-    let xs = pts.map(|p| p.0);
-    let ys = pts.map(|p| p.1);
-    PdfRect::new(
-        xs.iter().copied().fold(f32::MAX, f32::min),
-        ys.iter().copied().fold(f32::MAX, f32::min),
-        xs.iter().copied().fold(f32::MIN, f32::max),
-        ys.iter().copied().fold(f32::MIN, f32::max),
-    )
+    Rect::new(0.0, 0.0, 1.0, 1.0).transform(m).into()
 }
 
 /// Matriz que leva a caixa `from` para a caixa `to`.
@@ -104,10 +92,11 @@ fn fit_in(w: f32, h: f32, r: &PdfRect) -> PdfRect {
 
 // ---------- leitura do conteúdo da página ----------
 
-enum Tok {
+enum Tok<'a> {
     Num(f32),
-    Name(Vec<u8>),
-    Op(Vec<u8>),
+    /// Nome ainda com as sequências `#xx`.
+    Name(&'a [u8]),
+    Op(&'a [u8]),
     Other,
 }
 
@@ -127,19 +116,23 @@ fn is_delim(c: u8) -> bool {
 struct Lexer<'a> {
     s: &'a [u8],
     i: usize,
+    /// Achou imagem embutida (BI…ID…EI).
+    inline_image: bool,
 }
 
-impl Lexer<'_> {
-    fn word(&mut self) -> &[u8] {
+impl<'a> Lexer<'a> {
+    fn word(&mut self) -> &'a [u8] {
+        let s = self.s;
         let start = self.i;
-        while self.i < self.s.len() && !is_ws(self.s[self.i]) && !is_delim(self.s[self.i]) {
+        while self.i < s.len() && !is_ws(s[self.i]) && !is_delim(s[self.i]) {
             self.i += 1;
         }
-        &self.s[start..self.i]
+        &s[start..self.i]
     }
 
     /// Pula os dados depois de ID até o EI (cercado de espaço) que fecha a imagem embutida.
     fn skip_inline_data(&mut self) {
+        self.inline_image = true;
         let s = self.s;
         let mut j = self.i + 1;
         while j + 2 <= s.len() {
@@ -156,7 +149,7 @@ impl Lexer<'_> {
     }
 
     /// Próximo token e onde começa.
-    fn next(&mut self) -> Option<(usize, Tok)> {
+    fn next(&mut self) -> Option<(usize, Tok<'a>)> {
         let s = self.s;
         loop {
             while self.i < s.len() && is_ws(s[self.i]) {
@@ -209,19 +202,19 @@ impl Lexer<'_> {
             }
             b'/' => {
                 self.i += 1;
-                Tok::Name(decode_name(self.word()))
+                Tok::Name(self.word())
             }
             _ if is_delim(c) => {
                 self.i += 1;
                 Tok::Other
             }
             _ => {
-                let w = self.word().to_vec();
+                let w = self.word();
                 if w == b"ID" {
                     self.skip_inline_data();
                     Tok::Other
                 } else {
-                    match std::str::from_utf8(&w).ok().and_then(|t| t.parse().ok()) {
+                    match std::str::from_utf8(w).ok().and_then(|t| t.parse().ok()) {
                         Some(n) => Tok::Num(n),
                         None => Tok::Op(w),
                     }
@@ -276,9 +269,30 @@ struct Draw {
     ctm: Matrix,
 }
 
+/// O conteúdo lido: os `Do` e se há imagem embutida.
+struct Scan {
+    draws: Vec<Draw>,
+    inline_image: bool,
+}
+
+impl Scan {
+    /// Quantas vezes cada nome é desenhado.
+    fn times(&self) -> HashMap<&[u8], usize> {
+        let mut times = HashMap::new();
+        for d in &self.draws {
+            *times.entry(d.name.as_slice()).or_insert(0) += 1;
+        }
+        times
+    }
+}
+
 /// Os `Do` do conteúdo, com a matriz de cada um (pilha q/Q e cm).
-fn scan(content: &[u8]) -> Vec<Draw> {
-    let mut lx = Lexer { s: content, i: 0 };
+fn scan(content: &[u8]) -> Scan {
+    let mut lx = Lexer {
+        s: content,
+        i: 0,
+        inline_image: false,
+    };
     let mut ctm = Matrix::IDENTITY;
     let mut stack = Vec::new();
     let mut operands: Vec<(usize, Tok)> = Vec::new();
@@ -288,7 +302,7 @@ fn scan(content: &[u8]) -> Vec<Draw> {
             operands.push((start, tok));
             continue;
         };
-        match op.as_slice() {
+        match op {
             b"q" => stack.push(ctm.clone()),
             b"Q" => ctm = stack.pop().unwrap_or(Matrix::IDENTITY),
             b"cm" => {
@@ -308,7 +322,7 @@ fn scan(content: &[u8]) -> Vec<Draw> {
             b"Do" => {
                 if let Some((at, Tok::Name(name))) = operands.last() {
                     draws.push(Draw {
-                        name: name.clone(),
+                        name: decode_name(name),
                         range: *at..lx.i,
                         ctm: ctm.clone(),
                     });
@@ -318,7 +332,10 @@ fn scan(content: &[u8]) -> Vec<Draw> {
         }
         operands.clear();
     }
-    draws
+    Scan {
+        draws,
+        inline_image: lx.inline_image,
+    }
 }
 
 /// Conteúdo da página (os fluxos de /Contents, um depois do outro).
@@ -340,36 +357,28 @@ fn page_content(page_obj: &PdfObject) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn set_page_content(doc: &mut PdfDocument, page_obj: &mut PdfObject, content: &[u8]) -> Result<()> {
-    let stream = doc.add_stream(&Buffer::from_bytes(content)?, None, false)?;
-    page_obj.dict_put("Contents", stream)?;
-    Ok(())
-}
-
-/// O XObject `name` da página, se for uma imagem.
-fn image_xobject(page_obj: &PdfObject, name: &[u8]) -> Result<Option<PdfObject>> {
-    let Ok(key) = std::str::from_utf8(name) else {
-        return Ok(None);
-    };
-    let Some(xobjects) = page_obj
+/// O /XObject da página (próprio ou herdado).
+fn xobjects(page_obj: &PdfObject) -> Result<Option<PdfObject>> {
+    Ok(page_obj
         .get_dict_inheritable("Resources")?
         .map(|r| r.get_dict("XObject"))
         .transpose()?
-        .flatten()
-    else {
+        .flatten())
+}
+
+/// /Subtype do XObject `name` (Image, Form), se existir.
+fn xobject_kind(xobjects: Option<&PdfObject>, name: &[u8]) -> Result<Option<Vec<u8>>> {
+    let (Some(xobjects), Ok(key)) = (xobjects, std::str::from_utf8(name)) else {
         return Ok(None);
     };
     let Some(x) = xobjects.get_dict(key)? else {
         return Ok(None);
     };
-    let is_image = x
-        .get_dict("Subtype")?
-        .is_some_and(|s| s.as_name().is_ok_and(|n| n == b"Image"));
-    Ok(is_image.then_some(x))
+    Ok(x.get_dict("Subtype")?.and_then(|s| s.as_name().ok()))
 }
 
-/// O /XObject próprio da página, para acrescentar imagens: os recursos (herdados ou de outras
-/// páginas) são copiados, para não mudar as outras páginas.
+/// O /XObject próprio da página, para acrescentar ou tirar imagens: os recursos (herdados ou de
+/// outras páginas) são copiados, para não mudar as outras páginas.
 fn own_xobjects(doc: &PdfDocument, page_obj: &mut PdfObject) -> Result<PdfObject> {
     let copy = |o: Option<PdfObject>| -> Result<PdfObject> {
         Ok(match o {
@@ -403,17 +412,20 @@ fn add_xobject(
     Ok(name)
 }
 
+/// Número para o conteúdo da página: até 6 casas, sem zeros sobrando.
+fn num(v: f32) -> String {
+    let s = format!("{v:.6}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s == "-0" {
+        "0".into()
+    } else {
+        s.into()
+    }
+}
+
 fn draw_ops(x: &Matrix, name: &str) -> String {
-    format!(
-        "q {} {} {} {} {} {} cm {} Do Q",
-        x.a,
-        x.b,
-        x.c,
-        x.d,
-        x.e,
-        x.f,
-        encode_name(name)
-    )
+    let m = [x.a, x.b, x.c, x.d, x.e, x.f].map(num).join(" ");
+    format!("q {m} cm {} Do Q", encode_name(name))
 }
 
 impl PdfDoc {
@@ -422,18 +434,23 @@ impl PdfDoc {
         self.check_page(page)?;
         let page_obj = self.inner.find_page(page)?;
         let to_screen = page_obj.page_ctm()?;
-        let draws = scan(&page_content(&page_obj)?);
+        let scan = scan(&page_content(&page_obj)?);
+        let xobjects = xobjects(&page_obj)?;
+        let times = scan.times();
         let mut images = Vec::new();
-        for d in &draws {
-            if image_xobject(&page_obj, &d.name)?.is_none() {
-                continue;
+        let mut in_forms = scan.inline_image;
+        for d in &scan.draws {
+            match xobject_kind(xobjects.as_ref(), &d.name)?.as_deref() {
+                Some(b"Image") => images.push(PageImage {
+                    name: String::from_utf8_lossy(&d.name).into_owned(),
+                    rect: unit_bbox(&mul(&d.ctm, &to_screen)),
+                    editable: times[d.name.as_slice()] == 1,
+                }),
+                _ => in_forms = true,
             }
-            let times = draws.iter().filter(|o| o.name == d.name).count();
-            images.push(PageImage {
-                name: String::from_utf8_lossy(&d.name).into_owned(),
-                rect: unit_bbox(&mul(&d.ctm, &to_screen)),
-                editable: times == 1,
-            });
+        }
+        if !in_forms {
+            return Ok(images);
         }
         // as que o conteúdo da página não desenha direto (formulário, embutida): só o contorno
         let text = self
@@ -443,15 +460,8 @@ impl PdfDoc {
             if block.r#type() != TextBlockType::Image {
                 continue;
             }
-            let b = block.bounds();
-            let rect = PdfRect::new(b.x0, b.y0, b.x1, b.y1);
-            let near = |r: &PdfRect| {
-                (r.x0 - rect.x0).abs() < 1.0
-                    && (r.y0 - rect.y0).abs() < 1.0
-                    && (r.x1 - rect.x1).abs() < 1.0
-                    && (r.y1 - rect.y1).abs() < 1.0
-            };
-            if !images.iter().any(|i| near(&i.rect)) {
+            let rect = PdfRect::from(block.bounds());
+            if !images.iter().any(|i| i.rect.near(&rect, 1.0)) {
                 images.push(PageImage {
                     name: String::new(),
                     rect,
@@ -474,7 +484,8 @@ impl PdfDoc {
     pub fn add_image(&mut self, page: i32, path: &Path, center: (f32, f32)) -> Result<()> {
         self.guarded_page_edit(page, "acrescentar a imagem", |doc| {
             let up = UprightImage::open(path)?;
-            let mut page_obj = doc.inner.find_page(page)?;
+            let mut pdf_page = doc.inner.load_pdf_page(page)?;
+            let mut page_obj = pdf_page.object();
             let to_screen = page_obj.page_ctm()?;
             let b = doc.load(page)?.bounds()?;
             let fit = (0.9 * (b.x1 - b.x0) / up.width)
@@ -488,10 +499,9 @@ impl PdfDoc {
             let name = add_xobject(&mut doc.inner, &mut page_obj, &up)?;
             let x = mul(&screen, &invert(&to_screen)?);
             // o conteúdo antigo entre q/Q: a imagem nova não herda matriz nem recorte dele
-            let mut content = b"q\n".to_vec();
-            content.extend(page_content(&page_obj)?);
-            content.extend(format!("\nQ\n{}\n", draw_ops(&x, &name)).as_bytes());
-            set_page_content(&mut doc.inner, &mut page_obj, &content)
+            pdf_page.wrap_contents(&mut doc.inner)?;
+            pdf_page.insert_contents(&mut doc.inner, draw_ops(&x, &name).as_bytes(), true)?;
+            Ok(())
         })
     }
 
@@ -505,29 +515,21 @@ impl PdfDoc {
     ) -> Result<()> {
         self.require_modifiable(action)?;
         self.check_page(page)?;
-        let before = self.snapshot()?;
-        if let Err(e) = edit(self) {
-            self.restore(&before)?;
-            return Err(e);
-        }
-        if self.history.record_snapshot(before, SNAPSHOT_BUDGET) {
-            self.mark_unsaved();
-        }
-        Ok(())
+        self.with_snapshot(edit)
     }
 
     fn apply_image_edit(&mut self, page: i32, name: &str, edit: ImageEdit) -> Result<()> {
         let mut page_obj = self.inner.find_page(page)?;
         let to_screen = page_obj.page_ctm()?;
         let content = page_content(&page_obj)?;
-        let draws = scan(&content);
-        let mut mine = draws.iter().filter(|d| d.name == name.as_bytes());
+        let scan = scan(&content);
+        let mut mine = scan.draws.iter().filter(|d| d.name == name.as_bytes());
         let (Some(draw), None) = (mine.next(), mine.next()) else {
             return Err(refused(
                 "esta imagem não pode ser editada (aparece mais de uma vez ou não está na página)",
             ));
         };
-        if image_xobject(&page_obj, &draw.name)?.is_none() {
+        if xobject_kind(xobjects(&page_obj)?.as_ref(), &draw.name)?.as_deref() != Some(b"Image") {
             return Err(refused("não é uma imagem da página"));
         }
         let screen = mul(&draw.ctm, &to_screen);
@@ -572,7 +574,15 @@ impl PdfDoc {
         let mut out = content[..draw.range.start].to_vec();
         out.extend(ops.as_bytes());
         out.extend(&content[draw.range.end..]);
-        set_page_content(&mut self.inner, &mut page_obj, &out)
+        let stream = self
+            .inner
+            .add_stream(&Buffer::from_bytes(&out)?, None, false)?;
+        page_obj.dict_put("Contents", stream)?;
+        if new_name != name {
+            // excluída ou substituída: a imagem antiga sai dos recursos (e do arquivo, ao salvar)
+            own_xobjects(&self.inner, &mut page_obj)?.dict_delete(name)?;
+        }
+        Ok(())
     }
 }
 
@@ -584,21 +594,30 @@ mod tests {
     fn do_inside_strings_comments_and_inline_images_is_ignored() {
         let content = b"BT (a /X Do) Tj ET % /Y Do\nBI /W 1 /H 1 ID \x00/Z Do EI\n\
                         q 2 0 0 3 10 20 cm /Im#20A Do Q";
-        let draws = scan(content);
+        let draws = scan(content).draws;
         assert_eq!(draws.len(), 1);
         assert_eq!(draws[0].name, b"Im A");
         let m = &draws[0].ctm;
         assert_eq!((m.a, m.d, m.e, m.f), (2.0, 3.0, 10.0, 20.0));
         assert_eq!(&content[draws[0].range.clone()], b"/Im#20A Do");
+        assert!(scan(content).inline_image && !scan(b"/A Do").inline_image);
     }
 
     #[test]
     fn nested_cm_composes_and_q_restores() {
-        let draws = scan(b"q 1 0 0 1 5 5 cm q 2 0 0 2 0 0 cm /A Do Q /B Do Q /C Do");
+        let draws = scan(b"q 1 0 0 1 5 5 cm q 2 0 0 2 0 0 cm /A Do Q /B Do Q /C Do").draws;
         let e = |i: usize| (draws[i].ctm.a, draws[i].ctm.e);
         assert_eq!(e(0), (2.0, 5.0));
         assert_eq!(e(1), (1.0, 5.0));
         assert_eq!(e(2), (1.0, 0.0));
+    }
+
+    #[test]
+    fn numbers_are_short_and_exact_enough() {
+        assert_eq!(num(200.0), "200");
+        assert_eq!(num(0.3), "0.3");
+        assert_eq!(num(-0.0000001), "0");
+        assert_eq!(num(-12.5), "-12.5");
     }
 
     #[test]

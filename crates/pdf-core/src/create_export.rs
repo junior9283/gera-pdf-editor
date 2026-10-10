@@ -1,7 +1,7 @@
 //! Criar PDF a partir de imagens e Exportar PDF (Word, texto, imagens), como as ferramentas do
 //! Acrobat.
 use crate::doc::{write_atomic, PdfDoc};
-use crate::error::{PdfError, Result};
+use crate::error::{refused, Result};
 use mupdf::pdf::{Encryption, PdfDocument, PdfWriteOptions};
 use mupdf::{Buffer, Colorspace, DocumentWriter, Image, ImageFormat, Matrix, Size};
 use std::path::{Path, PathBuf};
@@ -13,10 +13,6 @@ const MAX_IMAGE_BYTES: u64 = 200 * 1024 * 1024;
 const MAX_PIXELS: u64 = 100_000_000;
 /// Maior lado de página que o PDF aceita (200 polegadas).
 const MAX_PAGE_PT: f32 = 14_400.0;
-
-fn refused(msg: impl Into<String>) -> PdfError {
-    PdfError::Refused(msg.into())
-}
 
 fn open_image(path: &Path) -> Result<Image> {
     let meta = std::fs::metadata(path)?;

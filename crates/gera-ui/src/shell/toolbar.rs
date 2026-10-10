@@ -149,15 +149,8 @@ pub fn prepare_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
             }
         }
         ui.separator();
-        let can_edit = !doc.edit.saving;
-        let can_undo = can_edit && doc.is_dirty();
-        button(ui, &mut out, "⮪", Command::Doc(DocCommand::Undo), can_undo);
-        button(ui, &mut out, "⮫", Command::Doc(DocCommand::Redo), can_edit);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("Fechar").clicked() {
-                doc.show_row("");
-            }
-        });
+        undo_redo(ui, doc, &mut out);
+        close_row(ui, doc);
     });
     out
 }
@@ -182,19 +175,13 @@ pub fn edit_pdf_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
         ui.separator();
         let selected = doc.edit_pdf.selected.is_some();
         ui.add_enabled_ui(selected, |ui| {
-            if ui
-                .button("⟲")
-                .on_hover_text("Girar no sentido anti-horário")
-                .clicked()
-            {
-                doc.rotate_image(false);
-            }
-            if ui
-                .button("⟳")
-                .on_hover_text("Girar no sentido horário")
-                .clicked()
-            {
-                doc.rotate_image(true);
+            for (icon, tip, clockwise) in [
+                ("⟲", "Girar no sentido anti-horário", false),
+                ("⟳", "Girar no sentido horário", true),
+            ] {
+                if ui.button(icon).on_hover_text(tip).clicked() {
+                    doc.edit_image(pdf_core::ImageEdit::Rotate { clockwise });
+                }
             }
             if ui.button("Substituir imagem…").clicked() {
                 doc.pick_image(ui.ctx(), true);
@@ -208,15 +195,8 @@ pub fn edit_pdf_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
             selected,
         );
         ui.separator();
-        let can_edit = !doc.edit.saving;
-        let can_undo = can_edit && doc.is_dirty();
-        button(ui, &mut out, "⮪", Command::Doc(DocCommand::Undo), can_undo);
-        button(ui, &mut out, "⮫", Command::Doc(DocCommand::Redo), can_edit);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("Fechar").clicked() {
-                doc.show_row("");
-            }
-        });
+        undo_redo(ui, doc, &mut out);
+        close_row(ui, doc);
     });
     out
 }
@@ -259,10 +239,7 @@ pub fn fill_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
         ui.separator();
         sign_menu(ui, doc);
         ui.separator();
-        let can_edit = !doc.edit.saving;
-        let can_undo = can_edit && doc.is_dirty();
-        button(ui, &mut out, "⮪", Command::Doc(DocCommand::Undo), can_undo);
-        button(ui, &mut out, "⮫", Command::Doc(DocCommand::Redo), can_edit);
+        undo_redo(ui, doc, &mut out);
     });
     out
 }
@@ -367,10 +344,7 @@ pub fn comment_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
         }
         stamp_menu(ui, doc);
         ui.separator();
-        let can_edit = !doc.edit.saving;
-        let can_undo = can_edit && doc.is_dirty();
-        button(ui, &mut out, "⮪", Command::Doc(DocCommand::Undo), can_undo);
-        button(ui, &mut out, "⮫", Command::Doc(DocCommand::Redo), can_edit);
+        undo_redo(ui, doc, &mut out);
     });
     out
 }
@@ -408,6 +382,23 @@ fn stamp_menu(ui: &mut egui::Ui, doc: &mut DocTab) {
 }
 
 /// Botão de ícone que dispara `cmd`, com a dica (nome e atalho) tirada da tabela de comandos.
+/// Desfazer e refazer da linha de ferramenta.
+fn undo_redo(ui: &mut egui::Ui, doc: &DocTab, out: &mut Option<Command>) {
+    let can_edit = !doc.edit.saving;
+    let can_undo = can_edit && doc.is_dirty();
+    button(ui, out, "⮪", Command::Doc(DocCommand::Undo), can_undo);
+    button(ui, out, "⮫", Command::Doc(DocCommand::Redo), can_edit);
+}
+
+/// "Fechar" à direita da linha de ferramenta.
+fn close_row(ui: &mut egui::Ui, doc: &mut DocTab) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        if ui.button("Fechar").clicked() {
+            doc.show_row("");
+        }
+    });
+}
+
 fn button(ui: &mut egui::Ui, out: &mut Option<Command>, icon: &str, cmd: Command, enabled: bool) {
     let tip = hover(&cmd);
     if ui
