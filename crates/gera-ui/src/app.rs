@@ -680,6 +680,18 @@ impl GeraApp {
             self.dialogs.pick_images(ctx);
             return;
         }
+        if id == tools_catalog::OCR {
+            match self.last_doc.clone().and_then(|p| self.tabs.find(&p)) {
+                Some(tab) => {
+                    self.activate(tab);
+                    if let Some(doc) = self.active_doc() {
+                        doc.open_ocr();
+                    }
+                }
+                None => self.status = "Abra um PDF digitalizado para reconhecer o texto.".into(),
+            }
+            return;
+        }
         if id == tools_catalog::EXPORT {
             match self.last_doc.clone().and_then(|p| self.tabs.find(&p)) {
                 Some(tab) => {

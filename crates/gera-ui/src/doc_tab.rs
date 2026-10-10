@@ -133,6 +133,8 @@ pub struct DocTab {
     /// Janela Exportar PDF: formato (0 Word, 1 texto, 2 PNG, 3 JPEG), resolução e se está
     /// exportando.
     pub(crate) export: Option<(usize, u32, bool)>,
+    /// Janela Reconhecer texto (OCR).
+    pub(crate) ocr: Option<OcrWindow>,
     /// Criado pelo app (Criar PDF): ainda sem lugar escolhido, conta como não salvo.
     pub(crate) created: bool,
     /// Pedido de foco no campo de busca (Ctrl+F ou menu).
@@ -228,6 +230,7 @@ impl DocTab {
             compress: None,
             export: None,
             created: false,
+            ocr: None,
             focus_search: false,
             properties: None,
             print_dialog: None,
@@ -253,7 +256,10 @@ impl DocTab {
 
     /// Fechar esta aba precisa de confirmação (pendências ou salvamento em andamento)?
     pub fn needs_confirm(&self) -> bool {
-        self.is_dirty() || self.edit.saving || self.form.has_draft()
+        self.is_dirty()
+            || self.edit.saving
+            || self.form.has_draft()
+            || self.ocr.as_ref().is_some_and(|w| w.cancel.is_some())
     }
 
     /// Confirma o texto que está sendo digitado num campo (antes de salvar ou imprimir).
@@ -529,6 +535,32 @@ impl DocTab {
                             .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
                     );
                     self.events.push(DocEvent::OpenFile(dest));
+                }
+                Response::OcrProgress { done, total } => {
+                    if let Some(w) = self.ocr.as_mut() {
+                        w.progress = Some((done, total));
+                    }
+                }
+                Response::OcrDone { report, history } => {
+                    self.ocr = None;
+                    self.history = history;
+                    if let Some(view) = self.view.as_mut() {
+                        view.clear_cache();
+                    }
+                    self.status = format!(
+                        "Texto reconhecido em {} página(s) ({} palavras){}.",
+                        report.recognized,
+                        report.words,
+                        if report.skipped > 0 {
+                            format!("; {} já tinham texto", report.skipped)
+                        } else {
+                            String::new()
+                        }
+                    );
+                }
+                Response::OcrFailed(e) => {
+                    self.ocr = None;
+                    self.status = format!("Não foi possível reconhecer o texto: {e}");
                 }
                 Response::ExportedTo(files) => {
                     self.export = None;
@@ -926,6 +958,114 @@ impl DocTab {
         }
     }
 
+    /// Digitalizar e OCR: abre a janela Reconhecer texto (precisa da permissão de alterar).
+    pub fn open_ocr(&mut self) {
+        if !self.security.permissions.modify {
+            self.deny("reconhecer texto");
+            return;
+        }
+        if self.view.is_some() && self.ocr.is_none() {
+            self.ocr = Some(OcrWindow::default());
+        }
+    }
+
+    /// Janela Reconhecer texto: idioma, páginas, progresso e Cancelar.
+    fn ocr_window(&mut self, ctx: &egui::Context) {
+        let current = self.last.current_page as i32;
+        let pages = self.view.as_ref().map_or(0, |v| v.sizes.len() as i32);
+        let Some(w) = self.ocr.as_mut() else {
+            return;
+        };
+        const LANGS: [(&str, pdf_core::OcrLanguage); 3] = [
+            ("Português", pdf_core::OcrLanguage::Portuguese),
+            ("Inglês", pdf_core::OcrLanguage::English),
+            (
+                "Português e inglês",
+                pdf_core::OcrLanguage::PortugueseEnglish,
+            ),
+        ];
+        let mut start = false;
+        let mut cancel = false;
+        let mut open = true;
+        let lang = LANGS[w.lang].1;
+        // procurar os dados custa alguns stat: só quando o idioma muda
+        if w.data_for != Some(w.lang) {
+            w.has_data = pdf_core::tessdata_dir(lang).is_some();
+            w.data_for = Some(w.lang);
+        }
+        let has_data = w.has_data;
+        egui::Window::new("Reconhecer texto")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                let busy = w.cancel.is_some();
+                ui.add_enabled_ui(!busy, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Idioma");
+                        egui::ComboBox::from_id_salt("ocr-idioma")
+                            .selected_text(LANGS[w.lang].0)
+                            .show_index(ui, &mut w.lang, LANGS.len(), |i| LANGS[i].0);
+                    });
+                    ui.radio_value(&mut w.all_pages, true, "Todas as páginas");
+                    ui.radio_value(&mut w.all_pages, false, format!("Só a página {}", current + 1));
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "As páginas digitalizadas ganham texto pesquisável e selecionável, sem mudar a aparência. Páginas que já têm texto são puladas.",
+                    )
+                    .weak(),
+                );
+                if !has_data {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        "Faltam os dados de idioma do OCR (pacotes tesseract-langpack-por e tesseract-langpack-eng).",
+                    );
+                }
+                if let Some((done, total)) = w.progress {
+                    ui.add(
+                        egui::ProgressBar::new(done as f32 / total.max(1) as f32)
+                            .text(format!("Página {} de {}", (done + 1).min(total), total)),
+                    );
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!busy && has_data, egui::Button::new("Reconhecer texto"))
+                        .clicked()
+                    {
+                        start = true;
+                    }
+                    if busy && ui.button("Cancelar").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if cancel {
+            if let Some(c) = &w.cancel {
+                c.cancel();
+            }
+        }
+        if !open && w.cancel.is_none() {
+            self.ocr = None;
+            return;
+        }
+        if start {
+            let token = pdf_core::CancelToken::new();
+            w.cancel = Some(token.clone());
+            w.progress = Some((0, 1));
+            let list = if w.all_pages {
+                (0..pages).collect()
+            } else {
+                vec![current]
+            };
+            self.worker.send(Request::RecognizeText {
+                pages: list,
+                lang,
+                cancel: token,
+            });
+        }
+    }
+
     /// Exportar PDF: abre a janela (precisa da permissão de copiar o conteúdo).
     pub fn open_export(&mut self) {
         if !self.security.permissions.copy {
@@ -1271,6 +1411,7 @@ impl DocTab {
         self.protect_windows(ui.ctx());
         self.compress_window(ui.ctx());
         self.export_window(ui.ctx());
+        self.ocr_window(ui.ctx());
         self.sign_window(ui.ctx());
         self.split_window(ui);
         self.poll_files();
@@ -1795,6 +1936,31 @@ impl DocTab {
     }
 }
 
+/// Janela Reconhecer texto: idioma (índice), todas as páginas ou a atual, progresso e o
+/// cancelamento do reconhecimento em andamento.
+pub(crate) struct OcrWindow {
+    lang: usize,
+    all_pages: bool,
+    progress: Option<(usize, usize)>,
+    cancel: Option<pdf_core::CancelToken>,
+    /// Há dados de idioma para `data_for` (o índice do idioma conferido).
+    has_data: bool,
+    data_for: Option<usize>,
+}
+
+impl Default for OcrWindow {
+    fn default() -> Self {
+        Self {
+            lang: 2,
+            all_pages: true,
+            progress: None,
+            cancel: None,
+            has_data: false,
+            data_for: None,
+        }
+    }
+}
+
 /// Troca na lista as anotações das `pages` pelas novas, mantendo a ordem por página.
 fn replace_pages(all: &mut Vec<AnnotInfo>, pages: &[i32], new: Vec<AnnotInfo>) {
     all.retain(|a| !pages.contains(&a.page));
@@ -1833,6 +1999,10 @@ impl Drop for DocTab {
     fn drop(&mut self) {
         if let Some(p) = self.print_pending.take() {
             let _ = std::fs::remove_file(p.file);
+        }
+        // OCR em andamento: para (libera a CPU e a vez das outras abas)
+        if let Some(c) = self.ocr.as_ref().and_then(|w| w.cancel.as_ref()) {
+            c.cancel();
         }
     }
 }
