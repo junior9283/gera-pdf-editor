@@ -141,6 +141,15 @@ pub struct RedactTool {
     /// Confirmação do Aplicar aberta.
     pub confirm: bool,
     pub sanitize: Option<SanitizeOptions>,
+    /// Salvar com marcas não aplicadas: perguntando antes.
+    pub pending_save: bool,
+}
+
+/// Resposta à pergunta do Salvar com marcas não aplicadas.
+enum SaveChoice {
+    ApplyAndSave,
+    SaveAnyway,
+    Cancel,
 }
 
 impl RedactTool {
@@ -226,6 +235,37 @@ impl RedactTool {
     }
 }
 
+/// "Há marcas de redação não aplicadas": aplicar e salvar, salvar assim ou cancelar.
+fn save_question(ctx: &egui::Context) -> Option<SaveChoice> {
+    let mut choice = None;
+    let mut open = true;
+    egui::Window::new("Marcas de redação não aplicadas")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.label(
+                "O documento tem marcas de redação que ainda não foram aplicadas: salvo assim, o \
+                 conteúdo sob elas continua no arquivo.",
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Aplicar e salvar").clicked() {
+                    choice = Some(SaveChoice::ApplyAndSave);
+                }
+                if ui.button("Salvar sem aplicar").clicked() {
+                    choice = Some(SaveChoice::SaveAnyway);
+                }
+                if ui.button("Cancelar").clicked() {
+                    choice = Some(SaveChoice::Cancel);
+                }
+            });
+        });
+    if !open {
+        choice = Some(SaveChoice::Cancel);
+    }
+    choice
+}
+
 impl DocTab {
     /// As janelas do Redigir.
     pub(crate) fn redact_windows(&mut self, ctx: &egui::Context) {
@@ -233,6 +273,23 @@ impl DocTab {
         self.redact.windows(ctx, &mut requests);
         for req in requests {
             self.worker.send(req);
+        }
+        if !self.redact.pending_save {
+            return;
+        }
+        let Some(choice) = save_question(ctx) else {
+            return;
+        };
+        self.redact.pending_save = false;
+        match choice {
+            SaveChoice::ApplyAndSave => {
+                // o worker atende em ordem: a redação entra antes da gravação
+                self.worker
+                    .send(Request::ApplyRedactions(self.redact.look.clone()));
+                self.save_now();
+            }
+            SaveChoice::SaveAnyway => self.save_now(),
+            SaveChoice::Cancel => {}
         }
     }
 }

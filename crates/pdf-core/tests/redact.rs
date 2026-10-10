@@ -8,7 +8,7 @@ use pdf_core::{
 fn sensitive(dir: &std::path::Path) -> std::path::PathBuf {
     let content = "BT /F1 12 Tf 72 700 Td (Nome: Ana Souza CPF 123.456.789-09) Tj ET \
         BT /F1 12 Tf 72 680 Td (Contato: ana@exemplo.com.br tel. (11) 98765-4321) Tj ET \
-        BT /F1 12 Tf 72 660 Td (CNPJ 12.345.678/0001-90 CEP 01310-100 em 10/10/2026) Tj ET \
+        BT /F1 12 Tf 72 660 Td (CNPJ 12.345.678/0001-95 CEP 01310-100 em 10/10/2026) Tj ET \
         BT /F1 12 Tf 72 640 Td (Cartao 4111 1111 1111 1111 pagina 3 valor 1.234,56) Tj ET \
         q 100 0 0 100 300 400 cm /Im0 Do Q";
     let objs = [
@@ -142,7 +142,7 @@ fn patterns_find_the_sensitive_data() {
             .collect()
     };
     assert_eq!(found(RedactPattern::Cpf), ["123.456.789-09"]);
-    assert_eq!(found(RedactPattern::Cnpj), ["12.345.678/0001-90"]);
+    assert_eq!(found(RedactPattern::Cnpj), ["12.345.678/0001-95"]);
     assert_eq!(found(RedactPattern::Email), ["ana@exemplo.com.br"]);
     assert_eq!(found(RedactPattern::Phone), ["(11) 98765-4321"]);
     assert_eq!(found(RedactPattern::Cep), ["01310-100"]);
@@ -195,4 +195,157 @@ fn sanitizing_removes_hidden_information() {
         d.page_text(0).unwrap().contains("Contato"),
         "o conteúdo fica"
     );
+}
+
+/// Página com o segredo repetido onde a redação do MuPDF não chega sozinha: campo de formulário,
+/// destaque com popup, /ActualText, miniatura (/Thumb) e dados privados (/PieceInfo).
+fn hidden_copies(dir: &std::path::Path) -> std::path::PathBuf {
+    let content = "BT /F1 12 Tf 72 700 Td (Nome: Ana Souza) Tj ET \
+        /Span <</ActualText (ACTUALSECRET)>> BDC BT /F1 12 Tf 72 680 Td (visivel) Tj ET EMC \
+        BT /F1 12 Tf 72 600 Td (Texto que fica) Tj ET";
+    let objs = [
+        "1 0 obj<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[6 0 R]>>>>endobj\n".to_string(),
+        "2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n".into(),
+        "3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 5 0 R>>>>/Contents 4 0 R/Annots[6 0 R 7 0 R 8 0 R]/Thumb 9 0 R/PieceInfo<</X<</Private(PIECESECRET)>>>>>>endobj\n".into(),
+        format!("4 0 obj<</Length {}>>stream\n{content}\nendstream endobj\n", content.len() + 1),
+        "5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>endobj\n".into(),
+        "6 0 obj<</Type/Annot/Subtype/Widget/FT/Tx/T(campo)/V(FIELDSECRET)/Rect[72 650 250 668]/P 3 0 R>>endobj\n".into(),
+        "7 0 obj<</Type/Annot/Subtype/Highlight/Rect[100 695 170 712]/QuadPoints[100 712 170 712 100 695 170 695]/Contents(HLSECRET)/Popup 8 0 R>>endobj\n".into(),
+        "8 0 obj<</Type/Annot/Subtype/Popup/Rect[300 600 400 700]/Parent 7 0 R>>endobj\n".into(),
+        "9 0 obj<</Width 1/Height 1/ColorSpace/DeviceGray/BitsPerComponent 8/Length 11>>stream\nTHUMBSECRET\nendstream endobj\n".into(),
+    ];
+    let path = dir.join("copias.pdf");
+    std::fs::write(
+        &path,
+        format!("%PDF-1.4\n{}trailer<</Root 1 0 R>>\n", objs.concat()),
+    )
+    .unwrap();
+    path
+}
+
+/// Aplica uma marca sobre a página toda (menos a última linha) e devolve os bytes salvos.
+fn redact_top_and_save(path: &std::path::Path) -> String {
+    let mut d = PdfDoc::open(path, None).unwrap();
+    // tela: y para baixo; a linha "Texto que fica" (y 600 do PDF) fica fora
+    mark(&mut d, vec![PdfRect::new(50.0, 70.0, 560.0, 160.0)]);
+    d.apply_redactions(&look()).unwrap();
+    let text = d.page_text(0).unwrap();
+    assert!(text.contains("Texto que fica"), "{text}");
+    let out = path.with_file_name("saida.pdf");
+    d.save(&out).unwrap();
+    String::from_utf8_lossy(&std::fs::read(&out).unwrap()).into_owned()
+}
+
+#[test]
+fn copies_of_the_secret_outside_the_text_layer_go_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let raw = redact_top_and_save(&hidden_copies(dir.path()));
+    for secret in [
+        "FIELDSECRET",
+        "HLSECRET",
+        "ACTUALSECRET",
+        "THUMBSECRET",
+        "PIECESECRET",
+    ] {
+        assert!(!raw.contains(secret), "{secret} ficou no arquivo");
+    }
+}
+
+#[test]
+fn an_undone_mark_is_not_applied() {
+    let (_d, mut d) = open();
+    let r = find_rect(&d, "Ana Souza");
+    mark(&mut d, vec![r]);
+    d.undo().unwrap();
+    let cpf = find_rect(&d, "123.456.789-09");
+    mark(&mut d, vec![cpf]);
+    d.apply_redactions(&look()).unwrap();
+    let text = d.page_text(0).unwrap();
+    assert!(
+        text.contains("Ana Souza"),
+        "a marca desfeita não vale: {text}"
+    );
+    assert!(!text.contains("123.456.789-09"));
+}
+
+/// Página com os casos de borda dos padrões.
+fn pattern_page(dir: &std::path::Path, lines: &[&str]) -> PdfDoc {
+    let mut content = String::new();
+    for (i, l) in lines.iter().enumerate() {
+        content.push_str(&format!(
+            "BT /F1 12 Tf 72 {} Td ({l}) Tj ET ",
+            700 - 20 * i as i32
+        ));
+    }
+    let objs = [
+        "1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n".to_string(),
+        "2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n".into(),
+        "3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 5 0 R>>>>/Contents 4 0 R>>endobj\n".into(),
+        format!("4 0 obj<</Length {}>>stream\n{content}\nendstream endobj\n", content.len() + 1),
+        "5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>endobj\n".into(),
+    ];
+    let path = dir.join("padroes.pdf");
+    std::fs::write(
+        &path,
+        format!("%PDF-1.4\n{}trailer<</Root 1 0 R>>\n", objs.concat()),
+    )
+    .unwrap();
+    PdfDoc::open(&path, None).unwrap()
+}
+
+#[test]
+fn patterns_check_digits_and_accept_common_variants() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = pattern_page(
+        dir.path(),
+        &[
+            "CPF errado 123.456.789-00 e certo 123 456 789 09",
+            "CNPJ errado 12.345.678/0001-91",
+            "anos 2019-2023 e fone 11 98765-4321",
+            "CEP 01.310-100",
+            "datas 2026-10-10 e 10.10.2026",
+            "Amex 3782 822463 10005",
+        ],
+    );
+    let found = |p: RedactPattern| -> Vec<String> {
+        d.find_redactions(&RedactQuery::Patterns(vec![p]))
+            .unwrap()
+            .into_iter()
+            .map(|h| h.text)
+            .collect()
+    };
+    assert_eq!(found(RedactPattern::Cpf), ["123 456 789 09"]);
+    assert!(found(RedactPattern::Cnpj).is_empty(), "dígito errado");
+    assert_eq!(found(RedactPattern::Phone), ["11 98765-4321"]);
+    assert_eq!(found(RedactPattern::Cep), ["01.310-100"]);
+    assert_eq!(found(RedactPattern::Date), ["2026-10-10", "10.10.2026"]);
+    assert_eq!(found(RedactPattern::CreditCard), ["3782 822463 10005"]);
+}
+
+#[test]
+fn a_phrase_is_found_every_time_on_a_crowded_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let line = "x ".repeat(60);
+    let lines: Vec<&str> = std::iter::repeat_n(line.as_str(), 12).collect();
+    let d = pattern_page(dir.path(), &lines);
+    let hits = d.find_redactions(&RedactQuery::Phrase("x".into())).unwrap();
+    assert_eq!(hits.len(), 720, "sem o limite de 512 por página");
+}
+
+#[test]
+fn sanitizing_metadata_also_clears_the_pages_private_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = hidden_copies(dir.path());
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    d.sanitize(&SanitizeOptions {
+        metadata: true,
+        attachments: false,
+        scripts: false,
+        comments: false,
+    })
+    .unwrap();
+    let out = dir.path().join("limpo.pdf");
+    d.save(&out).unwrap();
+    let raw = String::from_utf8_lossy(&std::fs::read(&out).unwrap()).into_owned();
+    assert!(!raw.contains("PIECESECRET") && !raw.contains("THUMBSECRET"));
 }

@@ -385,8 +385,21 @@ impl DocTab {
         }
     }
 
-    /// Salvar: só quando há o que gravar.
+    /// Salvar: com marcas de redação não aplicadas, pergunta antes (como o Acrobat).
     pub fn save(&mut self) {
+        if self
+            .annots
+            .iter()
+            .any(|a| a.kind == pdf_core::AnnotKind::Redact)
+        {
+            self.redact.pending_save = true;
+            return;
+        }
+        self.save_now();
+    }
+
+    /// Salvar de fato: só quando há o que gravar.
+    pub(crate) fn save_now(&mut self) {
         // o worker atende em ordem: o valor do campo chega antes da gravação
         let typed = self.commit_field();
         if let Some(view) = self.view.as_ref().filter(|_| self.history.dirty || typed) {
@@ -2240,6 +2253,20 @@ mod tests {
         assert_eq!(tab.edit.tool, Tool::RedactText);
         tab.show_row("");
         assert_eq!(tab.edit.tool, Tool::Select);
+    }
+
+    /// Como o Acrobat: salvar com marcas de redação não aplicadas pergunta antes (o arquivo sairia
+    /// com o texto intacto sob as marcas).
+    #[test]
+    fn saving_with_unapplied_redaction_marks_asks_first() {
+        let ctx = egui::Context::default();
+        let mut tab = DocTab::new(&ctx, PathBuf::from("/a.pdf"), false);
+        tab.annots.push(pdf_core::AnnotInfo {
+            kind: pdf_core::AnnotKind::Redact,
+            ..Default::default()
+        });
+        tab.save();
+        assert!(tab.redact.pending_save, "pergunta antes de salvar");
     }
 
     #[test]

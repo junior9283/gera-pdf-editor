@@ -7,13 +7,13 @@
 use crate::doc::PdfDoc;
 use crate::edit_text::{glyph_run, width};
 use crate::error::Result;
-use crate::page_content::{invert, matrix_ops, num, rgb_ops};
+use crate::page_content::{invert, matrix_ops, num, page_content, rgb_ops, Lexer, Tok};
 use crate::types::PdfRect;
 use mupdf::pdf::{
     PdfAnnotationType, PdfRedactImageMethod, PdfRedactLineArtMethod, PdfRedactOptions,
     PdfRedactTextMethod,
 };
-use mupdf::{Font, Rect, TextPageFlags};
+use mupdf::{Buffer, Font, Rect, TextPageFlags};
 use regex::Regex;
 
 /// Dado sensível que o Localizar sabe achar.
@@ -52,36 +52,68 @@ impl RedactPattern {
     }
 
     fn regex(self) -> &'static str {
+        // só algarismos ASCII ([0-9]): o \d do Unicode casaria dígitos de outras escritas
         match self {
-            RedactPattern::Cpf => r"\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b",
-            RedactPattern::Cnpj => r"\b\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}\b",
-            RedactPattern::Phone => r"(?:\(\d{2}\)\s?|\b\d{2}\s)?\b9?\d{4}-\d{4}\b",
+            RedactPattern::Cpf => r"\b[0-9]{3}[. ]?[0-9]{3}[. ]?[0-9]{3}[- ]?[0-9]{2}\b",
+            RedactPattern::Cnpj => r"\b[0-9]{2}\.?[0-9]{3}\.?[0-9]{3}/?[0-9]{4}-?[0-9]{2}\b",
+            // com DDD (entre parênteses ou não) e +55 opcional: "2019-2023" não é telefone
+            RedactPattern::Phone => {
+                r"(?:\+55\s?)?(?:\([0-9]{2}\)|\b[0-9]{2})\s?9?[0-9]{4}-?[0-9]{4}\b"
+            }
             RedactPattern::Email => r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+",
-            RedactPattern::CreditCard => r"\b(?:\d{4}[ -]?){3}\d{4}\b",
-            RedactPattern::Cep => r"\b\d{5}-\d{3}\b",
-            RedactPattern::Date => r"\b\d{1,2}/\d{1,2}/(?:\d{4}|\d{2})\b",
+            // 13 a 19 algarismos, com espaços ou hífens entre eles (Visa, Master, Amex…)
+            RedactPattern::CreditCard => r"\b[0-9](?:[ -]?[0-9]){12,18}\b",
+            RedactPattern::Cep => r"\b[0-9]{2}\.?[0-9]{3}-[0-9]{3}\b",
+            RedactPattern::Date => {
+                r"\b(?:[0-9]{1,2}[/.][0-9]{1,2}[/.][0-9]{4}|[0-9]{1,2}/[0-9]{1,2}/[0-9]{2}|[0-9]{4}-[0-9]{2}-[0-9]{2})\b"
+            }
         }
     }
 
-    /// Confere o achado além do formato (cartão: dígito verificador de Luhn).
+    /// Confere o achado além do formato: dígitos verificadores (CPF, CNPJ) e Luhn (cartão).
     fn accepts(self, found: &str) -> bool {
-        if self != RedactPattern::CreditCard {
-            return true;
-        }
-        let digits: Vec<u32> = found.chars().filter_map(|c| c.to_digit(10)).collect();
-        let sum: u32 = digits
-            .iter()
-            .rev()
-            .enumerate()
-            .map(|(i, &d)| {
-                if i % 2 == 1 {
-                    (d * 2) % 10 + d * 2 / 10
-                } else {
-                    d
+        let d: Vec<u32> = found.chars().filter_map(|c| c.to_digit(10)).collect();
+        match self {
+            RedactPattern::Cpf => {
+                d.len() == 11 && d.iter().any(|&x| x != d[0]) && {
+                    let dv = |n: usize| {
+                        let sum: u32 = (0..n).map(|i| d[i] * (n as u32 + 1 - i as u32)).sum();
+                        (sum * 10 % 11) % 10
+                    };
+                    dv(9) == d[9] && dv(10) == d[10]
                 }
-            })
-            .sum();
-        sum.is_multiple_of(10)
+            }
+            RedactPattern::Cnpj => {
+                const W: [u32; 13] = [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+                d.len() == 14 && {
+                    let dv = |n: usize| {
+                        let sum: u32 = (0..n).map(|i| d[i] * W[13 - n + i]).sum();
+                        if sum % 11 < 2 {
+                            0
+                        } else {
+                            11 - sum % 11
+                        }
+                    };
+                    dv(12) == d[12] && dv(13) == d[13]
+                }
+            }
+            RedactPattern::CreditCard => {
+                let sum: u32 = d
+                    .iter()
+                    .rev()
+                    .enumerate()
+                    .map(|(i, &x)| {
+                        if i % 2 == 1 {
+                            (x * 2) % 10 + x * 2 / 10
+                        } else {
+                            x
+                        }
+                    })
+                    .sum();
+                sum.is_multiple_of(10)
+            }
+            _ => true,
+        }
     }
 }
 
@@ -174,6 +206,137 @@ impl Overlay {
     }
 }
 
+fn intersects(a: &Rect, b: &Rect) -> bool {
+    a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0
+}
+
+/// Apaga os campos de formulário e os comentários (com o popup) que cruzam as caixas — o
+/// Acrobat também os tira; links e popups a redação do MuPDF já resolve. Devolve os números dos
+/// objetos dos campos apagados, para tirá-los também do /AcroForm.
+fn remove_covered_annots(page: &mut mupdf::pdf::PdfPage, boxes: &[Rect]) -> Result<Vec<i32>> {
+    let covered = |r: Rect| boxes.iter().any(|b| intersects(&r, b));
+    let mut widgets = Vec::new();
+    let mut fields = Vec::new();
+    for w in page.widgets() {
+        if covered(w.annotation().rect()?) {
+            fields.push(w.xref()?);
+            widgets.push(w);
+        }
+    }
+    for w in widgets {
+        page.delete_widget(w)?;
+    }
+    let mut doomed = Vec::new();
+    for a in page.annotations() {
+        let keep = matches!(
+            a.r#type()?,
+            PdfAnnotationType::Link | PdfAnnotationType::Popup | PdfAnnotationType::Redact
+        );
+        if !keep && covered(a.rect()?) {
+            doomed.push(a);
+        }
+    }
+    for a in doomed {
+        // o popup vai junto (senão sobra uma janela com o comentário)
+        if let Some(popup) = a.object().get_dict("Popup")? {
+            let num = popup.as_indirect().unwrap_or(0);
+            let p = page
+                .annotations()
+                .find(|x| x.object().as_indirect().ok() == Some(num));
+            if let Some(p) = p {
+                page.delete_annotation(p)?;
+            }
+        }
+        page.delete_annotation(a)?;
+    }
+    Ok(fields)
+}
+
+/// Tira de /AcroForm /Fields (e dos /Kids) os campos apagados; o pai que fica sem filhos sai.
+fn prune_fields(doc: &mupdf::pdf::PdfDocument, removed: &[i32]) -> Result<()> {
+    fn prune(arr: &mut mupdf::pdf::PdfObject, removed: &[i32], depth: u32) -> Result<()> {
+        if depth > 32 {
+            return Ok(()); // árvore de campos absurda (ou em ciclo): para por aqui
+        }
+        let mut i = 0;
+        while i < arr.len()? as i32 {
+            let Some(mut field) = arr.get_array(i)? else {
+                i += 1;
+                continue;
+            };
+            let gone = field.as_indirect().is_ok_and(|n| removed.contains(&n));
+            let mut empty = false;
+            if !gone {
+                if let Some(mut kids) = field.get_dict("Kids")? {
+                    prune(&mut kids, removed, depth + 1)?;
+                    empty = kids.len()? == 0;
+                    if !empty {
+                        field.dict_put("Kids", kids)?;
+                    }
+                }
+            }
+            if gone || empty {
+                arr.array_delete(i)?;
+            } else {
+                i += 1;
+            }
+        }
+        Ok(())
+    }
+    let catalog = doc.catalog()?;
+    if let Some(mut fields) = catalog
+        .get_dict("AcroForm")?
+        .and_then(|f| f.get_dict("Fields").ok().flatten())
+    {
+        prune(&mut fields, removed, 0)?;
+    }
+    Ok(())
+}
+
+/// As faixas `/Tag <<…/ActualText…>> BDC` e o `EMC` correspondente (o texto alternativo, que
+/// sobra depois da redação), para tirar do conteúdo deixando o que está entre eles.
+fn alternate_text_marks(content: &[u8]) -> Vec<std::ops::Range<usize>> {
+    let mut lx = Lexer {
+        s: content,
+        i: 0,
+        inline_image: false,
+    };
+    let mut first_operand: Option<usize> = None;
+    let mut names: Vec<&[u8]> = Vec::new();
+    // pilha do marcado: a faixa do BDC quando ele tem texto alternativo
+    let mut stack: Vec<Option<std::ops::Range<usize>>> = Vec::new();
+    let mut out = Vec::new();
+    while let Some((start, tok)) = lx.next() {
+        let Tok::Op(op) = tok else {
+            first_operand.get_or_insert(start);
+            if let Tok::Name(n) = tok {
+                names.push(n);
+            }
+            continue;
+        };
+        match op {
+            b"BDC" | b"BMC" => {
+                let alt = op == b"BDC"
+                    && names
+                        .iter()
+                        .any(|n| matches!(*n, b"ActualText" | b"Alt" | b"E"));
+                stack.push(alt.then(|| first_operand.unwrap_or(start)..lx.i));
+            }
+            b"EMC" => {
+                if let Some(Some(open)) = stack.pop() {
+                    out.push(open);
+                    out.push(start..lx.i);
+                }
+            }
+            _ => {}
+        }
+        first_operand = None;
+        names.clear();
+    }
+    out.sort_by_key(|r| r.start);
+    out
+}
+
 impl PdfDoc {
     /// Os trechos de todas as páginas que combinam com a consulta, na ordem do documento.
     pub fn find_redactions(&self, query: &RedactQuery) -> Result<Vec<RedactHit>> {
@@ -181,19 +344,18 @@ impl PdfDoc {
         match query {
             RedactQuery::Phrase(phrase) if phrase.trim().is_empty() => {}
             RedactQuery::Phrase(phrase) => {
+                // pelo mesmo caminho dos padrões: sem o limite de achados por página da busca
+                let re = Regex::new(&format!("(?i){}", regex::escape(phrase.trim())))
+                    .map_err(|e| crate::error::refused(e.to_string()))?;
                 for page in 0..self.page_count()? {
-                    hits.extend(self.search(page, phrase)?.into_iter().map(|r| RedactHit {
-                        page,
-                        rects: vec![r],
-                        text: phrase.clone(),
-                    }));
+                    hits.extend(self.find_patterns(page, &[(None, re.clone())])?);
                 }
             }
             RedactQuery::Patterns(patterns) => {
                 // compiladas uma vez para o documento todo
-                let regexes: Vec<(RedactPattern, Regex)> = patterns
+                let regexes: Vec<(Option<RedactPattern>, Regex)> = patterns
                     .iter()
-                    .map(|&p| (p, Regex::new(p.regex()).expect("padrão fixo válido")))
+                    .map(|&p| (Some(p), Regex::new(p.regex()).expect("padrão fixo válido")))
                     .collect();
                 for page in 0..self.page_count()? {
                     hits.extend(self.find_patterns(page, &regexes)?);
@@ -207,7 +369,7 @@ impl PdfDoc {
     fn find_patterns(
         &self,
         page: i32,
-        regexes: &[(RedactPattern, Regex)],
+        regexes: &[(Option<RedactPattern>, Regex)],
     ) -> Result<Vec<RedactHit>> {
         let tp = self.load(page)?.to_text_page(TextPageFlags::empty())?;
         let mut hits = Vec::new();
@@ -223,7 +385,7 @@ impl PdfDoc {
                 }
                 for (pattern, re) in regexes {
                     for m in re.find_iter(&text) {
-                        if !pattern.accepts(m.as_str()) {
+                        if !pattern.is_none_or(|p| p.accepts(m.as_str())) {
                             continue;
                         }
                         let rect = boxes
@@ -251,7 +413,12 @@ impl PdfDoc {
         self.require_modifiable("aplicar a redação")?;
         let overlay = Overlay::new(look)?;
         self.with_snapshot(|d| {
+            // marcas desfeitas ou apagadas só estão escondidas até salvar: saem antes, para o
+            // MuPDF (que aplica toda /Redact da página) não aplicá-las também
+            d.purge_hidden()?;
+            d.history.hidden.clear();
             let mut applied = 0;
+            let mut removed_fields = Vec::new();
             for page in 0..d.page_count()? {
                 let mut pdf_page = d.inner.load_pdf_page(page)?;
                 let mut boxes = Vec::new();
@@ -270,6 +437,11 @@ impl PdfDoc {
                 if boxes.is_empty() {
                     continue;
                 }
+                removed_fields.extend(remove_covered_annots(&mut pdf_page, &boxes)?);
+                // a miniatura e os dados privados de outros programas guardam a página original
+                let mut page_obj = pdf_page.object();
+                page_obj.dict_delete("Thumb")?;
+                page_obj.dict_delete("PieceInfo")?;
                 pdf_page.apply_redactions_with_options(PdfRedactOptions {
                     black_boxes: false,
                     image_method: PdfRedactImageMethod::Pixels,
@@ -277,10 +449,39 @@ impl PdfDoc {
                     text: PdfRedactTextMethod::Remove,
                 })?;
                 drop(pdf_page);
+                d.strip_alternate_text(page)?;
                 d.paint_boxes(page, &boxes, look, overlay.as_ref())?;
+            }
+            if !removed_fields.is_empty() {
+                prune_fields(&d.inner, &removed_fields)?;
             }
             Ok(applied)
         })
+    }
+
+    /// Tira o texto alternativo (/ActualText, /Alt, /E) do conteúdo da página redigida: o marcado
+    /// continua no fluxo depois que a redação apaga os glifos, e leitores o usam para copiar e
+    /// extrair. O conteúdo de dentro fica; só o par BDC…EMC com esse texto sai.
+    fn strip_alternate_text(&mut self, page: i32) -> Result<()> {
+        let mut page_obj = self.inner.find_page(page)?;
+        let content = page_content(&page_obj)?;
+        let cuts = alternate_text_marks(&content);
+        if cuts.is_empty() {
+            return Ok(());
+        }
+        let mut out = Vec::with_capacity(content.len());
+        let mut at = 0;
+        for r in cuts {
+            out.extend(&content[at..r.start]);
+            out.push(b' ');
+            at = r.end;
+        }
+        out.extend(&content[at..]);
+        let stream = self
+            .inner
+            .add_stream(&Buffer::from_bytes(&out)?, None, false)?;
+        page_obj.dict_put("Contents", stream)?;
+        Ok(())
     }
 
     /// Pinta as caixas aplicadas (tela) com a cor e o texto sobreposto, por cima do conteúdo.
@@ -361,14 +562,15 @@ impl PdfDoc {
                     n.dict_delete("JavaScript")?;
                 }
             }
-            // só os metadados: nada a fazer nas páginas
-            let pages = if opts.scripts || opts.comments || opts.attachments {
-                d.page_count()?
-            } else {
-                0
-            };
-            for page in 0..pages {
+            for page in 0..d.page_count()? {
                 let mut pdf_page = d.inner.load_pdf_page(page)?;
+                if opts.metadata {
+                    // metadados, dados privados de outros programas e a miniatura da página
+                    let mut obj = pdf_page.object();
+                    for key in ["Metadata", "PieceInfo", "Thumb"] {
+                        obj.dict_delete(key)?;
+                    }
+                }
                 if opts.scripts {
                     pdf_page.object().dict_delete("AA")?;
                 }
