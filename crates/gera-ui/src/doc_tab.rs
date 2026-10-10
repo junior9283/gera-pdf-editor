@@ -322,7 +322,7 @@ impl DocTab {
             }
             DocCommand::Delete if self.edit_pdf_tools => {
                 if let Some(action) = self.edit_pdf.delete_selected() {
-                    send_image_action(&self.worker, &mut self.status, action);
+                    send_edit_action(&self.worker, &mut self.status, action);
                 }
             }
             DocCommand::Delete => self.edit.delete_selected(),
@@ -766,6 +766,9 @@ impl DocTab {
                     self.status = format!("Não foi possível fazer a alteração: {msg}");
                 }
                 Response::PageImages { page, images } => self.edit_pdf.on_images(page, images),
+                Response::PageTextBlocks { page, blocks } => {
+                    self.edit_pdf.on_text_blocks(page, blocks)
+                }
             }
         }
     }
@@ -1278,14 +1281,16 @@ impl DocTab {
         self.prepare.set_tool(None);
         self.prepare.selected = None;
         self.edit_pdf_tools = id == tc::EDIT_PDF;
-        self.edit_pdf.reset();
+        if let Some(action) = self.edit_pdf.reset() {
+            send_edit_action(&self.worker, &mut self.status, action);
+        }
         self.edit.set_fill_tool(None);
     }
 
     /// Editar PDF: aplica `edit` à imagem selecionada.
     pub(crate) fn edit_image(&mut self, edit: pdf_core::ImageEdit) {
         if let Some(action) = self.edit_pdf.edit_selected(edit) {
-            send_image_action(&self.worker, &mut self.status, action);
+            send_edit_action(&self.worker, &mut self.status, action);
         }
     }
 
@@ -1773,10 +1778,10 @@ impl DocTab {
                     return;
                 };
                 match target {
-                    Some((page, name)) => send_image_action(
+                    Some((page, name)) => send_edit_action(
                         &self.worker,
                         &mut self.status,
-                        crate::edit_pdf::ImageAction::Edit {
+                        crate::edit_pdf::EditAction::Edit {
                             page,
                             name,
                             edit: pdf_core::ImageEdit::Replace { path },
@@ -1888,7 +1893,7 @@ impl DocTab {
         let (form, fields) = (&mut self.form, &self.fields);
         let (prepare, preparing) = (&mut self.prepare, self.prepare_tools);
         let (edit_pdf, editing_pdf) = (&mut self.edit_pdf, self.edit_pdf_tools);
-        let mut image_actions = Vec::new();
+        let mut edit_actions = Vec::new();
         let signing = self.cert_tools && self.cert.placing;
         let cert = &mut self.cert;
         let mut sign_at = None;
@@ -1920,8 +1925,8 @@ impl DocTab {
                             return;
                         }
                         if editing_pdf {
-                            // Editar PDF: só as imagens (sem comentários nem campos)
-                            image_actions.extend(crate::edit_pdf::on_page(
+                            // Editar PDF: só o texto e as imagens (sem comentários nem campos)
+                            edit_actions.extend(crate::edit_pdf::on_page(
                                 ui,
                                 edit_pdf,
                                 worker,
@@ -1973,8 +1978,8 @@ impl DocTab {
         for op in prepare_ops {
             self.worker.send(Request::Prepare(op));
         }
-        for action in image_actions {
-            send_image_action(&self.worker, &mut self.status, action);
+        for action in edit_actions {
+            send_edit_action(&self.worker, &mut self.status, action);
         }
         if let Some((page, id)) = open_props {
             self.prepare.props_for = Some((page, id));
@@ -2089,16 +2094,20 @@ impl Drop for DocTab {
 }
 
 /// Editar PDF: a edição vai ao worker; os avisos, para a barra de status.
-fn send_image_action(worker: &Worker, status: &mut String, action: crate::edit_pdf::ImageAction) {
-    use crate::edit_pdf::ImageAction;
+fn send_edit_action(worker: &Worker, status: &mut String, action: crate::edit_pdf::EditAction) {
+    use crate::edit_pdf::EditAction;
     match action {
-        ImageAction::Edit { page, name, edit } => {
+        EditAction::Edit { page, name, edit } => {
             worker.send(Request::EditImage { page, name, edit })
         }
-        ImageAction::Add { page, path, center } => {
+        EditAction::Add { page, path, center } => {
             worker.send(Request::AddImage { page, path, center })
         }
-        ImageAction::Notice(msg) => *status = msg,
+        EditAction::EditText { page, rect, text } => {
+            worker.send(Request::EditTextBlock { page, rect, text })
+        }
+        EditAction::AddText { page, at, text } => worker.send(Request::AddText { page, at, text }),
+        EditAction::Notice(msg) => *status = msg,
     }
 }
 
