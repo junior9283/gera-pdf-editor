@@ -291,3 +291,31 @@ fn filling_a_field_reports_every_field_of_the_document() {
         other => panic!("esperava FieldsChanged, veio {other:?}"),
     }
 }
+
+#[test]
+fn preparing_a_form_reports_the_new_fields() {
+    let (_d, w, _) = opened(1);
+    w.send(Request::Prepare(pdf_core::PrepareOp::Add {
+        page: 0,
+        rect: PdfRect::new(100.0, 100.0, 250.0, 122.0),
+        kind: pdf_core::NewFieldKind::Text,
+        name: "Nome".into(),
+    }));
+    match recv(&w) {
+        Response::FieldsChanged { fields, history } => {
+            assert!(fields.iter().any(|f| f.name == "Nome"));
+            assert!(history.can_undo);
+        }
+        other => panic!("esperava FieldsChanged, veio {other:?}"),
+    }
+    w.send(Request::Prepare(pdf_core::PrepareOp::Add {
+        page: 0,
+        rect: PdfRect::new(100.0, 200.0, 250.0, 222.0),
+        kind: pdf_core::NewFieldKind::Text,
+        name: "Nome".into(),
+    }));
+    assert!(
+        matches!(recv(&w), Response::AnnotFailed(_)),
+        "nome repetido"
+    );
+}

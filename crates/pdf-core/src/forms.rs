@@ -60,7 +60,7 @@ pub struct FieldInfo {
 }
 
 /// Opções de uma lista: cada item é `(texto)` ou `[(exportação) (rótulo)]`.
-fn options_of(obj: &PdfObject) -> Result<Vec<(String, String)>> {
+pub(crate) fn options_of(obj: &PdfObject) -> Result<Vec<(String, String)>> {
     let Some(opt) = obj.get_dict_inheritable("Opt")? else {
         return Ok(Vec::new());
     };
@@ -87,7 +87,7 @@ fn options_of(obj: &PdfObject) -> Result<Vec<(String, String)>> {
 }
 
 /// Estado "ligado" de uma caixa ou botão de opção: a chave de /AP /N que não é "Off".
-fn on_state(obj: &PdfObject) -> Result<String> {
+pub(crate) fn on_state(obj: &PdfObject) -> Result<String> {
     let Some(normal) = obj
         .get_dict("AP")?
         .and_then(|ap| ap.get_dict("N").ok().flatten())
@@ -107,7 +107,7 @@ fn on_state(obj: &PdfObject) -> Result<String> {
 
 /// Nó do campo (com /T) de um widget: os botões de opção são filhos sem nome do grupo.
 /// A subida é limitada: um /Parent em ciclo (PDF malicioso) não pode travar o app.
-fn field_head(obj: &PdfObject) -> Result<PdfObject> {
+pub(crate) fn field_head(obj: &PdfObject) -> Result<PdfObject> {
     const MAX_DEPTH: usize = 32;
     let mut node = obj.try_clone()?;
     for _ in 0..MAX_DEPTH {
@@ -123,7 +123,7 @@ fn field_head(obj: &PdfObject) -> Result<PdfObject> {
 }
 
 /// Widgets do campo: os /Kids, ou o próprio nó quando campo e widget são o mesmo objeto.
-fn kids_of(head: &PdfObject) -> Result<Vec<PdfObject>> {
+pub(crate) fn kids_of(head: &PdfObject) -> Result<Vec<PdfObject>> {
     match head.get_dict("Kids")? {
         Some(kids) => (0..kids.len()? as i32)
             .filter_map(|i| kids.get_array(i).transpose())

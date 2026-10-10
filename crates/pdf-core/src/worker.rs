@@ -60,6 +60,8 @@ pub enum Request {
     },
     /// Limpar formulário (valores padrão).
     ResetForm,
+    /// Preparar formulário: criar, editar, mover ou excluir um campo.
+    Prepare(crate::PrepareOp),
     /// Organizar páginas (girar, excluir, mover, inserir, substituir, recortar).
     Pages(PageOp),
     /// Divide o documento em arquivos na pasta `dir`; o documento não muda.
@@ -287,6 +289,7 @@ impl State {
                 d.set_field(page, id, &value).map(|()| Changed::Fields)
             }),
             Request::ResetForm => self.edit(send, |d| d.reset_form().map(|()| Changed::Document)),
+            Request::Prepare(op) => self.edit(send, |d| d.prepare(op).map(|()| Changed::Fields)),
             Request::Pages(op) => {
                 self.edit(send, |d| d.apply_pages(op).map(|()| Changed::Document))
             }
