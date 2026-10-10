@@ -230,16 +230,17 @@ pub struct HeaderFooter {
 }
 
 impl HeaderFooter {
-    /// O texto de uma caixa na página de posição `index` entre as escolhidas (número = início +
-    /// `index`), com `total` páginas no documento e a data `today`.
-    pub fn expand(&self, text: &str, index: usize, total: i32, today: &str) -> String {
+    /// O texto de uma caixa numa página: `offset` é a distância (em páginas do documento) até a
+    /// primeira escolhida — o número da página é o "Começar em" mais ela, e combina com `total`;
+    /// `nth` é a posição entre as escolhidas (o Bates conta só as marcadas).
+    pub fn expand(&self, text: &str, offset: usize, nth: usize, total: i32, today: &str) -> String {
         let mut t = text
-            .replace("<<n>>", &(self.start as usize + index).to_string())
+            .replace("<<n>>", &(self.start as usize + offset).to_string())
             .replace("<<total>>", &total.to_string())
             .replace("<<data>>", today);
         if let Some(b) = &self.bates {
             let digits = b.digits.clamp(1, 12) as usize;
-            let n = b.start as usize + index;
+            let n = b.start as usize + nth;
             t = t.replace(
                 "<<bates>>",
                 &format!("{}{n:0digits$}{}", b.prefix, b.suffix),
@@ -527,7 +528,7 @@ impl PdfDoc {
                 let mut fonts = res.get_dict("Font")?.expect("acabou de ser posto");
                 fonts.dict_put("F0", self.inner.add_font(&font)?)?;
                 res.dict_put("Font", fonts)?;
-                (ops, res, [0.0, 0.0, w, h])
+                (ops.into_bytes(), res, [0.0, 0.0, w, h])
             }
             WatermarkSource::Image(path) => {
                 let up = UprightImage::open(path)?;
@@ -541,7 +542,7 @@ impl PdfDoc {
                 let mut x = res.get_dict("XObject")?.expect("acabou de ser posto");
                 x.dict_put("Im0", img)?;
                 res.dict_put("XObject", x)?;
-                (ops, res, [0.0, 0.0, up.width, up.height])
+                (ops.into_bytes(), res, [0.0, 0.0, up.width, up.height])
             }
             WatermarkSource::PdfPage { path, page } => {
                 let src = PdfDocument::open(path.as_path())
@@ -564,7 +565,7 @@ impl PdfDoc {
                         .transpose()?
                         .unwrap_or(0.0);
                 }
-                let content = String::from_utf8_lossy(&page_content(&obj)?).into_owned();
+                let content = page_content(&obj)?;
                 let res = match obj.get_dict_inheritable("Resources")? {
                     Some(r) => self.inner.graft_object(&r)?,
                     None => self.inner.new_dict()?,
@@ -581,9 +582,9 @@ impl PdfDoc {
             num(y + h)
         ))?;
         dict.dict_put("Resources", resources)?;
-        let form =
-            self.inner
-                .add_stream(&Buffer::from_bytes(content.as_bytes())?, Some(&dict), false)?;
+        let form = self
+            .inner
+            .add_stream(&Buffer::from_bytes(&content)?, Some(&dict), false)?;
         Ok((form, bbox))
     }
 
@@ -615,7 +616,8 @@ impl PdfDoc {
                 for (slots, subtype) in [(0..3, "Header"), (3..6, "Footer")] {
                     let mut runs = String::new();
                     for slot in slots {
-                        let text = h.expand(&h.texts[slot], i, total, &today);
+                        let offset = (page - pages[0]) as usize;
+                        let text = h.expand(&h.texts[slot], offset, i, total, &today);
                         let lines: Vec<&str> = text.lines().collect();
                         if text.trim().is_empty() {
                             continue;

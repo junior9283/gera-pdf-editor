@@ -219,7 +219,7 @@ pub fn pagination_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     let what = crate::pagination_tool::label(kind);
     ui.horizontal(|ui| {
         if ui.button("➕ Adicionar…").clicked() {
-            doc.pagination.open(false);
+            doc.pagination.add();
         }
         if ui
             .add_enabled(present, egui::Button::new("Atualizar…"))

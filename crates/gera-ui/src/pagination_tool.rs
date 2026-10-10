@@ -28,9 +28,31 @@ pub struct PaginationTool {
     config: Option<PaginationConfig>,
     /// A janela aberta e se ela substitui o existente (Atualizar).
     pub dialog: Option<(PaginationWindow, bool)>,
+    /// Adicionar com uma já existente: perguntando se substitui (como o Acrobat).
+    pub asking: bool,
 }
 
 impl PaginationTool {
+    /// Adicionar…: abre a janela, ou antes pergunta se substitui a existente.
+    pub fn add(&mut self) {
+        if self.present {
+            self.asking = true;
+        } else {
+            self.open(false);
+        }
+    }
+
+    /// Resposta à pergunta: `Some(true)` substitui, `Some(false)` acrescenta outra, `None` cancela.
+    pub fn answer(&mut self, replace: Option<bool>) {
+        self.asking = false;
+        if let Some(replace) = replace {
+            self.open(false);
+            if let Some((_, r)) = self.dialog.as_mut() {
+                *r = replace;
+            }
+        }
+    }
+
     /// Abre a janela de Adicionar (`update`: Atualizar, com as escolhas da existente).
     pub fn open(&mut self, update: bool) {
         let Some(kind) = self.tool else {
@@ -66,6 +88,7 @@ impl PaginationTool {
         self.present = false;
         self.config = None;
         self.dialog = None;
+        self.asking = false;
         tool.map(Request::PaginationState)
     }
 
@@ -82,6 +105,38 @@ impl DocTab {
             return;
         };
         let total = view.sizes.len();
+        if self.pagination.asking {
+            let mut answer = None;
+            let mut open = true;
+            egui::Window::new(format!("Adicionar {}", label(kind)))
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "O documento já tem {}. Substituir a existente ou adicionar uma nova?",
+                        label(kind)
+                    ));
+                    ui.horizontal(|ui| {
+                        if ui.button("Substituir existente").clicked() {
+                            answer = Some(Some(true));
+                        }
+                        if ui.button("Adicionar nova").clicked() {
+                            answer = Some(Some(false));
+                        }
+                        if ui.button("Cancelar").clicked() {
+                            answer = Some(None);
+                        }
+                    });
+                });
+            if !open {
+                answer = Some(None);
+            }
+            if let Some(a) = answer {
+                self.pagination.answer(a);
+            }
+            return;
+        }
         let page = view
             .sizes
             .get(self.last.current_page)
@@ -149,6 +204,32 @@ mod tests {
             t.dialog,
             Some((PaginationWindow::HeaderFooter(_), false))
         ));
+    }
+
+    /// Como no Acrobat: Adicionar num documento que já tem a marca pergunta se substitui.
+    #[test]
+    fn adding_over_an_existing_one_asks_first() {
+        let mut t = PaginationTool::default();
+        t.set_tool(Some(Pagination::Watermark));
+        t.add();
+        assert!(t.dialog.is_some() && !t.asking, "sem marca: abre direto");
+        t.dialog = None;
+        t.on_state(Pagination::Watermark, true, None);
+        t.add();
+        assert!(t.asking && t.dialog.is_none());
+        t.answer(Some(true));
+        assert!(
+            matches!(t.dialog, Some((PaginationWindow::Watermark(_), true))),
+            "substituir"
+        );
+        t.dialog = None;
+        t.add();
+        t.answer(Some(false));
+        assert!(matches!(t.dialog, Some((_, false))), "adicionar nova");
+        t.dialog = None;
+        t.add();
+        t.answer(None);
+        assert!(t.dialog.is_none() && !t.asking, "cancelar");
     }
 
     #[test]

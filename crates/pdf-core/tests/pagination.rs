@@ -288,3 +288,42 @@ fn file_paths_read_from_the_document_are_dropped() {
 fn png_hex(b: &[u8]) -> String {
     b.iter().map(|c| format!("{c:02X}")).collect()
 }
+
+/// A página de outro PDF vira marca com os bytes do conteúdo intactos (acentos em WinAnsi,
+/// strings binárias de fontes Type0, imagens embutidas).
+#[test]
+fn a_pdf_page_mark_keeps_non_utf8_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("origem.pdf");
+    let mut content = b"BT /F1 24 Tf 72 700 Td (caf".to_vec();
+    content.push(0xE9);
+    content.extend(b") Tj ET");
+    let mut pdf = b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 5 0 R>>>>/Contents 4 0 R>>endobj\n".to_vec();
+    pdf.extend(format!("4 0 obj<</Length {}>>stream\n", content.len()).as_bytes());
+    pdf.extend(&content);
+    pdf.extend(b"\nendstream endobj\n5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>endobj\ntrailer<</Root 1 0 R>>\n");
+    std::fs::write(&src, pdf).unwrap();
+    let (_d, mut d) = open(1, 0);
+    let mut w = text_mark(PageSet::All);
+    w.source = WatermarkSource::PdfPage { path: src, page: 0 };
+    d.add_watermark(&w, false).unwrap();
+    let text = d.page_text(0).unwrap();
+    assert!(text.contains("café"), "{text}");
+}
+
+/// O número da página segue as páginas do documento (combina com <<total>>), a partir do
+/// "Começar em" na primeira escolhida.
+#[test]
+fn page_numbers_follow_the_document_pages() {
+    let (_d, mut d) = open(6, 0);
+    let mut h = header_footer();
+    h.texts = Default::default();
+    h.texts[1] = "Pag <<n>> de <<total>>".into();
+    h.start = 2;
+    h.bates = None;
+    h.pages = PageSet::Even;
+    d.add_header_footer(&h, false).unwrap();
+    assert!(d.page_text(1).unwrap().contains("Pag 2 de 6"));
+    assert!(d.page_text(3).unwrap().contains("Pag 4 de 6"));
+    assert!(d.page_text(5).unwrap().contains("Pag 6 de 6"));
+}

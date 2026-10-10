@@ -236,7 +236,7 @@ impl HeaderFooterDialog {
         let [cr, cg, cb] = self.h.look.color;
         let [mt, mb, ml, mr] = self.h.margins.map(|m| m * k);
         for (i, text) in self.h.texts.iter().enumerate() {
-            let text = shown.expand(text, 0, total as i32, &self.today.1);
+            let text = shown.expand(text, 0, 0, total as i32, &self.today.1);
             if text.trim().is_empty() {
                 continue;
             }
