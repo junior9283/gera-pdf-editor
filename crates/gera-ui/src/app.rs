@@ -53,6 +53,7 @@ pub struct GeraApp {
     identity: Option<String>,
     /// Janela Combinar arquivos.
     combine: crate::shell::combine::CombineWindow,
+    compare: crate::shell::compare::CompareWindow,
     bench: Option<Bench>,
 }
 
@@ -90,6 +91,7 @@ impl GeraApp {
             show_about: false,
             identity: None,
             combine: Default::default(),
+            compare: Default::default(),
             bench,
         };
         app.refresh_recent_exists();
@@ -410,6 +412,7 @@ impl GeraApp {
             Command::ActivateTab(t) => self.activate(t),
             Command::Shortcuts => self.show_shortcuts = true,
             Command::About => self.show_about = true,
+            Command::Compare => self.run_tool(ctx, tools_catalog::COMPARE),
             Command::Identity => {
                 self.identity = Some(self.prefs.author.clone().unwrap_or_default());
             }
@@ -505,6 +508,12 @@ impl GeraApp {
         if doc.redact.open {
             cmd = egui::Panel::top("redigir")
                 .show(ui, |ui| toolbar::redact_row(ui, doc))
+                .inner
+                .or(cmd);
+        }
+        if doc.compare_tools {
+            cmd = egui::Panel::top("comparacao")
+                .show(ui, |ui| toolbar::compare_row(ui, doc))
                 .inner
                 .or(cmd);
         }
@@ -691,6 +700,12 @@ impl GeraApp {
     fn run_tool(&mut self, ctx: &egui::Context, id: &str) {
         if id == tools_catalog::COMBINE {
             self.combine.open = true;
+            return;
+        }
+        if id == tools_catalog::COMPARE {
+            // o documento da aba ativa entra como antigo (como no Acrobat)
+            let active = self.active_path();
+            self.compare.start_with(active);
             return;
         }
         if id == tools_catalog::CREATE {
@@ -884,6 +899,19 @@ impl eframe::App for GeraApp {
         self.combine.open_docs = self.docs.iter().map(|d| d.path.clone()).collect();
         if let Some(merged) = self.combine.show(ui) {
             self.open_path(ui.ctx(), merged);
+        }
+        if self.compare.open {
+            self.compare.open_docs = self.docs.iter().map(|d| d.path.clone()).collect();
+            self.compare.dirty_docs = self
+                .docs
+                .iter()
+                .filter(|d| d.is_dirty())
+                .map(|d| d.path.clone())
+                .collect();
+        }
+        if let Some(result) = self.compare.show(ui) {
+            // a aba do resultado abre com a linha Comparação (o PDF diz que é uma comparação)
+            self.open_path(ui.ctx(), result);
         }
         self.identity_window(ui);
     }

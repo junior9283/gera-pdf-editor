@@ -4,6 +4,7 @@ pub mod cache;
 pub mod certificates;
 pub mod close;
 pub mod comments;
+pub mod compare_nav;
 pub mod fill_sign;
 pub mod layout;
 pub mod nav;

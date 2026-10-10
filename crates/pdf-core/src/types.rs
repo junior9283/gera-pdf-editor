@@ -26,6 +26,16 @@ impl PdfRect {
         self.y1 - self.y0
     }
 
+    /// O menor retângulo que contém os dois.
+    pub fn union(&self, o: &PdfRect) -> PdfRect {
+        PdfRect::new(
+            self.x0.min(o.x0),
+            self.y0.min(o.y0),
+            self.x1.max(o.x1),
+            self.y1.max(o.y1),
+        )
+    }
+
     /// O mesmo retângulo deslocado de (`dx`, `dy`).
     pub fn translated(&self, dx: f32, dy: f32) -> PdfRect {
         PdfRect::new(self.x0 + dx, self.y0 + dy, self.x1 + dx, self.y1 + dy)
@@ -386,6 +396,8 @@ pub struct DocSummary {
     pub form_notes: crate::FormNotes,
     /// Proteção e permissões de quem abriu.
     pub security: crate::SecurityInfo,
+    /// Resultado do Comparar arquivos (`/Info /GeraCompare`): a aba abre a linha Comparação.
+    pub is_comparison: bool,
 }
 
 /// Rotação da vista, no sentido horário. Só muda a tela, nunca o arquivo.

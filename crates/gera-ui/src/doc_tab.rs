@@ -50,6 +50,9 @@ pub enum DocCommand {
     Rotate {
         clockwise: bool,
     },
+    /// Resultado do Comparar arquivos: próxima / anterior alteração.
+    NextChange,
+    PrevChange,
 }
 
 /// O que aconteceu com o documento e interessa à casca (abas e recentes).
@@ -129,6 +132,8 @@ pub struct DocTab {
     pub(crate) security: pdf_core::SecurityInfo,
     /// Linha Proteger PDF aberta.
     pub(crate) protect_tools: bool,
+    /// Linha Comparação aberta (resultado do Comparar arquivos).
+    pub(crate) compare_tools: bool,
     /// Ferramenta Redigir (aberta ou não) e o estado dela.
     pub(crate) redact: crate::redact_tool::RedactTool,
     pub(crate) protect: Option<crate::shell::protect_dialog::ProtectDialog>,
@@ -239,6 +244,7 @@ impl DocTab {
             cert: Default::default(),
             security: Default::default(),
             protect_tools: false,
+            compare_tools: false,
             redact: Default::default(),
             protect: None,
             unlock: None,
@@ -296,6 +302,12 @@ impl DocTab {
     }
 
     pub fn run(&mut self, ctx: &egui::Context, cmd: DocCommand) {
+        if let DocCommand::NextChange | DocCommand::PrevChange = cmd {
+            if self.compare_tools {
+                self.step_change(cmd == DocCommand::NextChange);
+            }
+            return;
+        }
         if matches!(cmd, DocCommand::Undo | DocCommand::Redo) && self.commit_field() {
             // o texto em edição entra no histórico; desfazer o tira (como no Acrobat)
             if cmd == DocCommand::Undo {
@@ -356,6 +368,7 @@ impl DocTab {
                 self.zoom_to(z);
             }
             DocCommand::Fit(fit) => view.fit = fit,
+            DocCommand::NextChange | DocCommand::PrevChange => {} // já tratados no começo
             DocCommand::Mode(mode) => {
                 view.set_mode(mode, page);
                 self.jump_to = view.go_to(page as i32, None);
@@ -487,6 +500,7 @@ impl DocTab {
     }
 
     fn on_opened(&mut self, summary: DocSummary) {
+        let comparison = summary.is_comparison;
         let (path, sizes) = self.apply_summary(summary);
         self.history = HistoryState::default();
         self.password_prompt = None;
@@ -501,6 +515,50 @@ impl DocTab {
         self.last = CanvasFrame::default();
         self.jump_to = Some(0.0);
         self.events.push(DocEvent::Opened);
+        if comparison {
+            self.show_row(app_state::tools_catalog::COMPARE);
+        }
+    }
+
+    /// As alterações do resultado da comparação, na ordem de leitura.
+    pub(crate) fn changes(&self) -> Vec<&AnnotInfo> {
+        let marks: Vec<&AnnotInfo> = self
+            .annots
+            .iter()
+            .filter(|a| a.author == pdf_core::COMPARE_AUTHOR && a.reply_to.is_none())
+            .collect();
+        let spots: Vec<_> = marks
+            .iter()
+            .map(|a| (a.page, a.rect.y0, a.rect.x0))
+            .collect();
+        app_state::compare_nav::order(&spots)
+            .into_iter()
+            .map(|i| marks[i])
+            .collect()
+    }
+
+    /// Posição da alteração selecionada entre as `changes`.
+    pub(crate) fn change_at(&self, changes: &[&AnnotInfo]) -> Option<usize> {
+        let sel = self.edit.selected?;
+        changes.iter().position(|a| (a.page, a.id) == sel)
+    }
+
+    /// Seleciona a próxima (ou a anterior) alteração e leva até ela.
+    pub(crate) fn step_change(&mut self, forward: bool) {
+        let changes = self.changes();
+        let current = self.change_at(&changes);
+        let Some(k) = app_state::compare_nav::step(changes.len(), current, forward) else {
+            return;
+        };
+        let (page, id, at) = (
+            changes[k].page,
+            changes[k].id,
+            (changes[k].rect.x0, changes[k].rect.y0),
+        );
+        self.edit.selected = Some((page, id));
+        if let Some(y) = self.view.as_mut().and_then(|v| v.go_to(page, Some(at))) {
+            self.jump_to = Some(y);
+        }
     }
 
     /// O documento mudou de páginas: recarrega tudo, ficando perto da página em que estava.
@@ -1329,6 +1387,7 @@ impl DocTab {
             return;
         }
         self.protect_tools = id == tc::PROTECT;
+        self.compare_tools = id == tc::COMPARE;
         self.comment_tools = id == app_state::tools_catalog::COMMENT;
         self.fill_tools = id == app_state::tools_catalog::FILL_SIGN;
         self.prepare_tools = id == app_state::tools_catalog::PREPARE_FORM;

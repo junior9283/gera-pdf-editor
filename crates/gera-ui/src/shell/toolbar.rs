@@ -251,6 +251,43 @@ pub fn redact_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     out
 }
 
+/// Linha Comparação (resultado do Comparar arquivos): a alteração atual, anterior/próxima
+/// (Ctrl+, / Ctrl+.), Nova comparação e Fechar.
+pub fn compare_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
+    let mut out = None;
+    ui.horizontal(|ui| {
+        let changes = doc.changes();
+        let at = doc.change_at(&changes);
+        let n = changes.len();
+        ui.label(match (n, at) {
+            (0, _) => "Nenhuma alteração".to_string(),
+            (_, Some(i)) => format!("Alteração {} de {n}", i + 1),
+            (1, None) => "1 alteração".to_string(),
+            (_, None) => format!("{n} alterações"),
+        });
+        for (label, cmd, enabled) in [
+            (
+                "◀ Anterior",
+                DocCommand::PrevChange,
+                at.is_some_and(|i| i > 0),
+            ),
+            (
+                "Próxima ▶",
+                DocCommand::NextChange,
+                n > 0 && at.is_none_or(|i| i + 1 < n),
+            ),
+        ] {
+            button(ui, &mut out, label, Command::Doc(cmd), enabled);
+        }
+        ui.separator();
+        if ui.button("Nova comparação…").clicked() {
+            out = Some(Command::Compare);
+        }
+        close_row(ui, doc);
+    });
+    out
+}
+
 /// Linha da Marca d'água ou do Cabeçalho e rodapé: Adicionar…, Atualizar…, Remover, desfazer/refazer
 /// e Fechar (como no Acrobat).
 pub fn pagination_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {

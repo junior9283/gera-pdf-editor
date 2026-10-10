@@ -1,8 +1,8 @@
 //! Peças comuns para mexer no conteúdo e nos recursos da página (Editar PDF, marca d'água,
 //! cabeçalho e rodapé): leitura do conteúdo, tokenizador, matrizes e recursos próprios.
 use crate::error::{refused, Result};
-use mupdf::pdf::{PdfDocument, PdfObject};
-use mupdf::Matrix;
+use mupdf::pdf::{PdfDocument, PdfGraftMap, PdfObject};
+use mupdf::{Buffer, Matrix};
 
 /// Os seis números da matriz, para o operador `cm` ou `Tm`.
 pub(crate) fn matrix_ops(m: &Matrix) -> String {
@@ -247,4 +247,49 @@ pub(crate) fn decode_name(raw: &[u8]) -> Vec<u8> {
         }
     }
     out
+}
+
+/// A página `obj` de outro documento, pronta para virar formulário em `dest`: o conteúdo, os recursos
+/// (copiados por `map`, que reaproveita o que já foi copiado) e a caixa (x0, y0, largura, altura) da
+/// MediaBox.
+pub(crate) fn page_parts(
+    map: &mut PdfGraftMap,
+    dest: &PdfDocument,
+    obj: &PdfObject,
+) -> Result<(Vec<u8>, PdfObject, [f32; 4])> {
+    let media = obj
+        .get_dict_inheritable("MediaBox")?
+        .ok_or_else(|| refused("a página não tem tamanho"))?;
+    let mut v = [0.0; 4];
+    for (i, x) in v.iter_mut().enumerate() {
+        *x = media
+            .get_array(i as i32)?
+            .map(|n| n.as_float())
+            .transpose()?
+            .unwrap_or(0.0);
+    }
+    let content = page_content(obj)?;
+    let res = match obj.get_dict_inheritable("Resources")? {
+        Some(r) => map.graft_object(&r)?,
+        None => dest.new_dict()?,
+    };
+    Ok((content, res, [v[0], v[1], v[2] - v[0], v[3] - v[1]]))
+}
+
+/// XObject de formulário com o conteúdo, os recursos e a caixa (x0, y0, largura, altura).
+pub(crate) fn form_xobject(
+    doc: &mut PdfDocument,
+    content: &[u8],
+    resources: PdfObject,
+    [x, y, w, h]: [f32; 4],
+) -> Result<PdfObject> {
+    let mut dict = doc.new_object_from_str(&format!(
+        "<</Type/XObject/Subtype/Form/BBox[{} {} {} {}]>>",
+        num(x),
+        num(y),
+        num(x + w),
+        num(y + h)
+    ))?;
+    dict.dict_put("Resources", resources)?;
+    Ok(doc.add_stream(&Buffer::from_bytes(content)?, Some(&dict), false)?)
 }

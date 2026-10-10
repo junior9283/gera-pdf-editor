@@ -26,6 +26,8 @@ pub enum Command {
     Print,
     /// Editar → Preferências → Identidade: o nome do usuário.
     Identity,
+    /// Ferramentas → Comparar arquivos.
+    Compare,
 }
 
 impl Command {
@@ -49,6 +51,7 @@ impl Command {
             Command::Properties => "Propriedades…",
             Command::Print => "Imprimir…",
             Command::Identity => "Identidade…",
+            Command::Compare => "Comparar arquivos…",
             Command::Doc(d) => match d {
                 DocCommand::Save => "Salvar",
                 DocCommand::Undo => "Desfazer",
@@ -67,6 +70,8 @@ impl Command {
                 DocCommand::Delete => "Excluir",
                 DocCommand::Rotate { clockwise: true } => "Girar no sentido horário",
                 DocCommand::Rotate { clockwise: false } => "Girar no sentido anti-horário",
+                DocCommand::NextChange => "Próxima alteração",
+                DocCommand::PrevChange => "Alteração anterior",
             },
         };
         s.into()
@@ -101,6 +106,9 @@ pub fn shortcuts() -> Vec<(KeyboardShortcut, Command)> {
         (cmd(Key::C), doc(DocCommand::Copy)),
         (cmd(Key::A), doc(DocCommand::SelectAll)),
         (cmd(Key::Tab), Command::NextTab),
+        // resultado da comparação: como no Acrobat
+        (cmd(Key::Period), doc(DocCommand::NextChange)),
+        (cmd(Key::Comma), doc(DocCommand::PrevChange)),
         (cmd(Key::D), Command::Properties),
         (cmd(Key::P), Command::Print),
         (

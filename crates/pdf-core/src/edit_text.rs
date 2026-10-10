@@ -317,7 +317,7 @@ pub const NEW_TEXT_SIZE: f32 = 12.0;
 pub const TEXT_MARGIN: f32 = 36.0;
 pub const MIN_TEXT_WIDTH: f32 = 72.0;
 
-fn strip_subset(name: &str) -> &str {
+pub(crate) fn strip_subset(name: &str) -> &str {
     match name.split_once('+') {
         Some((tag, rest)) if tag.len() == 6 && tag.bytes().all(|b| b.is_ascii_uppercase()) => rest,
         _ => name,
