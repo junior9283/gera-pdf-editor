@@ -3,6 +3,7 @@ pub mod sample;
 
 mod annot_edit;
 mod compress;
+mod create_export;
 mod digital_id;
 mod doc;
 mod error;
@@ -20,6 +21,7 @@ mod types;
 mod worker;
 
 pub use compress::{CompressLevel, CompressReport};
+pub use create_export::{create_pdf_from_images, ExportFormat};
 pub use digital_id::{fingerprint, DigitalId};
 pub use doc::{max_render_scale, PdfDoc};
 pub use error::{PdfError, Result};
