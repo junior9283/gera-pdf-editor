@@ -512,3 +512,29 @@ fn result_is_recognized_when_opened() {
             .is_comparison
     );
 }
+
+/// O lado vazio (página inserida) é pintado de cinza claro: a cor não pode vazar para a página do
+/// outro lado, que escreve o texto na cor padrão (preto).
+#[test]
+fn blank_side_color_does_not_leak_into_the_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = text_pdf(dir.path(), "a.pdf", &[pg(&["igual"])], 0);
+    let b = text_pdf(
+        dir.path(),
+        "b.pdf",
+        &[pg(&["igual"]), pg(&["nova pagina com texto"])],
+        0,
+    );
+    let (c, dest) = report(dir.path(), &opts(&a, &b));
+    assert_eq!(c.pairs[1], (None, Some(1)));
+    let doc = PdfDoc::open(&dest, None).unwrap();
+    let img = doc.render(2, 1.0, false).unwrap();
+    let darkest = img
+        .rgb
+        .chunks(3)
+        .map(|p| p.iter().map(|&v| v as u32).sum::<u32>())
+        .min()
+        .unwrap();
+    // texto preto sob o destaque verde claro (multiplicação): bem escuro
+    assert!(darkest < 200, "o texto saiu claro demais: {darkest}");
+}

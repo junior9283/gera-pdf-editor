@@ -300,7 +300,7 @@ impl CompareWindow {
         ui.separator();
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(!busy, egui::Button::new("⇄ Trocar"))
+                .add_enabled(!busy, egui::Button::new("↔ Trocar"))
                 .on_hover_text("Trocar o arquivo antigo pelo novo")
                 .clicked()
             {

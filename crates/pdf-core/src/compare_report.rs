@@ -79,10 +79,11 @@ fn rect_ops(x: f32, y: f32, w: f32, h: f32) -> String {
     format!("{} {} {} {} re", num(x), num(y), num(w), num(h))
 }
 
-/// Retângulo preenchido com `color` (cada um define a própria cor: nada vaza).
+/// Retângulo preenchido com `color`, entre `q`/`Q`: a cor não vaza para o que vem depois (a página
+/// copiada escreve na cor padrão).
 fn fill_rect(color: [f32; 3], x: f32, y: f32, w: f32, h: f32) -> String {
     format!(
-        "{} {} f\n",
+        "q {} {} f Q\n",
         rgb_ops(color.map(|c| (c * 255.0).round() as u8)),
         rect_ops(x, y, w, h)
     )
