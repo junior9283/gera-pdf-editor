@@ -326,8 +326,7 @@ fn free_space(dir: &Path) -> Option<u64> {
     let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
     let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
     // SAFETY: caminho terminado em NUL e estrutura de saída válida
-    (unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0)
-        .then(|| st.f_bavail * st.f_frsize)
+    (unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0).then(|| st.f_bavail * st.f_frsize)
 }
 
 /// Regrava um zip entrada por entrada (comprimido, sem "data descriptor").

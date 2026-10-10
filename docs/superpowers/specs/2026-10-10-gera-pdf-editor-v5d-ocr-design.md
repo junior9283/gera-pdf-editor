@@ -11,7 +11,7 @@ digitalizadas, sem mudar a aparência delas.
 
 - Ferramenta **Digitalizar e OCR** → janela: idioma (Português, Inglês, Português + Inglês), páginas
   (todas / página atual), **Reconhecer texto**, barra de progresso por página e **Cancelar**.
-- Cada página sem texto (menos de 20 caracteres) é renderizada a 300 ppp, reconhecida pelo
+- Cada página sem texto (menos de 3 caracteres) é renderizada a 300 ppp, reconhecida pelo
   Tesseract (embutido no MuPDF) e recebe uma **camada de texto invisível** (modo 3) sobre as palavras,
   com a mesma posição e largura — a página continua igual, mas busca, seleção e cópia funcionam.
   Páginas que já têm texto são puladas (como o Acrobat: "a página já contém texto").
