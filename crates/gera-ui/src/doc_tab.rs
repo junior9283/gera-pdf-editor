@@ -93,6 +93,8 @@ pub struct DocTab {
     pub(crate) edit: EditState,
     /// Anotações visíveis do documento em memória (o worker manda a lista a cada mudança).
     pub(crate) annots: Vec<AnnotInfo>,
+    /// Campos de formulário de todas as páginas.
+    pub(crate) fields: Vec<pdf_core::FieldInfo>,
     /// Estado do histórico de edições no worker.
     history: HistoryState,
     /// O motor de PDF (thread do worker) parou; já avisado.
@@ -176,6 +178,7 @@ impl DocTab {
             search: SearchState::default(),
             edit: EditState::default(),
             annots: Vec::new(),
+            fields: Vec::new(),
             history: HistoryState::default(),
             engine_stopped: false,
             outline: Vec::new(),
@@ -339,6 +342,7 @@ impl DocTab {
 
     fn on_opened(&mut self, summary: DocSummary) {
         self.annots = summary.annots;
+        self.fields = summary.fields;
         self.history = HistoryState::default();
         self.outline = summary.outline;
         self.password_prompt = None;
@@ -362,6 +366,7 @@ impl DocTab {
     /// O documento mudou de páginas: recarrega tudo, ficando perto da página em que estava.
     fn on_pages_changed(&mut self, summary: DocSummary, history: HistoryState) {
         self.annots = summary.annots;
+        self.fields = summary.fields;
         self.outline = summary.outline;
         self.history = history;
         self.edit.keep_valid_selection(&self.annots);
@@ -517,6 +522,19 @@ impl DocTab {
                         (n, Some(dir)) => format!("{n} arquivos criados em {}", dir.display()),
                         _ => "Nenhum arquivo criado.".into(),
                     };
+                }
+                Response::FieldsChanged {
+                    page,
+                    fields,
+                    history,
+                } => {
+                    self.fields.retain(|f| f.page != page);
+                    self.fields.extend(fields);
+                    self.fields.sort_by_key(|f| f.page);
+                    self.history = history;
+                    if let Some(view) = self.view.as_mut() {
+                        view.invalidate_page(page);
+                    }
                 }
                 Response::SplitFailed(msg) => {
                     self.status = format!("Não foi possível dividir: {msg}");

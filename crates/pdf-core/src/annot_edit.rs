@@ -102,6 +102,12 @@ pub(crate) struct Snapshot {
 pub(crate) enum Step {
     Annot(Edit),
     Snapshot(Snapshot),
+    /// Valor de um campo de formulário (o que volta ao desfazer/refazer).
+    Field {
+        page: i32,
+        id: i32,
+        value: String,
+    },
 }
 
 /// Memória máxima dos instantâneos; acima disso os passos mais antigos saem.
@@ -123,6 +129,12 @@ impl History {
         self.redo.clear();
     }
 
+    /// Um passo novo qualquer (ex.: valor de campo): esquece o que dava para refazer.
+    pub(crate) fn record_step(&mut self, step: Step) {
+        self.undo.push(step);
+        self.redo.clear();
+    }
+
     /// Uma operação de página nova: guarda o documento de antes, dentro do orçamento de memória.
     /// Devolve se passos antigos saíram (o desfazer não alcança mais o arquivo salvo).
     pub(crate) fn record_snapshot(&mut self, before: Snapshot, budget: usize) -> bool {
@@ -130,7 +142,7 @@ impl History {
         self.redo.clear();
         let size = |s: &Step| match s {
             Step::Snapshot(snap) => snap.bytes.len(),
-            Step::Annot(_) => 0,
+            Step::Annot(_) | Step::Field { .. } => 0,
         };
         let mut dropped = false;
         while self.undo.iter().map(size).sum::<usize>() > budget {

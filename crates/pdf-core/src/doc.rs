@@ -606,6 +606,10 @@ impl PdfDoc {
         let page_ref = self.inner.load_pdf_page(page)?;
         let mut out = Vec::new();
         for mut annot in page_ref.annotations() {
+            // campos de formulário não são comentários (ficam em `fields`)
+            if annot.r#type()? == PdfAnnotationType::Widget {
+                continue;
+            }
             if self.history.hidden.contains(&(page, annot_id(&annot)?)) {
                 continue; // apagada por nós (sai do arquivo ao salvar)
             }
@@ -860,6 +864,19 @@ impl PdfDoc {
                 self.restore(snap)?;
                 Ok((Step::Snapshot(now), Changed::Document))
             }),
+            Step::Field { page, id, value } => {
+                let (page, id) = (*page, *id);
+                self.write_field(page, id, value).map(|old| {
+                    (
+                        Step::Field {
+                            page,
+                            id,
+                            value: old,
+                        },
+                        Changed::Fields(page),
+                    )
+                })
+            }
         };
         let (from, to) = if back {
             (&mut self.history.undo, &mut self.history.redo)
@@ -1008,6 +1025,7 @@ impl PdfDoc {
             sizes,
             outline: self.outline().unwrap_or_default(),
             annots: self.all_annotations().unwrap_or_default(),
+            fields: self.all_fields().unwrap_or_default(),
         })
     }
 }

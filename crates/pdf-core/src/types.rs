@@ -287,6 +287,8 @@ pub struct DocSummary {
     pub sizes: Vec<PageSize>,
     pub outline: Vec<OutlineItem>,
     pub annots: Vec<AnnotInfo>,
+    /// Campos de formulário de todas as páginas.
+    pub fields: Vec<crate::FieldInfo>,
 }
 
 /// Rotação da vista, no sentido horário. Só muda a tela, nunca o arquivo.
@@ -498,4 +500,6 @@ pub enum PageOp {
 pub enum Changed {
     Pages(Vec<i32>),
     Document,
+    /// Valores de campos de formulário desta página.
+    Fields(i32),
 }
