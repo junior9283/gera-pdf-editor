@@ -1133,6 +1133,7 @@ impl PdfDoc {
             annots: self.all_annotations().unwrap_or_default(),
             fields: self.all_fields().unwrap_or_default(),
             form_notes: self.form_notes().unwrap_or_default(),
+            security: self.security()?,
         })
     }
 }

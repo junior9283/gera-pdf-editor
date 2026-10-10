@@ -116,6 +116,13 @@ pub struct DocTab {
     /// Linha Certificados aberta.
     pub(crate) cert_tools: bool,
     pub(crate) cert: crate::certificates::CertState,
+    /// Proteção e permissões do documento (de quem abriu).
+    pub(crate) security: pdf_core::SecurityInfo,
+    /// Linha Proteger PDF aberta.
+    pub(crate) protect_tools: bool,
+    pub(crate) protect: Option<crate::shell::protect_dialog::ProtectDialog>,
+    /// Pedido da senha de permissões (Desbloquear).
+    pub(crate) unlock: Option<String>,
     /// Pedido de foco no campo de busca (Ctrl+F ou menu).
     pub(crate) focus_search: bool,
     /// Propriedades mostradas na janela (aberta enquanto houver).
@@ -202,6 +209,10 @@ impl DocTab {
             prepare: Default::default(),
             cert_tools: false,
             cert: Default::default(),
+            security: Default::default(),
+            protect_tools: false,
+            protect: None,
+            unlock: None,
             focus_search: false,
             properties: None,
             print_dialog: None,
@@ -270,6 +281,7 @@ impl DocTab {
             DocCommand::Redo if self.history.can_redo => self.worker.send(Request::Redo),
             DocCommand::Undo | DocCommand::Redo => {}
             DocCommand::Find => self.focus_search = true,
+            DocCommand::Copy if !self.security.permissions.copy => self.deny("copiar"),
             DocCommand::Copy => self.edit.copy(ctx),
             DocCommand::SelectAll => self.edit.select_all(&self.worker),
             DocCommand::Delete if self.prepare_tools => {
@@ -380,6 +392,7 @@ impl DocTab {
     }
 
     fn on_opened(&mut self, summary: DocSummary) {
+        self.security = summary.security;
         self.annots = summary.annots;
         self.fields = summary.fields;
         self.prepare.on_fields(&self.fields);
@@ -406,6 +419,7 @@ impl DocTab {
 
     /// O documento mudou de páginas: recarrega tudo, ficando perto da página em que estava.
     fn on_pages_changed(&mut self, summary: DocSummary, history: HistoryState) {
+        self.security = summary.security;
         self.annots = summary.annots;
         self.fields = summary.fields;
         self.prepare.on_fields(&self.fields);
@@ -463,6 +477,22 @@ impl DocTab {
                     self.worker.send(Request::Signatures);
                 }
                 Response::SignFailed(e) => self.status = format!("Não foi possível assinar: {e}"),
+                Response::SecurityChanged {
+                    security,
+                    pending,
+                    history,
+                } => {
+                    self.security = security;
+                    self.history = history;
+                    if pending {
+                        self.status =
+                            "A proteção será aplicada quando o documento for salvo.".into();
+                    } else if security.unlocked {
+                        self.status =
+                            "Documento desbloqueado: todas as permissões liberadas.".into();
+                    }
+                }
+                Response::SecurityFailed(e) => self.status = format!("Proteger PDF: {e}"),
                 Response::Signatures(list) => self.cert.signatures = list,
                 Response::OpenFailed(
                     e @ (PdfError::PasswordRequired | PdfError::WrongPassword),
@@ -528,6 +558,8 @@ impl DocTab {
                     if !self.cert.signatures.is_empty() {
                         self.worker.send(Request::Signatures);
                     }
+                    // a proteção pendente passou a valer
+                    self.worker.send(Request::Security);
                     self.annots = annots;
                     self.history = history;
                     self.status = "Salvo.".into();
@@ -752,6 +784,53 @@ impl DocTab {
         }
     }
 
+    /// Janelas do Proteger PDF: Proteger usando senha e Desbloquear.
+    fn protect_windows(&mut self, ctx: &egui::Context) {
+        if let Some(d) = self.protect.as_mut() {
+            if let Some(outcome) = d.show(ctx) {
+                self.protect = None;
+                if let Some(p) = outcome {
+                    self.worker.send(Request::SetProtection(Some(p)));
+                }
+            }
+        }
+        let Some(pw) = self.unlock.as_mut() else {
+            return;
+        };
+        let mut done = None;
+        let mut open = true;
+        egui::Window::new("Desbloquear")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Senha de permissões:");
+                let r = ui.add(egui::TextEdit::singleline(pw).password(true));
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() || enter {
+                        done = Some(true);
+                    }
+                    if ui.button("Cancelar").clicked() {
+                        done = Some(false);
+                    }
+                });
+            });
+        match (done, open) {
+            (Some(true), _) => {
+                let password = self.unlock.take().unwrap_or_default();
+                self.worker.send(Request::Unlock { password });
+            }
+            (Some(false), _) | (None, false) => self.unlock = None,
+            _ => {}
+        }
+    }
+
+    /// Remover segurança: grava sem criptografia no próximo Salvar.
+    pub fn remove_security(&mut self) {
+        self.worker.send(Request::SetProtection(None));
+    }
+
     /// Valida de novo as assinaturas (o worker relê o arquivo).
     pub fn validate_signatures(&mut self) {
         self.worker.send(Request::Signatures);
@@ -805,6 +884,20 @@ impl DocTab {
 
     /// Abre a linha de ferramentas `id` (Comentar ou Preencher e assinar; uma por vez).
     pub fn show_row(&mut self, id: &str) {
+        use app_state::tools_catalog as tc;
+        let p = self.security.permissions;
+        let denied = match id {
+            tc::COMMENT => (!p.annotate).then_some("comentar"),
+            tc::FILL_SIGN => (!p.annotate).then_some("preencher e assinar"),
+            tc::PREPARE_FORM => (!p.modify).then_some("alterar formulários"),
+            tc::CERTIFICATES => (!p.forms).then_some("assinar"),
+            _ => None,
+        };
+        if let Some(what) = denied {
+            self.deny(what);
+            return;
+        }
+        self.protect_tools = id == tc::PROTECT;
         self.comment_tools = id == app_state::tools_catalog::COMMENT;
         self.fill_tools = id == app_state::tools_catalog::FILL_SIGN;
         self.prepare_tools = id == app_state::tools_catalog::PREPARE_FORM;
@@ -816,6 +909,13 @@ impl DocTab {
     }
 
     /// Início do quadro: tem que vir antes de qualquer pedido de render (painel ou canvas).
+    /// Permissão negada pela proteção do documento: explica na barra de status.
+    pub(crate) fn deny(&mut self, what: &str) {
+        self.status = format!(
+            "O documento não permite {what}: está protegido. Em Proteger PDF, Desbloquear com a senha de permissões."
+        );
+    }
+
     pub fn begin(&mut self) {
         self.edit.fill.active = self.fill_tools;
         if let Some(view) = self.view.as_mut() {
@@ -832,6 +932,10 @@ impl DocTab {
 
     /// Arquivo → Imprimir: abre o diálogo na hora; as impressoras chegam do CUPS em segundo plano.
     pub fn open_print_dialog(&mut self, ctx: &egui::Context) {
+        if !self.security.permissions.print {
+            self.deny("imprimir");
+            return;
+        }
         if self.view.is_some() && self.print_pending.is_none() {
             self.print_dialog = Some(PrintDialog::new(self.last.current_page));
             self.printers_rx = Some(print_job::printers_in_background(ctx));
@@ -944,6 +1048,7 @@ impl DocTab {
             self.status = msg;
         }
         self.field_props_window(ui.ctx());
+        self.protect_windows(ui.ctx());
         self.sign_window(ui.ctx());
         self.split_window(ui);
         self.poll_files();
@@ -1142,6 +1247,11 @@ impl DocTab {
 
     /// Abre o Organizar páginas, já com um diálogo se pedido (Inserir / Recortar do hub).
     pub fn open_organize(&mut self, ctx: &egui::Context, tool: &str) {
+        let p = self.security.permissions;
+        if !p.assemble || (tool == app_state::tools_catalog::SPLIT && !p.copy) {
+            self.deny("organizar as páginas");
+            return;
+        }
         let org = self.organize.get_or_insert_with(Default::default);
         match tool {
             app_state::tools_catalog::INSERT => {
@@ -1180,6 +1290,9 @@ impl DocTab {
                     self.files.open(ui.ctx());
                 }
                 OrgAction::PickFile(_) => {}
+                OrgAction::Extract { .. } if !self.security.permissions.copy => {
+                    self.deny("extrair páginas")
+                }
                 OrgAction::Extract {
                     pages,
                     separate,
@@ -1352,6 +1465,7 @@ impl DocTab {
         let mut sign_at = None;
         let mut field_actions = Vec::new();
         let mut prepare_ops = Vec::new();
+        let can_fill = self.security.permissions.forms;
         let mut open_props = None;
         let jump_to = self.jump_to.take();
         // cada aba com seu id: a área de rolagem guarda a posição de cada documento
@@ -1391,7 +1505,11 @@ impl DocTab {
                             return;
                         }
                         edit.on_page(ui, worker, annots, page as i32, rect, map);
-                        // depois dos gestos da página: os campos ficam por cima
+                        // depois dos gestos da página: os campos ficam por cima (sem a permissão
+                        // de preencher, ficam só visíveis)
+                        if !can_fill {
+                            return;
+                        }
                         field_actions.extend(crate::fields::on_page(
                             ui,
                             form,

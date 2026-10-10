@@ -358,6 +358,8 @@ pub struct DocSummary {
     /// Campos de formulário de todas as páginas.
     pub fields: Vec<crate::FieldInfo>,
     pub form_notes: crate::FormNotes,
+    /// Proteção e permissões de quem abriu.
+    pub security: crate::SecurityInfo,
 }
 
 /// Rotação da vista, no sentido horário. Só muda a tela, nunca o arquivo.

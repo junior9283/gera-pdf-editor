@@ -45,6 +45,7 @@ pub const COMMENT: &str = "comentar";
 pub const FILL_SIGN: &str = "assinar";
 pub const PREPARE_FORM: &str = "formulario";
 pub const CERTIFICATES: &str = "certificados";
+pub const PROTECT: &str = "proteger";
 /// Ferramentas que abrem o Organizar páginas.
 pub const ORGANIZE: &str = "organizar";
 pub const INSERT: &str = "inserir";
@@ -81,7 +82,7 @@ pub const CATALOG: &[ToolEntry] = &[
     tool(FILL_SIGN, "Preencher e assinar", "🖊", Review, Ready, "Texto, marcas, assinatura e iniciais"),
     tool(CERTIFICATES, "Certificados", "🔏", Review, Ready, "Assinatura digital com certificado e validação"),
     tool("comparar", "Comparar arquivos", "⚖", Review, Planned("v5"), "Diferenças entre duas versões"),
-    tool("proteger", "Proteger PDF", "🔒", Protect, Planned("v5"), "Senha e permissões"),
+    tool(PROTECT, "Proteger PDF", "🔒", Protect, Ready, "Senha e permissões"),
     tool("redigir", "Redigir", "⬛", Protect, Planned("v5"), "Apagar informações sensíveis de vez"),
     tool("comprimir", "Comprimir PDF", "⛃", Protect, Planned("v5"), "Reduzir o tamanho do arquivo"),
     tool(PREPARE_FORM, "Preparar formulário", "🗋", Protect, Ready, "Criar e editar campos de formulário"),
@@ -147,6 +148,7 @@ mod tests {
                 COMMENT,
                 FILL_SIGN,
                 CERTIFICATES,
+                PROTECT,
                 PREPARE_FORM,
                 ORGANIZE,
                 SPLIT,

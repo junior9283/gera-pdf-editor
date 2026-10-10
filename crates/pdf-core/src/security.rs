@@ -89,6 +89,18 @@ pub struct SecurityInfo {
     pub unlocked: bool,
 }
 
+impl Default for SecurityInfo {
+    /// Documento sem proteção: tudo permitido.
+    fn default() -> Self {
+        Self {
+            encrypted: false,
+            needs_user_password: false,
+            permissions: Permissions::ALL,
+            unlocked: false,
+        }
+    }
+}
+
 fn err(msg: &str) -> PdfError {
     PdfError::InvalidPages(msg.into())
 }

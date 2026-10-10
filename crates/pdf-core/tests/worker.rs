@@ -370,3 +370,36 @@ fn signing_through_the_worker_reports_the_new_signature() {
         other => panic!("esperava Signatures, veio {other:?}"),
     }
 }
+
+#[test]
+fn protection_and_unlock_through_the_worker() {
+    let (_dir, w, _) = opened(1);
+    w.send(Request::SetProtection(Some(pdf_core::Protection {
+        open_password: String::new(),
+        owner_password: "dono".into(),
+        permissions: pdf_core::Permissions {
+            print: false,
+            print_hq: false,
+            ..pdf_core::Permissions::ALL
+        },
+    })));
+    match recv(&w) {
+        Response::SecurityChanged {
+            pending, history, ..
+        } => assert!(pending && history.dirty),
+        other => panic!("esperava SecurityChanged, veio {other:?}"),
+    }
+    // a proteção vale ao salvar; depois disso a senha errada não desbloqueia
+    w.send(Request::Save {
+        dest: _dir.path().join("a.pdf"),
+    });
+    assert!(matches!(recv(&w), Response::Saved { .. }));
+    w.send(Request::Unlock {
+        password: "x".into(),
+    });
+    assert!(matches!(recv(&w), Response::SecurityFailed(_)));
+    w.send(Request::Unlock {
+        password: "dono".into(),
+    });
+    assert!(matches!(recv(&w), Response::SecurityChanged { security, .. } if security.unlocked));
+}

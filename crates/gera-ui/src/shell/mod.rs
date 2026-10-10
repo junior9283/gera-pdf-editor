@@ -11,6 +11,7 @@ pub mod menus;
 pub mod panels;
 pub mod print_dialog;
 pub mod properties;
+pub mod protect_dialog;
 pub mod sign_dialog;
 pub mod signature_dialog;
 pub mod tabs;
