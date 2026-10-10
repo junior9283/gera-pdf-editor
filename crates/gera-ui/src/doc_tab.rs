@@ -121,6 +121,21 @@ pub struct DocTab {
     identity_name: String,
     /// Painel Comentários (busca, filtros, ordenação e resposta em digitação).
     comments: crate::comments_panel::PanelState,
+    /// Modo Organizar páginas (a grade substitui o documento).
+    pub(crate) organize: Option<crate::organize::OrganizeState>,
+    /// Seletor de arquivos do modo Organizar e para que serve a escolha em andamento.
+    files: crate::open_dialog::FileDialogs,
+    picking: Option<PickFor>,
+}
+
+/// O que fazer com o arquivo escolhido no seletor (modo Organizar).
+enum PickFor {
+    File(crate::organize::Purpose),
+    Extract {
+        pages: Vec<i32>,
+        separate: bool,
+        delete_after: bool,
+    },
 }
 
 impl DocTab {
@@ -155,6 +170,9 @@ impl DocTab {
             turned_at: f64::NEG_INFINITY,
             identity_name: String::new(),
             comments: Default::default(),
+            organize: None,
+            files: Default::default(),
+            picking: None,
         }
     }
 
@@ -173,6 +191,24 @@ impl DocTab {
         let Some(view) = self.view.as_mut() else {
             return;
         };
+        // no modo Organizar, Excluir e Selecionar tudo agem sobre as páginas
+        if let Some(org) = self.organize.as_mut() {
+            match cmd {
+                DocCommand::Delete => {
+                    if let Some(crate::organize::OrgAction::Op(op)) = org.delete(view.sizes.len()) {
+                        self.worker.send(Request::Pages(op));
+                    }
+                    return;
+                }
+                DocCommand::SelectAll => {
+                    let sizes: Vec<(f32, f32)> =
+                        view.sizes.iter().map(|s| (s.width, s.height)).collect();
+                    org.sel.pick(app_state::organize::Picker::All, &sizes);
+                    return;
+                }
+                _ => {}
+            }
+        }
         match cmd {
             DocCommand::Save => self.save(),
             DocCommand::Undo if self.history.can_undo => self.worker.send(Request::Undo),
@@ -469,7 +505,11 @@ impl DocTab {
             && self.edit.text_draft.is_none()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
-            self.edit.escape();
+            if self.organize.is_some() {
+                self.organize = None; // Esc fecha o Organizar páginas
+            } else {
+                self.edit.escape();
+            }
         }
         if !typing {
             let nav = [
@@ -622,7 +662,11 @@ impl DocTab {
             Some(PrintChoice::Cancel) => self.print_dialog = None,
             None => {}
         }
-        egui::CentralPanel::default().show(ui, |ui| self.canvas(ui));
+        if self.organize.is_some() {
+            egui::CentralPanel::default().show(ui, |ui| self.organize_view(ui));
+        } else {
+            egui::CentralPanel::default().show(ui, |ui| self.canvas(ui));
+        }
         let down = ui.input(|i| i.pointer.any_down());
         self.edit.drop_stale_drag(down);
         self.edit.note_window(ui);
@@ -709,6 +753,112 @@ impl DocTab {
 
     pub fn zoom_percent(&self) -> Option<f32> {
         self.view.as_ref().map(|v| v.zoom * 100.0)
+    }
+
+    /// Abre o Organizar páginas, já com um diálogo se pedido (Inserir / Recortar do hub).
+    pub fn open_organize(&mut self, ctx: &egui::Context, tool: &str) {
+        let org = self.organize.get_or_insert_with(Default::default);
+        match tool {
+            "inserir" => {
+                self.picking = Some(PickFor::File(crate::organize::Purpose::Insert));
+                self.files.open(ctx);
+            }
+            "recortar" => org.dialog = Some(crate::organize::Dialog::Crop { mm: [0.0; 4] }),
+            _ => {}
+        }
+    }
+
+    /// A grade do Organizar páginas e as ações dela.
+    fn organize_view(&mut self, ui: &mut egui::Ui) {
+        use crate::organize::{show, Dialog, OrgAction, Purpose};
+        let (Some(view), Some(org)) = (self.view.as_mut(), self.organize.as_mut()) else {
+            return;
+        };
+        org.sel.clamp(view.sizes.len() as i32);
+        let history = (self.history.can_undo, self.history.can_redo);
+        let actions = show(ui, org, view, &self.worker, history);
+        for action in actions {
+            match action {
+                OrgAction::Op(op) => self.worker.send(Request::Pages(op)),
+                OrgAction::Undo => self.worker.send(Request::Undo),
+                OrgAction::Redo => self.worker.send(Request::Redo),
+                OrgAction::Close => self.organize = None,
+                OrgAction::PickFile(purpose) => {
+                    self.picking = Some(PickFor::File(purpose));
+                    self.files.open(ui.ctx());
+                }
+                OrgAction::Extract {
+                    pages,
+                    separate,
+                    delete_after,
+                } => {
+                    let stem = self
+                        .path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let suggested = self.path.with_file_name(format!("{stem} (páginas).pdf"));
+                    self.picking = Some(PickFor::Extract {
+                        pages,
+                        separate,
+                        delete_after,
+                    });
+                    self.files.save_as(ui.ctx(), suggested);
+                }
+            }
+        }
+        // o arquivo escolhido no seletor
+        let Some(picked) = self.files.poll() else {
+            return;
+        };
+        use crate::open_dialog::Picked;
+        match (self.picking.take(), picked) {
+            (Some(PickFor::File(purpose)), Picked::Open(files)) => {
+                let Some(path) = files.into_iter().next() else {
+                    return;
+                };
+                let dialog = match purpose {
+                    Purpose::Insert => Dialog::InsertFile {
+                        path,
+                        after: true,
+                        all: true,
+                        from: 1,
+                        to: 1,
+                        password: String::new(),
+                    },
+                    Purpose::Replace => Dialog::Replace {
+                        path,
+                        from: 1,
+                        password: String::new(),
+                    },
+                };
+                if let Some(org) = self.organize.as_mut() {
+                    org.dialog = Some(dialog);
+                }
+            }
+            (
+                Some(PickFor::Extract {
+                    pages,
+                    separate,
+                    delete_after,
+                }),
+                Picked::SaveAs { dest, .. },
+            ) => {
+                self.worker.send(Request::Extract {
+                    pages: pages.clone(),
+                    dest,
+                    separate,
+                });
+                if delete_after {
+                    self.worker
+                        .send(Request::Pages(pdf_core::PageOp::Delete { pages }));
+                }
+            }
+            (_, Picked::Failed) => {
+                self.status = "Não foi possível abrir o seletor de arquivos.".into()
+            }
+            _ => {}
+        }
     }
 
     /// Painel Comentários (na direita, com "Comentar" ligado).

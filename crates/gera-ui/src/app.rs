@@ -434,7 +434,8 @@ impl GeraApp {
                 .show(ui, |ui| doc.comments_panel(ui));
             prefs.tools_width = r.response.rect.width();
         }
-        let tool_id = (prefs.tools_panel && !comments).then(|| {
+        // o Organizar páginas usa a largura toda (como no Acrobat)
+        let tool_id = (prefs.tools_panel && !comments && doc.organize.is_none()).then(|| {
             let r = egui::Panel::right("painel-ferramentas")
                 .resizable(true)
                 .default_size(prefs.tools_width)
@@ -551,6 +552,18 @@ impl GeraApp {
 
     /// Cartão ou item de ferramenta clicado. Só "Comentar" existe nesta fase.
     fn run_tool(&mut self, ctx: &egui::Context, id: &str) {
+        if matches!(id, "organizar" | "inserir" | "recortar") {
+            match self.last_doc.clone().and_then(|p| self.tabs.find(&p)) {
+                Some(tab) => {
+                    self.activate(tab);
+                    if let Some(doc) = self.active_doc() {
+                        doc.open_organize(ctx, id);
+                    }
+                }
+                None => self.status = "Abra um PDF para organizar as páginas.".into(),
+            }
+            return;
+        }
         if id != tools_catalog::COMMENT {
             return;
         }

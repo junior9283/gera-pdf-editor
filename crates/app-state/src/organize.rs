@@ -94,6 +94,15 @@ impl PageSet {
         self.anchor = self.pages.first().copied();
     }
 
+    /// Depois de mover a seleção para antes de `to`: as páginas movidas continuam selecionadas,
+    /// agora juntas na posição nova.
+    pub fn after_move(&mut self, to: i32) {
+        let len = self.pages.len() as i32;
+        let start = to - self.pages.iter().filter(|&&p| p < to).count() as i32;
+        self.pages = (start..start + len).collect();
+        self.anchor = Some(start);
+    }
+
     /// Depois de uma mudança de páginas: tira as que não existem mais.
     pub fn clamp(&mut self, count: i32) {
         self.pages.retain(|&p| p < count);
@@ -164,6 +173,18 @@ mod tests {
         assert_eq!(s.to_vec(), [1]);
         s.pick(Picker::All, &sizes);
         assert_eq!(s.len(), 4);
+    }
+
+    #[test]
+    fn moved_pages_stay_selected_at_their_new_place() {
+        let mut s = PageSet::default();
+        s.click(4);
+        s.after_move(0);
+        assert_eq!(s.to_vec(), [0]);
+        s.click(0);
+        s.ctrl_click(2);
+        s.after_move(5);
+        assert_eq!(s.to_vec(), [3, 4], "duas páginas para o fim de 5");
     }
 
     #[test]
