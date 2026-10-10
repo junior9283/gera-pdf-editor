@@ -51,8 +51,8 @@ pub struct CompressReport {
     pub images: usize,
 }
 
-/// Imagem grande demais para decodificar na memória (fica como está).
-const MAX_PIXELS: u64 = 100_000_000;
+/// Imagem grande demais para decodificar na memória (fica como está): 30 Mpx RGB = 90 MB.
+const MAX_PIXELS: u64 = 30_000_000;
 /// Profundidade máxima de formulários aninhados percorridos.
 const MAX_DEPTH: usize = 8;
 
@@ -134,6 +134,20 @@ fn recompress(img: &mut PdfObject, page_in: (f32, f32), policy: &ImagePolicy) ->
     {
         return Ok(false);
     }
+    // máscara de cor-chave (o JPEG mudaria as cores e abriria furos), SMask pré-multiplicada
+    // (/Matte exige as mesmas dimensões) e JPX (o MuPDF devolve o fluxo cru)
+    let color_key = img
+        .get_dict("Mask")?
+        .is_some_and(|m| m.is_array().unwrap_or(false));
+    let matte = img
+        .get_dict("SMask")?
+        .is_some_and(|m| m.get_dict("Matte").ok().flatten().is_some());
+    let jpx = img
+        .get_dict("Filter")?
+        .is_some_and(|f| f.to_string().contains("JPXDecode"));
+    if color_key || matte || jpx {
+        return Ok(false);
+    }
     let (Some(w), Some(h), Some(n)) = (int("Width")?, int("Height")?, components(img)?) else {
         return Ok(false);
     };
@@ -183,10 +197,7 @@ fn recompress(img: &mut PdfObject, page_in: (f32, f32), policy: &ImagePolicy) ->
     img.dict_put("Width", PdfObject::new_int(nw as i32)?)?;
     img.dict_put("Height", PdfObject::new_int(nh as i32)?)?;
     img.dict_put("Filter", PdfObject::new_name("DCTDecode")?)?;
-    img.dict_put(
-        "ColorSpace",
-        PdfObject::new_name(if n == 3 { "DeviceRGB" } else { "DeviceGray" })?,
-    )?;
+    // o /ColorSpace fica (um perfil ICC continua valendo com JPEG)
     img.dict_put("BitsPerComponent", PdfObject::new_int(8)?)?;
     img.dict_delete("DecodeParms")?;
     Ok(true)
@@ -233,7 +244,7 @@ impl PdfDoc {
     /// Grava em `dest` uma cópia comprimida do documento (o aberto não muda).
     pub fn compress_to(&self, dest: &Path, level: CompressLevel) -> Result<CompressReport> {
         if self.signed_on_disk || self.has_signatures()? {
-            return Err(PdfError::InvalidPages(
+            return Err(PdfError::Refused(
                 "o documento está assinado: comprimir invalidaria as assinaturas".into(),
             ));
         }
@@ -265,6 +276,12 @@ impl PdfDoc {
             .set_compress_fonts(true);
         let mut out = Vec::new();
         copy.write_to_with_options(&mut out, opts)?;
+        // nunca entregar um arquivo maior (ou igual): o Acrobat também avisa e não grava
+        if out.len() as u64 >= before {
+            return Err(PdfError::Refused(
+                "o arquivo já está otimizado: a cópia comprimida não ficaria menor".into(),
+            ));
+        }
         write_bytes_atomic(dest, &out)?;
         Ok(CompressReport {
             before,

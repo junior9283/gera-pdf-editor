@@ -405,16 +405,17 @@ fn protection_and_unlock_through_the_worker() {
 }
 
 #[test]
-fn compressing_through_the_worker_writes_a_new_file_next_to_the_original() {
+fn compressing_through_the_worker_refuses_a_file_that_would_not_shrink() {
+    // a amostra de texto já é mínima: o worker avisa em vez de gravar um arquivo maior
     let (dir, w, _) = opened(2);
     w.send(Request::Compress {
         level: pdf_core::CompressLevel::Low,
     });
     match recv(&w) {
-        Response::Compressed { dest, report } => {
-            assert_eq!(dest, dir.path().join("a (comprimido).pdf"));
-            assert!(dest.exists() && report.after > 0);
+        Response::CompressFailed(msg) => {
+            assert!(msg.starts_with("o arquivo já está otimizado"), "{msg}");
+            assert!(!dir.path().join("a (comprimido).pdf").exists());
         }
-        other => panic!("esperava Compressed, veio {other:?}"),
+        other => panic!("esperava CompressFailed, veio {other:?}"),
     }
 }

@@ -216,10 +216,6 @@ impl GeraApp {
             };
             self.docs[i].poll(ctx, bench);
             for event in self.docs[i].take_events() {
-                if let DocEvent::OpenFile(path) = event {
-                    to_open.push(path);
-                    continue;
-                }
                 match event {
                     DocEvent::Opened => self.remember(self.docs[i].path.clone()),
                     DocEvent::Renamed(dest) => {
@@ -240,7 +236,7 @@ impl GeraApp {
                         self.close_tab(tab);
                         break;
                     }
-                    DocEvent::OpenFile(_) => {}
+                    DocEvent::OpenFile(path) => to_open.push(path),
                 }
             }
         }

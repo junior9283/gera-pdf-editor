@@ -826,7 +826,13 @@ impl DocTab {
 
     /// Comprimir PDF: abre a janela (como a ferramenta do Acrobat).
     pub fn open_compress(&mut self) {
-        if self.view.is_some() {
+        // reduzir imagens altera o documento: precisa da permissão de alterar (como no Acrobat)
+        if !self.security.permissions.modify {
+            self.deny("comprimir");
+            return;
+        }
+        // já aberta (talvez comprimindo): continua como está
+        if self.view.is_some() && self.compress.is_none() {
             self.compress = Some((1, false));
         }
     }
@@ -875,7 +881,8 @@ impl DocTab {
                     }
                 });
             });
-        if !open {
+        // durante a compressão a janela fica até o resultado chegar (nada de pedido em dobro)
+        if !open && !*busy {
             self.compress = None;
             return;
         }

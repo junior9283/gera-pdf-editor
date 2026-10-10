@@ -359,11 +359,7 @@ impl State {
             Request::Security => self.security(send, |_| Ok(())),
             Request::Compress { level } => send(
                 match self.with_doc(|d| {
-                    let stem = d
-                        .path()
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_default();
+                    let stem = crate::split::stem_of(d.path(), "documento");
                     let dest = crate::pages::free_name(d.path(), &format!("{stem} (comprimido)"));
                     d.compress_to(&dest, level).map(|r| (dest, r))
                 }) {

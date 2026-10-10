@@ -4,6 +4,11 @@ use pdf_core::{CompressLevel, PdfDoc};
 /// PDF de uma página (carta) com uma imagem RGB de `w`×`h` sem compressão (degradê), e uma
 /// máscara 1 bit que deve ficar como está.
 fn photo_pdf(w: usize, h: usize) -> Vec<u8> {
+    photo_pdf_cs(w, h, "/DeviceRGB")
+}
+
+/// Como `photo_pdf`, com o espaço de cor da foto (o objeto 7 é um perfil ICC de 3 componentes).
+fn photo_pdf_cs(w: usize, h: usize, cs: &str) -> Vec<u8> {
     let mut rgb = Vec::with_capacity(w * h * 3);
     for y in 0..h {
         for x in 0..w {
@@ -29,13 +34,14 @@ fn photo_pdf(w: usize, h: usize) -> Vec<u8> {
     };
     objs.push(stream("<<".into(), &content));
     objs.push(stream(
-        format!("<< /Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceRGB /BitsPerComponent 8"),
+        format!("<< /Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace {cs} /BitsPerComponent 8"),
         &rgb,
     ));
     objs.push(stream(
         "<< /Type /XObject /Subtype /Image /Width 64 /Height 64 /ImageMask true /BitsPerComponent 1".into(),
         &mask,
     ));
+    objs.push(stream("<< /N 3 /Alternate /DeviceRGB".into(), b""));
     let mut out = b"%PDF-1.7\n".to_vec();
     let mut offsets = Vec::new();
     for (i, o) in objs.iter().enumerate() {
@@ -125,7 +131,17 @@ fn small_images_are_left_alone() {
 #[test]
 fn protected_stays_protected_and_signed_is_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let path = common::encrypted_sample(&dir);
+    // foto protegida por senha (a amostra de texto já é pequena demais para encolher)
+    let path = dir.path().join("protegida.pdf");
+    std::fs::write(&path, photo_pdf(2400, 3000)).unwrap();
+    let mut p = PdfDoc::open(&path, None).unwrap();
+    p.set_protection(Some(pdf_core::Protection {
+        open_password: "segredo".into(),
+        owner_password: String::new(),
+        permissions: pdf_core::Permissions::ALL,
+    }))
+    .unwrap();
+    p.save(&path).unwrap();
     let d = PdfDoc::open(&path, Some("segredo")).unwrap();
     let out = dir.path().join("c.pdf");
     d.compress_to(&out, CompressLevel::High).unwrap();
@@ -174,4 +190,41 @@ fn compressed_photo_looks_like_the_original() {
         .sum();
     let mean = diff as f64 / a.rgb.len() as f64;
     assert!(mean < 6.0, "diferença média {mean}");
+}
+
+#[test]
+fn an_already_small_file_is_not_written_bigger() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("foto.pdf");
+    std::fs::write(&path, photo_pdf(1200, 1500)).unwrap();
+    let first = dir.path().join("c1.pdf");
+    PdfDoc::open(&path, None)
+        .unwrap()
+        .compress_to(&first, CompressLevel::Low)
+        .unwrap();
+    // comprimir de novo o que já está comprimido não pode gravar um arquivo maior (nem igual)
+    let again = dir.path().join("c2.pdf");
+    let r = PdfDoc::open(&first, None)
+        .unwrap()
+        .compress_to(&again, CompressLevel::Low);
+    assert!(r.is_err(), "{r:?}");
+    assert!(!again.exists());
+}
+
+#[test]
+fn icc_colour_spaces_are_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("icc.pdf");
+    std::fs::write(&path, photo_pdf_cs(2400, 3000, "[/ICCBased 7 0 R]")).unwrap();
+    let dest = dir.path().join("c.pdf");
+    let r = PdfDoc::open(&path, None)
+        .unwrap()
+        .compress_to(&dest, CompressLevel::Medium)
+        .unwrap();
+    assert_eq!(r.images, 1);
+    let bytes = std::fs::read(&dest).unwrap();
+    assert!(
+        bytes.windows(8).any(|w| w == b"ICCBased"),
+        "o perfil continua"
+    );
 }
