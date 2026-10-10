@@ -310,8 +310,22 @@ fn unhex(raw: &[u8]) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// Escolhas lidas do arquivo, com os valores limitados.
+/// Sem o caminho do arquivo da marca: gravado, revelaria pastas e o nome do usuário; lido de um
+/// documento, poderia levar o Atualizar a embutir um arquivo local escolhido por quem fez o PDF.
+fn without_paths(config: &mut PaginationConfig) {
+    if let PaginationConfig::Watermark(w) = config {
+        match &mut w.source {
+            WatermarkSource::Image(path) | WatermarkSource::PdfPage { path, .. } => {
+                *path = PathBuf::new();
+            }
+            WatermarkSource::Text { .. } => {}
+        }
+    }
+}
+
+/// Escolhas lidas do arquivo, sem caminhos e com os valores limitados.
 fn sanitized(mut config: PaginationConfig) -> PaginationConfig {
+    without_paths(&mut config);
     let fix = |v: f32, lo: f32, hi: f32, default: f32| {
         if v.is_finite() {
             v.clamp(lo, hi)
@@ -417,7 +431,8 @@ impl PdfDoc {
                 .inner
                 .new_object_from_str(&format!("<</Type/ExtGState/ca {0}/CA {0}>>", num(opacity)))?;
             let gs = d.inner.add_object(&gs)?;
-            let config = PaginationConfig::Watermark(w.clone());
+            let mut config = PaginationConfig::Watermark(w.clone());
+            without_paths(&mut config);
             for (i, &page) in pages.iter().enumerate() {
                 let mut pdf_page = d.inner.load_pdf_page(page)?;
                 let mut page_obj = pdf_page.object();

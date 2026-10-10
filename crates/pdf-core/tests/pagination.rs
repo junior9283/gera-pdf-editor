@@ -256,3 +256,35 @@ fn page_ranges_are_parsed_like_the_print_dialog() {
     assert!(pdf_core::parse_ranges("4-2", 10).is_err());
     assert!(pdf_core::parse_ranges("11", 10).is_err());
 }
+
+/// O caminho do arquivo da marca, lido do documento, não vale: um PDF malicioso poderia apontar
+/// um arquivo local para o Atualizar embutir sem o usuário perceber.
+#[test]
+fn file_paths_read_from_the_document_are_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let png = dir.path().join("logo.png");
+    mupdf::Pixmap::new_with_w_h(&mupdf::Colorspace::device_rgb(), 4, 4, false)
+        .unwrap()
+        .save_as(png.to_str().unwrap(), mupdf::ImageFormat::PNG)
+        .unwrap();
+    let (_d, mut d) = open(1, 0);
+    let mut w = text_mark(PageSet::All);
+    w.source = WatermarkSource::Image(png);
+    d.add_watermark(&w, false).unwrap();
+    match d.pagination_config(Pagination::Watermark).unwrap() {
+        Some(PaginationConfig::Watermark(back)) => {
+            assert_eq!(back.source, WatermarkSource::Image(Default::default()));
+        }
+        other => panic!("{other:?}"),
+    }
+    // e não fica gravado no PDF
+    let out = dir.path().join("saida.pdf");
+    d.save(&out).unwrap();
+    let raw = std::fs::read(&out).unwrap();
+    let path_hex: String = png_hex(dir.path().to_string_lossy().as_bytes());
+    assert!(!String::from_utf8_lossy(&raw).contains(&path_hex));
+}
+
+fn png_hex(b: &[u8]) -> String {
+    b.iter().map(|c| format!("{c:02X}")).collect()
+}
