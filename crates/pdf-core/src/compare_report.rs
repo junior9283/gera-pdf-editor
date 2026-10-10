@@ -1,7 +1,9 @@
 //! O PDF do resultado da comparação, como o relatório do Acrobat: uma página de resumo e as páginas
 //! lado a lado (antiga à esquerda, nova à direita) com as alterações marcadas. Cada alteração é um
 //! destaque travado (aparece no painel Comentários); do outro lado, a marca vai no conteúdo.
-use crate::compare::{compare, Change, ChangeKind, CompareOptions, CompareStage, Comparison};
+use crate::compare::{
+    compare_with, Change, ChangeKind, CompareOptions, CompareStage, Comparison, Limits,
+};
 use crate::doc::{open_authenticated, rgb, write_atomic};
 use crate::error::{refused, Result};
 use crate::page_content::{form_xobject, matrix_ops, mul, num, page_parts, rgb_ops};
@@ -35,8 +37,9 @@ pub fn compare_files(
     progress: &mut dyn FnMut(CompareStage) -> bool,
 ) -> Result<Comparison> {
     refuse_inputs_as_dest(opts, dest)?;
-    let cmp = compare(opts, progress)?;
-    write_comparison(opts, &cmp, dest, progress)?;
+    let limits = Limits::default();
+    let cmp = compare_with(opts, &limits, progress)?;
+    write_comparison(opts, &cmp, dest, &limits, progress)?;
     Ok(cmp)
 }
 
@@ -139,15 +142,24 @@ fn pdf_box(r: &PdfRect, height: f32) -> (f32, f32, f32, f32) {
 }
 
 /// Grava o PDF do resultado. Cancelar (`progress` falso) não deixa arquivo.
-pub fn write_comparison(
+pub(crate) fn write_comparison(
     opts: &CompareOptions,
     cmp: &Comparison,
     dest: &Path,
+    limits: &Limits,
     progress: &mut dyn FnMut(CompareStage) -> bool,
 ) -> Result<()> {
     refuse_inputs_as_dest(opts, dest)?;
-    let old = open_authenticated(&opts.old.path, opts.old.password.as_deref())?;
-    let new = open_authenticated(&opts.new.path, opts.new.password.as_deref())?;
+    // reabre e confere de novo: o arquivo pode ter sido trocado depois da leitura
+    let reopen = |input: &crate::CompareInput| -> Result<PdfDocument> {
+        let doc = open_authenticated(&input.path, input.password.as_deref())?;
+        if !crate::security::pages_can_be_copied(&doc, input.password.as_deref())? {
+            return Err(crate::security::restricted_source(&input.path));
+        }
+        Ok(doc)
+    };
+    let (old, new) = (reopen(&opts.old)?, reopen(&opts.new)?);
+    let mut content_left = limits.content_bytes;
     let (old_name, new_name) = (file_name(&opts.old.path), file_name(&opts.new.path));
     let mut out = PdfDocument::new();
     let helv = out.add_object(&out.new_object_from_str(
@@ -225,6 +237,10 @@ pub fn write_comparison(
                 Some(p) => {
                     let src = doc.find_page(p)?;
                     let (content, res, bbox) = page_parts(map, &out, &src)?;
+                    // o mesmo conteúdo enorme repetido em milhares de páginas esgotaria a memória
+                    content_left = content_left
+                        .checked_sub(content.len() as u64)
+                        .ok_or_else(|| refused("o resultado ficaria grande demais para gravar"))?;
                     xobjects.dict_put(name, form_xobject(&mut out, &content, res, bbox)?)?;
                     // da página de origem (espaço do PDF) para a tela dela, e daí para o resultado
                     let to_out =
@@ -372,6 +388,20 @@ fn outline_to(page: u32, title: &str) -> Outline {
     }
 }
 
+/// "Páginas inseridas: 1    Páginas excluídas: 0".
+fn pages_line(cmp: &Comparison, x: f32, y: f32) -> String {
+    let inserted = cmp.pairs.iter().filter(|p| p.0.is_none()).count();
+    let deleted = cmp.pairs.iter().filter(|p| p.1.is_none()).count();
+    text_at(
+        "F1",
+        11.0,
+        0.0,
+        x,
+        y,
+        &format!("Páginas inseridas: {inserted}    Páginas excluídas: {deleted}"),
+    )
+}
+
 /// A página 1: os arquivos, a contagem por tipo com a legenda e o link para a primeira alteração.
 fn summary_page(
     out: &mut PdfDocument,
@@ -402,7 +432,25 @@ fn summary_page(
     y -= 24.0;
     let total = cmp.changes.len();
     let mut link = None;
-    if total == 0 {
+    if total == 0 && (cmp.old_words == 0 || cmp.new_words == 0) {
+        // sem texto não há o que comparar: dizer "sem diferenças" enganaria
+        ops.push_str(&text_at(
+            "F2",
+            16.0,
+            0.0,
+            x,
+            y,
+            "Não foi possível comparar o texto.",
+        ));
+        y -= 22.0;
+        for line in [
+            "Um dos arquivos não tem texto (página digitalizada?).",
+            "Use Digitalizar e OCR para reconhecer o texto antes de comparar.",
+        ] {
+            ops.push_str(&text_at("F1", 11.0, 0.0, x, y, line));
+            y -= 16.0;
+        }
+    } else if total == 0 {
         ops.push_str(&text_at(
             "F2",
             16.0,
@@ -434,22 +482,13 @@ fn summary_page(
             ));
             y -= 20.0;
         }
-        let inserted = cmp.pairs.iter().filter(|p| p.0.is_none()).count();
-        let deleted = cmp.pairs.iter().filter(|p| p.1.is_none()).count();
         y -= 8.0;
-        ops.push_str(&text_at(
-            "F1",
-            11.0,
-            0.0,
-            x,
-            y,
-            &format!("Páginas inseridas: {inserted}    Páginas excluídas: {deleted}"),
-        ));
+        ops.push_str(&pages_line(cmp, x, y));
         y -= 32.0;
         let label = "Ir para a primeira alteração";
         let lw = text_width(metrics, label, 11.0)?;
         ops.push_str(&format!(
-            "BT /F1 11 Tf 0.1 0.35 0.8 rg {} {} Td ({}) Tj ET q 0.1 0.35 0.8 RG 0.75 w {} {} m {} {} l S Q\n",
+            "q BT /F1 11 Tf 0.1 0.35 0.8 rg {} {} Td ({}) Tj ET 0.1 0.35 0.8 RG 0.75 w {} {} m {} {} l S Q\n",
             num(x),
             num(y),
             literal(label),
@@ -460,6 +499,9 @@ fn summary_page(
         ));
         let first = cmp.changes[0].pair as i32 + 1;
         link = Some(([x, y - 4.0, x + lw, y + 12.0], first));
+    }
+    if total == 0 {
+        ops.push_str(&pages_line(cmp, x, y - 30.0));
     }
     ops.push_str(&text_at(
         "F1",
@@ -501,4 +543,40 @@ fn link_summary(out: &mut PdfDocument, rect: [f32; 4], target: i32) -> Result<()
     list.array_push(annot)?;
     out.find_page(0)?.dict_put("Annots", list)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compare::CompareInput;
+
+    #[test]
+    fn copied_content_has_a_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = |name: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, crate::sample::sample_pdf(2, 0)).unwrap();
+            CompareInput {
+                path,
+                password: None,
+                pages: None,
+            }
+        };
+        let opts = CompareOptions {
+            old: input("a.pdf"),
+            new: input("b.pdf"),
+            ..CompareOptions::default()
+        };
+        let cmp = compare_with(&opts, &Limits::default(), &mut |_| true).unwrap();
+        let dest = dir.path().join("r.pdf");
+        let tight = Limits {
+            content_bytes: 10,
+            ..Limits::default()
+        };
+        let r = write_comparison(&opts, &cmp, &dest, &tight, &mut |_| true);
+        assert!(matches!(r, Err(PdfError::Refused(m)) if m.contains("grande demais")));
+        assert!(!dest.exists());
+        write_comparison(&opts, &cmp, &dest, &Limits::default(), &mut |_| true).unwrap();
+        assert!(dest.exists());
+    }
 }

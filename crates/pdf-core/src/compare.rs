@@ -8,8 +8,10 @@ use md5::{Digest, Md5};
 use mupdf::text_page::TextBlockType;
 use mupdf::{Rect, TextPageFlags};
 use similar::{capture_diff_slices_deadline, Algorithm, DiffOp};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
+use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Máximo de páginas de cada lado (memória).
@@ -21,6 +23,9 @@ const MAX_ALIGN_CELLS: usize = 4_000_000;
 /// Imagens maiores que isto (bytes dos pixels) não são decodificadas: são identificadas só pelas
 /// dimensões (um PDF com uma imagem enorme e bem comprimida esgotaria a memória).
 const MAX_DECODED_BYTES: u64 = 16_000_000;
+/// Uma palavra que aparece em mais páginas que isto (de cada lado) é cabeçalho, rodapé ou palavra
+/// comum: não ajuda a dizer que páginas formam par.
+const MAX_RARE_PAGES: usize = 8;
 /// Máximo de caracteres de cada trecho citado na descrição de uma alteração.
 const QUOTE_CHARS: usize = 140;
 
@@ -110,6 +115,9 @@ pub struct Comparison {
     /// Páginas comparadas de cada lado.
     pub old_pages: i32,
     pub new_pages: i32,
+    /// Palavras lidas de cada lado (0: sem texto, talvez digitalizado).
+    pub old_words: usize,
+    pub new_words: usize,
 }
 
 /// Em que ponto está (para o progresso); páginas contadas a partir de 1.
@@ -121,10 +129,36 @@ pub enum CompareStage {
     Writing(usize, usize),
 }
 
-/// Fonte (sem o prefixo de subconjunto), tamanho em meios pontos e cor de uma palavra.
+/// Tetos contra arquivos maliciosos ou absurdos: um PDF pequeno pode repetir o mesmo conteúdo em
+/// milhares de páginas.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Limits {
+    /// Palavras de cada lado.
+    pub max_words: usize,
+    /// Imagens de cada lado (as seguintes ficam de fora da comparação).
+    pub max_images: usize,
+    /// Bytes de pixels decodificados de cada lado; depois, as imagens valem só pelas dimensões.
+    pub decode_bytes: u64,
+    /// Bytes de conteúdo das páginas copiadas para o resultado.
+    pub content_bytes: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_words: 3_000_000,
+            max_images: 50_000,
+            decode_bytes: 512_000_000,
+            content_bytes: 1_000_000_000,
+        }
+    }
+}
+
+/// Fonte (sem o prefixo de subconjunto, compartilhada entre as palavras), tamanho em meios pontos e
+/// cor de uma palavra.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Style {
-    pub font: String,
+    pub font: Arc<str>,
     pub half_points: i32,
     pub argb: u32,
 }
@@ -149,22 +183,43 @@ pub(crate) struct ImageAt {
 /// O que foi lido de um dos arquivos.
 pub(crate) struct Side {
     pub pages: Vec<i32>,
+    /// Caixa de cada página escolhida, na tela.
+    pub bounds: Vec<PdfRect>,
     pub words: Vec<WordAt>,
     pub images: Vec<ImageAt>,
 }
 
+impl Side {
+    /// As palavras (e as imagens) de cada página, como faixas dos vetores (estão em ordem de página).
+    fn by_page<T>(&self, items: &[T], page: impl Fn(&T) -> usize) -> Vec<Range<usize>> {
+        let mut out = vec![0..0; self.pages.len()];
+        let mut start = 0;
+        while start < items.len() {
+            let p = page(&items[start]);
+            let end = start + items[start..].iter().take_while(|x| page(x) == p).count();
+            out[p] = start..end;
+            start = end;
+        }
+        out
+    }
+}
+
 /// Se a imagem (largura × altura × componentes) cabe no limite para ser decodificada.
 fn decodable(width: u32, height: u32, components: u8) -> bool {
+    image_bytes(width, height, components) <= MAX_DECODED_BYTES
+}
+
+fn image_bytes(width: u32, height: u32, components: u8) -> u64 {
     u64::from(width)
         .saturating_mul(u64::from(height))
         .saturating_mul(u64::from(components.max(1)))
-        <= MAX_DECODED_BYTES
 }
 
-/// Lê as palavras das páginas escolhidas de um arquivo.
+/// Lê as palavras e as imagens das páginas escolhidas de um arquivo.
 pub(crate) fn read_side(
     input: &CompareInput,
     images: bool,
+    limits: &Limits,
     progress: &mut dyn FnMut(CompareStage) -> bool,
     stage: fn(i32, i32) -> CompareStage,
 ) -> Result<Side> {
@@ -190,8 +245,11 @@ pub(crate) fn read_side(
         return Err(PdfError::PageOutOfRange(p));
     }
     let total = pages.len() as i32;
-    let mut words = Vec::new();
+    let mut words: Vec<WordAt> = Vec::new();
     let mut found = Vec::new();
+    let mut bounds = Vec::with_capacity(pages.len());
+    let mut fonts: HashMap<String, Arc<str>> = HashMap::new();
+    let mut decode_left = limits.decode_bytes;
     let flags = if images {
         TextPageFlags::PRESERVE_IMAGES
     } else {
@@ -201,19 +259,31 @@ pub(crate) fn read_side(
         if !progress(stage(k as i32 + 1, total)) {
             return Err(PdfError::Cancelled);
         }
-        let tp = doc.load_page(p)?.to_text_page(flags)?;
-        for block in tp.blocks() {
+        let page = doc.load_page(p)?;
+        bounds.push(page.bounds()?.into());
+        let tp = page.to_text_page(flags)?;
+        for (b, block) in tp.blocks().enumerate() {
+            // páginas com milhares de blocos: Cancelar responde sem esperar a página toda
+            if b % 512 == 511 && !progress(stage(k as i32 + 1, total)) {
+                return Err(PdfError::Cancelled);
+            }
             if block.r#type() == TextBlockType::Image {
+                if found.len() >= limits.max_images {
+                    continue;
+                }
                 if let Some(img) = block.image() {
-                    let mut h = Md5::new();
-                    h.update(img.width().to_le_bytes());
-                    h.update(img.height().to_le_bytes());
-                    h.update([img.n()]);
-                    if decodable(img.width(), img.height(), img.n()) {
-                        h.update(img.to_pixmap()?.samples());
+                    let (w, h, n) = (img.width(), img.height(), img.n());
+                    let mut hash = Md5::new();
+                    hash.update(w.to_le_bytes());
+                    hash.update(h.to_le_bytes());
+                    hash.update([n]);
+                    let bytes = image_bytes(w, h, n);
+                    if decodable(w, h, n) && bytes <= decode_left {
+                        decode_left -= bytes;
+                        hash.update(img.to_pixmap()?.samples());
                     }
                     found.push(ImageAt {
-                        hash: h.finalize().into(),
+                        hash: hash.finalize().into(),
                         rect: block.bounds().into(),
                         page: k,
                     });
@@ -235,14 +305,19 @@ pub(crate) fn read_side(
                             w.rect = w.rect.union(&r);
                         }
                         None => {
+                            let name = ch.font().map(|f| strip_subset(f.name()).to_owned());
+                            let font = match name {
+                                Some(n) => fonts
+                                    .entry(n)
+                                    .or_insert_with_key(|n| Arc::from(n.as_str()))
+                                    .clone(),
+                                None => Arc::from(""),
+                            };
                             cur = Some(WordAt {
                                 text: c.to_string(),
                                 rect: r,
                                 style: Style {
-                                    font: ch
-                                        .font()
-                                        .map(|f| strip_subset(f.name()).to_owned())
-                                        .unwrap_or_default(),
+                                    font,
                                     half_points: (ch.size() * 2.0).round() as i32,
                                     argb: ch.argb(),
                                 },
@@ -252,14 +327,63 @@ pub(crate) fn read_side(
                     }
                 }
                 words.extend(cur);
+                if words.len() > limits.max_words {
+                    return Err(refused(format!(
+                        "o arquivo tem texto demais para comparar (mais de {} palavras)",
+                        limits.max_words
+                    )));
+                }
             }
         }
     }
     Ok(Side {
         pages,
+        bounds,
         words,
         images: found,
     })
+}
+
+/// O que distingue uma página: palavra ou imagem.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Token<'a> {
+    Word(&'a str),
+    Image([u8; 16]),
+}
+
+/// Quanto cada par de páginas tem em comum, contando só o que é raro (aparece em poucas páginas de
+/// cada lado): cabeçalho, rodapé e palavras comuns iguais em toda página embaralhariam os pares.
+fn rare_weights(old: &Side, new: &Side) -> HashMap<(usize, usize), u32> {
+    // por token: em que páginas aparece de cada lado, e quantas vezes
+    let mut index: HashMap<Token, [Vec<(usize, u32)>; 2]> = HashMap::new();
+    for (side, s) in [old, new].into_iter().enumerate() {
+        let tokens = s
+            .words
+            .iter()
+            .map(|w| (Token::Word(&w.text), w.page))
+            .chain(s.images.iter().map(|i| (Token::Image(i.hash), i.page)));
+        for (t, page) in tokens {
+            let list = &mut index.entry(t).or_default()[side];
+            match list.iter_mut().find(|(p, _)| *p == page) {
+                Some((_, n)) => *n += 1,
+                None => list.push((page, 1)),
+            }
+        }
+    }
+    let limit = |n: usize| (n / 2).clamp(1, MAX_RARE_PAGES);
+    let (lo, ln) = (limit(old.pages.len()), limit(new.pages.len()));
+    let mut weights: HashMap<(usize, usize), u32> = HashMap::new();
+    for [a, b] in index.values() {
+        if a.is_empty() || b.is_empty() || a.len() > lo || b.len() > ln {
+            continue;
+        }
+        for &(i, ci) in a {
+            for &(j, cj) in b {
+                *weights.entry((i, j)).or_default() += ci.min(cj);
+            }
+        }
+    }
+    weights
 }
 
 /// Alinha as `n` páginas antigas com as `m` novas, em ordem, maximizando as palavras iguais de cada
@@ -344,23 +468,14 @@ fn quote(words: &[&WordAt]) -> String {
     }
 }
 
-/// Marca de largura zero onde o texto entrou ou saiu: depois da palavra anterior, ou antes da
-/// seguinte, se ela estiver no mesmo par.
-fn anchor(words: &[WordAt], at: usize, pair_of: &[usize], pair: usize) -> Option<PdfRect> {
-    let caret = |x: f32, r: &PdfRect| PdfRect {
-        x0: x,
-        y0: r.y0,
-        x1: x,
-        y1: r.y1,
-    };
-    let before = at
-        .checked_sub(1)
-        .map(|i| &words[i])
-        .filter(|w| pair_of[w.page] == pair);
-    let after = words.get(at).filter(|w| pair_of[w.page] == pair);
-    before
+/// Marca de largura zero onde o texto entrou ou saiu: depois da palavra anterior da página, ou antes
+/// da seguinte.
+fn anchor(words: &[WordAt], at: usize) -> Option<PdfRect> {
+    let caret = |x: f32, r: &PdfRect| PdfRect::new(x, r.y0, x, r.y1);
+    at.checked_sub(1)
+        .and_then(|i| words.get(i))
         .map(|w| caret(w.rect.x1, &w.rect))
-        .or_else(|| after.map(|w| caret(w.rect.x0, &w.rect)))
+        .or_else(|| words.get(at).map(|w| caret(w.rect.x0, &w.rect)))
 }
 
 /// "Helvetica 12" ou "Helvetica 10,5", com a cor quando ela difere da outra.
@@ -379,13 +494,8 @@ fn style_text(s: &Style, other: &Style) -> String {
 }
 
 /// Diff com prazo (o resultado fica mais grosso depois dele, mas sai).
-fn diff<T: Eq + std::hash::Hash>(a: &[T], b: &[T]) -> Vec<DiffOp> {
-    capture_diff_slices_deadline(
-        Algorithm::Patience,
-        a,
-        b,
-        Some(Instant::now() + DIFF_DEADLINE),
-    )
+fn diff<T: Eq + std::hash::Hash>(a: &[T], b: &[T], deadline: Instant) -> Vec<DiffOp> {
+    capture_diff_slices_deadline(Algorithm::Patience, a, b, Some(deadline))
 }
 
 /// Os pares iguais de cada `Equal` (índice antigo, índice novo).
@@ -402,158 +512,249 @@ fn equal_pairs(ops: &[DiffOp]) -> impl Iterator<Item = (usize, usize)> + '_ {
         .flatten()
 }
 
+fn texts(words: &[WordAt]) -> Vec<&str> {
+    words.iter().map(|w| w.text.as_str()).collect()
+}
+
+/// As alterações de texto de um par de páginas.
+fn text_changes(pair: usize, a: &[WordAt], b: &[WordAt], ops: &[DiffOp], out: &mut Vec<Change>) {
+    for op in ops.iter().filter(|op| !matches!(op, DiffOp::Equal { .. })) {
+        let (o, n) = (op.old_range(), op.new_range());
+        let (ow, nw): (Vec<&WordAt>, Vec<&WordAt>) =
+            (a[o.clone()].iter().collect(), b[n.clone()].iter().collect());
+        let (kind, description, anchor) = match (ow.is_empty(), nw.is_empty()) {
+            (false, false) => (
+                ChangeKind::Replaced,
+                format!("Substituído: {} → {}", quote(&ow), quote(&nw)),
+                None,
+            ),
+            (true, _) => (
+                ChangeKind::Inserted,
+                format!("Inserido: {}", quote(&nw)),
+                anchor(a, o.start),
+            ),
+            (_, true) => (
+                ChangeKind::Deleted,
+                format!("Excluído: {}", quote(&ow)),
+                anchor(b, n.start),
+            ),
+        };
+        out.push(Change {
+            kind,
+            pair,
+            old_rects: merge_lines(ow.iter().map(|w| w.rect)),
+            new_rects: merge_lines(nw.iter().map(|w| w.rect)),
+            anchor,
+            description,
+        });
+    }
+}
+
+/// Palavras iguais seguidas com a mesma mudança de fonte, tamanho ou cor: uma alteração só.
+fn format_changes(pair: usize, a: &[WordAt], b: &[WordAt], ops: &[DiffOp], out: &mut Vec<Change>) {
+    let mut run: Vec<(usize, usize)> = Vec::new();
+    let mut flush = |run: &mut Vec<(usize, usize)>| {
+        let Some(&(i, j)) = run.first() else { return };
+        let (os, ns) = (&a[i].style, &b[j].style);
+        out.push(Change {
+            kind: ChangeKind::Formatting,
+            pair,
+            old_rects: merge_lines(run.iter().map(|&(i, _)| a[i].rect)),
+            new_rects: merge_lines(run.iter().map(|&(_, j)| b[j].rect)),
+            anchor: None,
+            description: format!(
+                "Formatação: {} → {}",
+                style_text(os, ns),
+                style_text(ns, os)
+            ),
+        });
+        run.clear();
+    };
+    for (i, j) in equal_pairs(ops) {
+        let continues = run.last().is_some_and(|&(pi, pj)| {
+            pi + 1 == i && pj + 1 == j && a[pi].style == a[i].style && b[pj].style == b[j].style
+        });
+        if !continues {
+            flush(&mut run);
+        }
+        if a[i].style != b[j].style {
+            run.push((i, j));
+        }
+    }
+    flush(&mut run);
+}
+
+fn image_change(pair: usize, old: Option<PdfRect>, new: Option<PdfRect>) -> Change {
+    let what = match (old, new) {
+        (Some(_), Some(_)) => "substituída",
+        (Some(_), None) => "excluída",
+        _ => "inserida",
+    };
+    Change {
+        kind: ChangeKind::Image,
+        pair,
+        old_rects: old.into_iter().collect(),
+        new_rects: new.into_iter().collect(),
+        anchor: None,
+        description: format!("Imagem {what}"),
+    }
+}
+
+/// As imagens de um par: uma de cada lado, na ordem, é substituída; o resto entra ou sai.
+fn image_changes(
+    pair: usize,
+    a: &[ImageAt],
+    b: &[ImageAt],
+    deadline: Instant,
+    out: &mut Vec<Change>,
+) {
+    let hashes = |x: &[ImageAt]| x.iter().map(|i| i.hash).collect::<Vec<_>>();
+    for op in diff(&hashes(a), &hashes(b), deadline) {
+        let (o, n) = (&a[op.old_range()], &b[op.new_range()]);
+        for k in 0..o.len().max(n.len()) {
+            if !matches!(op, DiffOp::Equal { .. }) {
+                out.push(image_change(
+                    pair,
+                    o.get(k).map(|i| i.rect),
+                    n.get(k).map(|i| i.rect),
+                ));
+            }
+        }
+    }
+}
+
+/// Página sem par: tudo nela entrou (`inserted`) ou saiu. Página vazia: a página inteira.
+fn lone_page(
+    pair: usize,
+    side: &Side,
+    page: usize,
+    words: &[WordAt],
+    images: &[ImageAt],
+    inserted: bool,
+    out: &mut Vec<Change>,
+) {
+    let (kind, label) = if inserted {
+        (ChangeKind::Inserted, "Página inserida")
+    } else {
+        (ChangeKind::Deleted, "Página excluída")
+    };
+    let place = |rects: Vec<PdfRect>| {
+        if inserted {
+            (Vec::new(), rects)
+        } else {
+            (rects, Vec::new())
+        }
+    };
+    if !words.is_empty() || images.is_empty() {
+        let refs: Vec<&WordAt> = words.iter().collect();
+        let (description, rects) = if words.is_empty() {
+            (label.to_string(), vec![side.bounds[page]])
+        } else {
+            (
+                format!("{label}: {}", quote(&refs)),
+                merge_lines(words.iter().map(|w| w.rect)),
+            )
+        };
+        let (old_rects, new_rects) = place(rects);
+        out.push(Change {
+            kind,
+            pair,
+            old_rects,
+            new_rects,
+            anchor: None,
+            description,
+        });
+    }
+    for i in images {
+        let (o, n) = place(vec![i.rect]);
+        out.push(image_change(pair, o.first().copied(), n.first().copied()));
+    }
+}
+
 /// Compara os dois arquivos. `progress` devolve `false` para cancelar.
 pub fn compare(
     opts: &CompareOptions,
     progress: &mut dyn FnMut(CompareStage) -> bool,
 ) -> Result<Comparison> {
+    compare_with(opts, &Limits::default(), progress)
+}
+
+pub(crate) fn compare_with(
+    opts: &CompareOptions,
+    limits: &Limits,
+    progress: &mut dyn FnMut(CompareStage) -> bool,
+) -> Result<Comparison> {
     let images = !opts.text_only;
-    let old = read_side(&opts.old, images, progress, CompareStage::ReadingOld)?;
-    let new = read_side(&opts.new, images, progress, CompareStage::ReadingNew)?;
+    let old = read_side(
+        &opts.old,
+        images,
+        limits,
+        progress,
+        CompareStage::ReadingOld,
+    )?;
+    let new = read_side(
+        &opts.new,
+        images,
+        limits,
+        progress,
+        CompareStage::ReadingNew,
+    )?;
     if !progress(CompareStage::Diffing) {
         return Err(PdfError::Cancelled);
     }
-    fn text(s: &Side) -> Vec<&str> {
-        s.words.iter().map(|w| w.text.as_str()).collect()
-    }
-    let ops = diff(&text(&old), &text(&new));
-    let hashes = |s: &Side| s.images.iter().map(|i| i.hash).collect::<Vec<_>>();
-    let image_ops = diff(&hashes(&old), &hashes(&new));
-
-    // as palavras e as imagens iguais dizem que páginas formam par
-    let mut weights: HashMap<(usize, usize), u32> = HashMap::new();
-    let page_pairs = equal_pairs(&ops)
-        .map(|(i, j)| (old.words[i].page, new.words[j].page))
-        .chain(equal_pairs(&image_ops).map(|(i, j)| (old.images[i].page, new.images[j].page)));
-    for key in page_pairs {
-        *weights.entry(key).or_default() += 1;
-    }
-    let aligned = align_pages(old.pages.len(), new.pages.len(), &weights);
-    let mut old_pair = vec![0; old.pages.len()];
-    let mut new_pair = vec![0; new.pages.len()];
-    for (k, (o, n)) in aligned.iter().enumerate() {
-        if let Some(o) = o {
-            old_pair[*o] = k;
-        }
-        if let Some(n) = n {
-            new_pair[*n] = k;
-        }
-    }
-
+    // primeiro os pares de páginas (pelo que é raro); depois o diff dentro de cada par
+    let aligned = align_pages(old.pages.len(), new.pages.len(), &rare_weights(&old, &new));
+    let (ow, nw) = (
+        old.by_page(&old.words, |w| w.page),
+        new.by_page(&new.words, |w| w.page),
+    );
+    let (oi, ni) = (
+        old.by_page(&old.images, |i| i.page),
+        new.by_page(&new.images, |i| i.page),
+    );
+    let deadline = Instant::now() + DIFF_DEADLINE;
     let mut changes = Vec::new();
-    for op in ops.iter().filter(|op| !matches!(op, DiffOp::Equal { .. })) {
-        let (o, n) = (op.old_range(), op.new_range());
-        // por par: as palavras antigas e as novas
-        let mut groups: BTreeMap<usize, (Vec<&WordAt>, Vec<&WordAt>)> = BTreeMap::new();
-        for w in &old.words[o.clone()] {
-            groups.entry(old_pair[w.page]).or_default().0.push(w);
+    for (pair, &(o, n)) in aligned.iter().enumerate() {
+        if !progress(CompareStage::Diffing) {
+            return Err(PdfError::Cancelled);
         }
-        for w in &new.words[n.clone()] {
-            groups.entry(new_pair[w.page]).or_default().1.push(w);
-        }
-        for (pair, (ow, nw)) in groups {
-            let (kind, description, anchor) = match (ow.is_empty(), nw.is_empty()) {
-                (false, false) => (
-                    ChangeKind::Replaced,
-                    format!("Substituído: {} → {}", quote(&ow), quote(&nw)),
-                    None,
-                ),
-                (true, _) => (
-                    ChangeKind::Inserted,
-                    format!("Inserido: {}", quote(&nw)),
-                    anchor(&old.words, o.start, &old_pair, pair),
-                ),
-                (_, true) => (
-                    ChangeKind::Deleted,
-                    format!("Excluído: {}", quote(&ow)),
-                    anchor(&new.words, n.start, &new_pair, pair),
-                ),
-            };
-            changes.push(Change {
-                kind,
-                pair,
-                old_rects: merge_lines(ow.iter().map(|w| w.rect)),
-                new_rects: merge_lines(nw.iter().map(|w| w.rect)),
-                anchor,
-                description,
-            });
-        }
-    }
-
-    if opts.formatting {
-        // palavras iguais seguidas, no mesmo par, com a mesma mudança: uma alteração só
-        let mut run: Vec<(usize, usize)> = Vec::new();
-        let mut flush = |run: &mut Vec<(usize, usize)>| {
-            let Some(&(i, j)) = run.first() else { return };
-            let (os, ns) = (&old.words[i].style, &new.words[j].style);
-            changes.push(Change {
-                kind: ChangeKind::Formatting,
-                pair: new_pair[new.words[j].page],
-                old_rects: merge_lines(run.iter().map(|&(i, _)| old.words[i].rect)),
-                new_rects: merge_lines(run.iter().map(|&(_, j)| new.words[j].rect)),
-                anchor: None,
-                description: format!(
-                    "Formatação: {} → {}",
-                    style_text(os, ns),
-                    style_text(ns, os)
-                ),
-            });
-            run.clear();
-        };
-        for (i, j) in equal_pairs(&ops) {
-            let (ow, nw) = (&old.words[i], &new.words[j]);
-            let same_pair = old_pair[ow.page] == new_pair[nw.page];
-            let differs = same_pair && ow.style != nw.style;
-            let continues = run.last().is_some_and(|&(pi, pj)| {
-                pi + 1 == i
-                    && pj + 1 == j
-                    && old.words[pi].style == ow.style
-                    && new.words[pj].style == nw.style
-                    && new_pair[new.words[pj].page] == new_pair[nw.page]
-            });
-            if !continues {
-                flush(&mut run);
-            }
-            if differs {
-                run.push((i, j));
-            }
-        }
-        flush(&mut run);
-    }
-
-    for op in image_ops
-        .iter()
-        .filter(|op| !matches!(op, DiffOp::Equal { .. }))
-    {
-        // por par; uma de cada lado, na ordem: substituída; o resto entra ou sai
-        let mut groups: BTreeMap<usize, (Vec<PdfRect>, Vec<PdfRect>)> = BTreeMap::new();
-        for i in &old.images[op.old_range()] {
-            groups.entry(old_pair[i.page]).or_default().0.push(i.rect);
-        }
-        for i in &new.images[op.new_range()] {
-            groups.entry(new_pair[i.page]).or_default().1.push(i.rect);
-        }
-        for (pair, (ol, nl)) in groups {
-            for k in 0..ol.len().max(nl.len()) {
-                let (a, b) = (ol.get(k).copied(), nl.get(k).copied());
-                let what = match (a, b) {
-                    (Some(_), Some(_)) => "substituída",
-                    (Some(_), None) => "excluída",
-                    _ => "inserida",
-                };
-                changes.push(Change {
-                    kind: ChangeKind::Image,
+        match (o, n) {
+            (Some(i), Some(j)) => {
+                let (a, b) = (&old.words[ow[i].clone()], &new.words[nw[j].clone()]);
+                let ops = diff(&texts(a), &texts(b), deadline);
+                text_changes(pair, a, b, &ops, &mut changes);
+                if opts.formatting {
+                    format_changes(pair, a, b, &ops, &mut changes);
+                }
+                image_changes(
                     pair,
-                    old_rects: a.into_iter().collect(),
-                    new_rects: b.into_iter().collect(),
-                    anchor: None,
-                    description: format!("Imagem {what}"),
-                });
+                    &old.images[oi[i].clone()],
+                    &new.images[ni[j].clone()],
+                    deadline,
+                    &mut changes,
+                );
             }
+            (None, Some(j)) => lone_page(
+                pair,
+                &new,
+                j,
+                &new.words[nw[j].clone()],
+                &new.images[ni[j].clone()],
+                true,
+                &mut changes,
+            ),
+            (Some(i), None) => lone_page(
+                pair,
+                &old,
+                i,
+                &old.words[ow[i].clone()],
+                &old.images[oi[i].clone()],
+                false,
+                &mut changes,
+            ),
+            (None, None) => {}
         }
     }
-
-    changes.sort_by_key(|c| c.pair);
     let pairs = aligned
         .iter()
         .map(|(o, n)| (o.map(|i| old.pages[i]), n.map(|j| new.pages[j])))
@@ -563,6 +764,8 @@ pub fn compare(
         changes,
         old_pages: old.pages.len() as i32,
         new_pages: new.pages.len() as i32,
+        old_words: old.words.len(),
+        new_words: new.words.len(),
     })
 }
 
@@ -616,6 +819,143 @@ mod tests {
         assert_eq!(pairs.len(), n + 2000);
         assert_eq!(pairs[0], (Some(0), Some(0)));
         assert_eq!(pairs[n], (None, Some(n)));
+    }
+
+    fn sample_input(dir: &std::path::Path, pages: usize) -> CompareInput {
+        let path = dir.join("amostra.pdf");
+        std::fs::write(&path, crate::sample::sample_pdf(pages, 0)).unwrap();
+        CompareInput {
+            path,
+            password: None,
+            pages: None,
+        }
+    }
+
+    #[test]
+    fn too_many_words_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = sample_input(dir.path(), 3);
+        let limits = Limits {
+            max_words: 5,
+            ..Limits::default()
+        };
+        let r = read_side(
+            &input,
+            true,
+            &limits,
+            &mut |_| true,
+            CompareStage::ReadingOld,
+        );
+        assert!(matches!(r, Err(PdfError::Refused(m)) if m.contains("texto demais")));
+        let ok = read_side(
+            &input,
+            true,
+            &Limits::default(),
+            &mut |_| true,
+            CompareStage::ReadingOld,
+        );
+        assert_eq!(ok.unwrap().words.len(), 12);
+    }
+
+    /// PDF de 2 páginas, cada uma com uma imagem cinza 2×2 de tons diferentes.
+    fn two_images(dir: &std::path::Path) -> CompareInput {
+        let mut objs = vec![
+            "1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n".to_string(),
+            "2 0 obj<</Type/Pages/Kids[3 0 R 5 0 R]/Count 2>>endobj\n".into(),
+        ];
+        for (page, img, gray) in [(3, 4, 'A'), (5, 6, 'z')] {
+            objs.push(format!(
+                "{page} 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Resources<</XObject<</I {img} 0 R>>>>/Contents 7 0 R>>endobj\n"
+            ));
+            objs.push(format!(
+                "{img} 0 obj<</Type/XObject/Subtype/Image/Width 2/Height 2/ColorSpace/DeviceGray/BitsPerComponent 8/Length 4>>stream\n{g}{g}{g}{g}\nendstream endobj\n",
+                g = gray
+            ));
+        }
+        let ops = "q 100 0 0 100 50 50 cm /I Do Q";
+        objs.push(format!(
+            "7 0 obj<</Length {}>>stream\n{ops}\nendstream endobj\n",
+            ops.len() + 1
+        ));
+        let path = dir.join("imagens.pdf");
+        std::fs::write(
+            &path,
+            format!("%PDF-1.4\n{}trailer<</Root 1 0 R>>\n", objs.concat()),
+        )
+        .unwrap();
+        CompareInput {
+            path,
+            password: None,
+            pages: None,
+        }
+    }
+
+    #[test]
+    fn decoding_stops_at_the_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = two_images(dir.path());
+        let read = |decode_bytes| {
+            let limits = Limits {
+                decode_bytes,
+                ..Limits::default()
+            };
+            read_side(
+                &input,
+                true,
+                &limits,
+                &mut |_| true,
+                CompareStage::ReadingOld,
+            )
+            .unwrap()
+        };
+        let all = read(1000);
+        assert_ne!(all.images[0].hash, all.images[1].hash);
+        // só a primeira (4 bytes) cabe: a segunda vale só pelas dimensões
+        let budget = read(4);
+        assert_eq!(budget.images[0].hash, all.images[0].hash);
+        assert_ne!(budget.images[1].hash, all.images[1].hash);
+        let few = read_side(
+            &input,
+            true,
+            &Limits {
+                max_images: 1,
+                ..Limits::default()
+            },
+            &mut |_| true,
+            CompareStage::ReadingOld,
+        )
+        .unwrap();
+        assert_eq!(few.images.len(), 1);
+    }
+
+    #[test]
+    fn fonts_are_shared_between_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = sample_input(dir.path(), 2);
+        let side = read_side(
+            &input,
+            false,
+            &Limits::default(),
+            &mut |_| true,
+            CompareStage::ReadingOld,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(
+            &side.words[0].style.font,
+            &side.words[5].style.font
+        ));
+    }
+
+    #[test]
+    fn pages_split_into_ranges() {
+        let side = Side {
+            pages: vec![0, 1, 2],
+            bounds: vec![PdfRect::default(); 3],
+            words: Vec::new(),
+            images: Vec::new(),
+        };
+        let pages = [0usize, 0, 2, 2, 2];
+        assert_eq!(side.by_page(&pages, |p| *p), vec![0..2, 0..0, 2..5]);
     }
 
     #[test]

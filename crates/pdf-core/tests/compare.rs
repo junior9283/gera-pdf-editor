@@ -538,3 +538,122 @@ fn blank_side_color_does_not_leak_into_the_page() {
     // texto preto sob o destaque verde claro (multiplicação): bem escuro
     assert!(darkest < 200, "o texto saiu claro demais: {darkest}");
 }
+
+const HEADER: &str = "ACME Relatorio Anual 2026 Confidencial";
+const FOOTER: &str = "Rodape da empresa ACME";
+
+/// As alterações só podem cair nos pares `expected`.
+fn changes_only_in(c: &Comparison, expected: &[usize]) {
+    for ch in &c.changes {
+        assert!(
+            expected.contains(&ch.pair),
+            "alteração no par {}: {}",
+            ch.pair,
+            ch.description
+        );
+    }
+}
+
+#[test]
+fn repeated_header_does_not_mark_unchanged_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = |t: &'static str| [HEADER, t, FOOTER];
+    let (p1, p2, p3) = (
+        body("primeira pagina fala de vendas"),
+        body("segunda pagina fala de custos"),
+        body("terceira pagina fala de metas"),
+    );
+    let ins = body("nova pagina inserida");
+    let a = text_pdf(dir.path(), "a.pdf", &[pg(&p1), pg(&p2), pg(&p3)], 0);
+    let b = text_pdf(
+        dir.path(),
+        "b.pdf",
+        &[pg(&p1), pg(&ins), pg(&p2), pg(&p3)],
+        0,
+    );
+    let c = run(&opts(&a, &b));
+    assert_eq!(
+        c.pairs,
+        vec![
+            (Some(0), Some(0)),
+            (None, Some(1)),
+            (Some(1), Some(2)),
+            (Some(2), Some(3))
+        ]
+    );
+    changes_only_in(&c, &[1]);
+    // e ao contrário: página excluída
+    let c = run(&opts(&b, &a));
+    assert_eq!(
+        c.pairs,
+        vec![
+            (Some(0), Some(0)),
+            (Some(1), None),
+            (Some(2), Some(1)),
+            (Some(3), Some(2))
+        ]
+    );
+    changes_only_in(&c, &[1]);
+}
+
+#[test]
+fn repeated_header_does_not_misalign_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = |t: &'static str| [HEADER, t];
+    let (pa, pb, pc) = (
+        body("capitulo a com texto proprio"),
+        body("capitulo b com outro texto"),
+        body("capitulo c encerra o documento"),
+    );
+    let (px, ph) = (body("pagina x totalmente nova"), [HEADER, ""]);
+    let a = text_pdf(dir.path(), "a.pdf", &[pg(&pa), pg(&pb), pg(&pc)], 0);
+    let b = text_pdf(
+        dir.path(),
+        "b.pdf",
+        &[pg(&pa), pg(&px), pg(&pb), pg(&ph[..1]), pg(&pc)],
+        0,
+    );
+    let c = run(&opts(&a, &b));
+    assert_eq!(
+        c.pairs,
+        vec![
+            (Some(0), Some(0)),
+            (None, Some(1)),
+            (Some(1), Some(2)),
+            (None, Some(3)),
+            (Some(2), Some(4))
+        ]
+    );
+    changes_only_in(&c, &[1, 3]);
+}
+
+#[test]
+fn blank_inserted_page_is_a_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = text_pdf(dir.path(), "a.pdf", &[pg(&["texto"])], 0);
+    let b = text_pdf(dir.path(), "b.pdf", &[pg(&["texto"]), pg(&[])], 0);
+    let (c, dest) = report(dir.path(), &opts(&a, &b));
+    assert_eq!(c.pairs, vec![(Some(0), Some(0)), (None, Some(1))]);
+    assert_eq!(kinds(&c), vec![ChangeKind::Inserted]);
+    assert!(c.changes[0].description.contains("Página inserida"));
+    assert!(!c.changes[0].new_rects.is_empty());
+    let summary = PdfDoc::open(&dest, None).unwrap().page_text(0).unwrap();
+    assert!(summary.contains("Páginas inseridas: 1"), "{summary}");
+}
+
+#[test]
+fn documents_without_text_say_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = text_pdf(dir.path(), "a.pdf", &[with_image(&[], 40)], 0);
+    let b = text_pdf(dir.path(), "b.pdf", &[with_image(&[], 90)], 0);
+    let mut o = opts(&a, &b);
+    o.text_only = true;
+    let (c, dest) = report(dir.path(), &o);
+    assert!(c.changes.is_empty());
+    let summary = PdfDoc::open(&dest, None).unwrap().page_text(0).unwrap();
+    assert!(summary.contains("OCR"), "{summary}");
+    assert!(
+        !summary.contains("Não foram encontradas diferenças"),
+        "{summary}"
+    );
+}
