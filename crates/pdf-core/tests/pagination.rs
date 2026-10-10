@@ -51,7 +51,7 @@ fn a_text_watermark_goes_on_every_page() {
             "página {p}"
         );
     }
-    assert!(d.has_pagination(Pagination::Watermark).unwrap());
+    assert!(d.pagination_state(Pagination::Watermark).unwrap().0);
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn removing_takes_every_mark_and_keeps_the_page() {
     for p in 0..3 {
         assert!(!has(&d, p, "RASCUNHO") && has(&d, p, "Hello Gera"));
     }
-    assert!(!d.has_pagination(Pagination::Watermark).unwrap());
+    assert!(!d.pagination_state(Pagination::Watermark).unwrap().0);
 }
 
 #[test]
@@ -102,7 +102,7 @@ fn the_choices_are_read_back_for_update() {
     w.rotation = 45.0;
     w.behind = true;
     d.add_watermark(&w, false).unwrap();
-    match d.pagination_config(Pagination::Watermark).unwrap() {
+    match d.pagination_state(Pagination::Watermark).unwrap().1 {
         Some(PaginationConfig::Watermark(back)) => assert_eq!(back, w),
         other => panic!("{other:?}"),
     }
@@ -128,7 +128,7 @@ fn an_acrobat_watermark_is_removed_too() {
     )
     .unwrap();
     let mut d = PdfDoc::open(&path, None).unwrap();
-    assert!(d.has_pagination(Pagination::Watermark).unwrap());
+    assert!(d.pagination_state(Pagination::Watermark).unwrap().0);
     assert_eq!(d.remove_pagination(Pagination::Watermark).unwrap(), 1);
     let text = d.page_text(0).unwrap();
     assert!(!text.contains("ACROBAT"), "{text}");
@@ -271,7 +271,7 @@ fn file_paths_read_from_the_document_are_dropped() {
     let mut w = text_mark(PageSet::All);
     w.source = WatermarkSource::Image(png);
     d.add_watermark(&w, false).unwrap();
-    match d.pagination_config(Pagination::Watermark).unwrap() {
+    match d.pagination_state(Pagination::Watermark).unwrap().1 {
         Some(PaginationConfig::Watermark(back)) => {
             assert_eq!(back.source, WatermarkSource::Image(Default::default()));
         }

@@ -215,10 +215,8 @@ pub fn edit_pdf_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
 pub fn pagination_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     let mut out = None;
     let present = doc.pagination.present;
-    let what = match doc.pagination.tool {
-        Some(pdf_core::Pagination::Watermark) => "marca d'água",
-        _ => "cabeçalho e rodapé",
-    };
+    let kind = doc.pagination.tool?;
+    let what = crate::pagination_tool::label(kind);
     ui.horizontal(|ui| {
         if ui.button("➕ Adicionar…").clicked() {
             doc.pagination.open(false);

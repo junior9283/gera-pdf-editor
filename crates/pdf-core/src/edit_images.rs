@@ -9,7 +9,8 @@ use crate::create_export::{oriented, UprightImage};
 use crate::doc::PdfDoc;
 use crate::error::{refused, Result};
 use crate::page_content::{
-    decode_name, invert, is_delim, mul, num, own_resource, page_content, Lexer, Tok,
+    decode_name, free_name, invert, is_delim, matrix_ops, mul, own_resource, page_content, Lexer,
+    Tok,
 };
 use crate::types::PdfRect;
 use mupdf::pdf::{PdfDocument, PdfObject};
@@ -232,18 +233,14 @@ fn add_xobject(
 ) -> Result<String> {
     let image = doc.add_image(&up.img)?;
     let mut xobjects = own_resource(doc, page_obj, "XObject")?;
-    let name = (0..)
-        .map(|n| format!("GeraIm{n}"))
-        .find(|n| xobjects.get_dict(n.as_str()).ok().flatten().is_none())
-        .expect("sempre há um nome livre");
+    let name = free_name(&xobjects, "GeraIm")?;
     xobjects.dict_put(name.as_str(), image)?;
     Ok(name)
 }
 
 /// Com espaço dos dois lados: o vizinho pode estar colado (`cm/Im0 Do`, válido no PDF).
 fn draw_ops(x: &Matrix, name: &str) -> String {
-    let m = [x.a, x.b, x.c, x.d, x.e, x.f].map(num).join(" ");
-    format!(" q {m} cm {} Do Q ", encode_name(name))
+    format!(" q {} cm {} Do Q ", matrix_ops(x), encode_name(name))
 }
 
 impl PdfDoc {
@@ -399,6 +396,7 @@ impl PdfDoc {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::page_content::num;
 
     #[test]
     fn do_inside_strings_comments_and_inline_images_is_ignored() {

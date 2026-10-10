@@ -483,8 +483,8 @@ fn text_blocks_are_listed_and_edited_through_the_worker() {
 #[test]
 fn watermark_through_the_worker() {
     let (_d, w, _) = opened(2);
-    w.send(Request::AddWatermark {
-        watermark: Box::new(pdf_core::Watermark {
+    w.send(Request::AddPagination {
+        config: Box::new(pdf_core::PaginationConfig::Watermark(pdf_core::Watermark {
             source: pdf_core::WatermarkSource::Text {
                 text: "CONFIDENCIAL".into(),
                 look: pdf_core::TextLook {
@@ -501,7 +501,7 @@ fn watermark_through_the_worker() {
             vertical: (pdf_core::Align::Center, 0.0),
             horizontal: (pdf_core::Align::Center, 0.0),
             pages: pdf_core::PageSet::All,
-        }),
+        })),
         replace: false,
     });
     assert!(matches!(recv(&w), Response::PagesChanged { .. }));

@@ -4,6 +4,28 @@ use crate::error::{refused, Result};
 use mupdf::pdf::{PdfDocument, PdfObject};
 use mupdf::Matrix;
 
+/// Os seis números da matriz, para o operador `cm` ou `Tm`.
+pub(crate) fn matrix_ops(m: &Matrix) -> String {
+    [m.a, m.b, m.c, m.d, m.e, m.f].map(num).join(" ")
+}
+
+/// Cor de preenchimento RGB (`r g b rg`).
+pub(crate) fn rgb_ops(color: [u8; 3]) -> String {
+    let [r, g, b] = color.map(|c| num(c as f32 / 255.0));
+    format!("{r} {g} {b} rg")
+}
+
+/// Primeiro nome `prefixN` livre no dicionário (de recursos).
+pub(crate) fn free_name(dict: &PdfObject, prefix: &str) -> Result<String> {
+    for n in 0.. {
+        let name = format!("{prefix}{n}");
+        if dict.get_dict(name.as_str())?.is_none() {
+            return Ok(name);
+        }
+    }
+    unreachable!("sempre há um nome livre")
+}
+
 /// Inversa da matriz (recusa as degeneradas, de PDF malformado).
 pub(crate) fn invert(m: &Matrix) -> Result<Matrix> {
     m.invert()

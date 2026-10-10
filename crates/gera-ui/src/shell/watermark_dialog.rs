@@ -1,31 +1,43 @@
 //! Janela "Adicionar marca d'água" (como no Acrobat): origem (texto ou arquivo), aparência
-//! (rotação, opacidade, escala, atrás/na frente), posição e páginas, com prévia.
+//! (rotação, opacidade, escala, atrás/na frente), posição e páginas, com prévia. Também as peças
+//! comuns às janelas de marca d'água e de cabeçalho e rodapé.
 use pdf_core::{Align, PageSet, StdFont, TextLook, Watermark, WatermarkSource};
 use std::path::PathBuf;
 
-/// Rotações do Acrobat (a última é "outra").
-const ROTATIONS: [(&str, f32); 4] = [("45°", 45.0), ("0°", 0.0), ("−45°", -45.0), ("Outra", 0.0)];
-pub const FONTS: [(&str, StdFont); 3] = [
+/// Rotações do Acrobat; `None` é "outra".
+const ROTATIONS: [(&str, Option<f32>); 4] = [
+    ("45°", Some(45.0)),
+    ("0°", Some(0.0)),
+    ("−45°", Some(-45.0)),
+    ("Outra", None),
+];
+const FONTS: [(&str, StdFont); 3] = [
     ("Helvetica", StdFont::Helvetica),
     ("Times", StdFont::Times),
     ("Courier", StdFont::Courier),
 ];
-const VERTICAL: [&str; 3] = ["Topo", "Centro", "Base"];
-const HORIZONTAL: [&str; 3] = ["Esquerda", "Centro", "Direita"];
-pub const PAGES: [&str; 4] = ["Todas", "Intervalo", "Só pares", "Só ímpares"];
+const VERTICAL: [(&str, Align); 3] = [
+    ("Topo", Align::Start),
+    ("Centro", Align::Center),
+    ("Base", Align::End),
+];
+const HORIZONTAL: [(&str, Align); 3] = [
+    ("Esquerda", Align::Start),
+    ("Centro", Align::Center),
+    ("Direita", Align::End),
+];
+const PAGES: [&str; 4] = ["Todas", "Intervalo", "Só pares", "Só ímpares"];
 /// Arquivos aceitos como origem.
 pub const FILE_EXTS: &[&str] = &["pdf", "png", "jpg", "jpeg"];
 
 pub struct WatermarkDialog {
     from_file: bool,
     pub text: String,
-    font: usize,
-    bold: bool,
-    size: f32,
-    color: [u8; 3],
+    look: TextLook,
     pub path: Option<PathBuf>,
     /// Página do PDF de origem (a partir de 1).
     pdf_page: u32,
+    /// Índice em `ROTATIONS`.
     rotation: usize,
     custom_rotation: f32,
     /// 0 a 100.
@@ -34,10 +46,9 @@ pub struct WatermarkDialog {
     /// % da página.
     scale: f32,
     behind: bool,
-    vertical: (usize, f32),
-    horizontal: (usize, f32),
-    pub pages: usize,
-    pub range: String,
+    vertical: (Align, f32),
+    horizontal: (Align, f32),
+    pub pages: Pages,
     /// A janela pediu para escolher o arquivo de origem.
     pub wants_file: bool,
 }
@@ -48,10 +59,12 @@ impl Default for WatermarkDialog {
         Self {
             from_file: false,
             text: String::new(),
-            font: 0,
-            bold: true,
-            size: 48.0,
-            color: [200, 0, 0],
+            look: TextLook {
+                font: StdFont::Helvetica,
+                bold: true,
+                size: 48.0,
+                color: [200, 0, 0],
+            },
             path: None,
             pdf_page: 1,
             rotation: 0,
@@ -60,52 +73,135 @@ impl Default for WatermarkDialog {
             relative: false,
             scale: 50.0,
             behind: false,
-            vertical: (1, 0.0),
-            horizontal: (1, 0.0),
-            pages: 0,
-            range: String::new(),
+            vertical: (Align::Center, 0.0),
+            horizontal: (Align::Center, 0.0),
+            pages: Pages::default(),
             wants_file: false,
         }
     }
 }
 
-fn align(i: usize) -> Align {
-    [Align::Start, Align::Center, Align::End][i.min(2)]
+/// Escolha de páginas das janelas: todas, intervalo, pares, ímpares.
+#[derive(Default)]
+pub struct Pages {
+    choice: usize,
+    range: String,
 }
 
-fn align_index(a: Align) -> usize {
-    match a {
-        Align::Start => 0,
-        Align::Center => 1,
-        Align::End => 2,
+impl Pages {
+    pub fn from_set(p: &PageSet) -> Self {
+        let (choice, range) = match p {
+            PageSet::All => (0, String::new()),
+            PageSet::Range(r) => (1, r.clone()),
+            PageSet::Even => (2, String::new()),
+            PageSet::Odd => (3, String::new()),
+        };
+        Self { choice, range }
+    }
+
+    /// As páginas escolhidas, ou o problema do intervalo (o mesmo texto do pdf-core).
+    pub fn set(&self, total: usize) -> Result<PageSet, String> {
+        Ok(match self.choice {
+            1 => {
+                pdf_core::parse_ranges(&self.range, total)?;
+                PageSet::Range(self.range.clone())
+            }
+            2 => PageSet::Even,
+            3 => PageSet::Odd,
+            _ => PageSet::All,
+        })
+    }
+
+    pub fn ui(&mut self, ui: &mut egui::Ui, id: &str) {
+        ui.horizontal(|ui| {
+            ui.label("Páginas");
+            egui::ComboBox::from_id_salt(id)
+                .selected_text(PAGES[self.choice])
+                .show_index(ui, &mut self.choice, PAGES.len(), |i| PAGES[i]);
+            if self.choice == 1 {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.range)
+                        .desired_width(90.0)
+                        .hint_text("1-3, 5"),
+                );
+            }
+        });
     }
 }
 
-/// Páginas escolhidas na janela.
-pub fn page_set(choice: usize, range: &str) -> PageSet {
-    match choice {
-        1 => PageSet::Range(range.to_owned()),
-        2 => PageSet::Even,
-        3 => PageSet::Odd,
-        _ => PageSet::All,
-    }
+/// Fonte, negrito, tamanho e cor do texto (as duas janelas).
+pub fn look_editor(ui: &mut egui::Ui, id: &str, look: &mut TextLook, max_size: f32) {
+    ui.horizontal(|ui| {
+        let name = FONTS.iter().find(|f| f.1 == look.font).map_or("", |f| f.0);
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(name)
+            .show_ui(ui, |ui| {
+                for (label, font) in FONTS {
+                    ui.selectable_value(&mut look.font, font, label);
+                }
+            });
+        ui.checkbox(&mut look.bold, "Negrito");
+        ui.add(
+            egui::DragValue::new(&mut look.size)
+                .range(4.0..=max_size)
+                .suffix(" pt"),
+        );
+        ui.color_edit_button_srgb(&mut look.color);
+    });
 }
 
-/// Índice da escolha de páginas e o intervalo.
-pub fn page_choice(p: &PageSet) -> (usize, String) {
-    match p {
-        PageSet::All => (0, String::new()),
-        PageSet::Range(r) => (1, r.clone()),
-        PageSet::Even => (2, String::new()),
-        PageSet::Odd => (3, String::new()),
+/// Janela com OK e Cancelar (OK desligado enquanto `body` devolve um problema, mostrado embaixo).
+/// `Some(Some(_))`: OK; `Some(None)`: cancelou ou fechou.
+pub fn ok_cancel_window<T>(
+    ctx: &egui::Context,
+    title: &str,
+    body: impl FnOnce(&mut egui::Ui) -> Result<T, String>,
+) -> Option<Option<T>> {
+    let mut out = None;
+    let mut open = true;
+    egui::Window::new(title)
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            let result = body(ui);
+            ui.separator();
+            if let Err(p) = &result {
+                ui.colored_label(ui.visuals().weak_text_color(), p);
+            }
+            let ok = result.is_ok();
+            ui.horizontal(|ui| {
+                if ui.add_enabled(ok, egui::Button::new("OK")).clicked() {
+                    out = result.ok().map(Some);
+                }
+                if ui.button("Cancelar").clicked() {
+                    out = Some(None);
+                }
+            });
+        });
+    if !open {
+        return Some(None);
     }
+    out
 }
 
-/// Problema com o intervalo de páginas (o mesmo texto do pdf-core).
-pub fn range_problem(choice: usize, range: &str, total: usize) -> Option<String> {
-    (choice == 1)
-        .then(|| pdf_core::parse_ranges(range, total).err())
-        .flatten()
+/// A página em miniatura para a prévia (altura `h`): o pintor, o retângulo e a escala pt → px.
+pub fn preview_page(
+    ui: &mut egui::Ui,
+    page: (f32, f32),
+    h: f32,
+) -> (egui::Painter, egui::Rect, f32) {
+    let w = h * page.0 / page.1.max(1.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, egui::Color32::WHITE);
+    painter.rect_stroke(
+        rect,
+        0.0,
+        egui::Stroke::new(1.0, egui::Color32::GRAY),
+        egui::StrokeKind::Inside,
+    );
+    (painter, rect, w / page.0.max(1.0))
 }
 
 impl WatermarkDialog {
@@ -115,10 +211,7 @@ impl WatermarkDialog {
         match &w.source {
             WatermarkSource::Text { text, look } => {
                 d.text = text.clone();
-                d.font = FONTS.iter().position(|f| f.1 == look.font).unwrap_or(0);
-                d.bold = look.bold;
-                d.size = look.size;
-                d.color = look.color;
+                d.look = look.clone();
             }
             // o caminho não vem do documento (o pdf-core o apaga): escolher o arquivo de novo
             WatermarkSource::Image(p) => {
@@ -133,26 +226,28 @@ impl WatermarkDialog {
         }
         d.rotation = ROTATIONS
             .iter()
-            .take(3)
-            .position(|r| r.1 == w.rotation)
-            .unwrap_or(3);
+            .position(|r| r.1 == Some(w.rotation))
+            .unwrap_or(ROTATIONS.len() - 1);
         d.custom_rotation = w.rotation;
         d.opacity = w.opacity * 100.0;
         d.relative = w.scale.is_some();
         d.scale = w.scale.map_or(50.0, |s| s * 100.0);
         d.behind = w.behind;
-        d.vertical = (align_index(w.vertical.0), w.vertical.1);
-        d.horizontal = (align_index(w.horizontal.0), w.horizontal.1);
-        (d.pages, d.range) = page_choice(&w.pages);
+        d.vertical = w.vertical;
+        d.horizontal = w.horizontal;
+        d.pages = Pages::from_set(&w.pages);
         d
     }
 
     fn rotation(&self) -> f32 {
-        if self.rotation == 3 {
-            self.custom_rotation
-        } else {
-            ROTATIONS[self.rotation].1
-        }
+        ROTATIONS[self.rotation].1.unwrap_or(self.custom_rotation)
+    }
+
+    fn source_is_pdf(&self) -> bool {
+        self.path
+            .as_ref()
+            .and_then(|p| p.extension())
+            .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
     }
 
     /// A marca das escolhas, ou o que falta (para o OK ficar desligado).
@@ -162,10 +257,7 @@ impl WatermarkDialog {
                 .path
                 .clone()
                 .ok_or("Escolha o arquivo da marca d'água.")?;
-            let is_pdf = path
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
-            if is_pdf {
+            if self.source_is_pdf() {
                 WatermarkSource::PdfPage {
                     path,
                     page: self.pdf_page.max(1) as i32 - 1,
@@ -179,31 +271,23 @@ impl WatermarkDialog {
             }
             WatermarkSource::Text {
                 text: self.text.clone(),
-                look: TextLook {
-                    font: FONTS[self.font.min(2)].1,
-                    bold: self.bold,
-                    size: self.size,
-                    color: self.color,
-                },
+                look: self.look.clone(),
             }
         };
-        if let Some(p) = range_problem(self.pages, &self.range, total) {
-            return Err(p);
-        }
         Ok(Watermark {
             source,
             rotation: self.rotation(),
             opacity: (self.opacity / 100.0).clamp(0.0, 1.0),
             scale: self.relative.then_some(self.scale / 100.0),
             behind: self.behind,
-            vertical: (align(self.vertical.0), self.vertical.1),
-            horizontal: (align(self.horizontal.0), self.horizontal.1),
-            pages: page_set(self.pages, &self.range),
+            vertical: self.vertical,
+            horizontal: self.horizontal,
+            pages: self.pages.set(total)?,
         })
     }
 
-    /// Desenha a janela. `Some(Some(_))`: OK; `Some(None)`: cancelou. `page` é o tamanho da página
-    /// atual (para a prévia) e `total`, o número de páginas.
+    /// Desenha a janela. `page` é o tamanho da página atual (para a prévia) e `total`, o número de
+    /// páginas.
     pub fn show(
         &mut self,
         ctx: &egui::Context,
@@ -211,40 +295,15 @@ impl WatermarkDialog {
         page: (f32, f32),
         total: usize,
     ) -> Option<Option<Watermark>> {
-        let mut out = None;
-        let mut open = true;
-        egui::Window::new(title)
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.horizontal_top(|ui| {
-                    ui.vertical(|ui| self.choices(ui));
-                    // (um separador vertical aqui esticaria a janela até a borda da tela)
-                    ui.add_space(12.0);
-                    self.preview(ui, page);
-                });
-                ui.separator();
-                let result = self.watermark(total);
-                if let Err(p) = &result {
-                    ui.colored_label(ui.visuals().weak_text_color(), p);
-                }
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(result.is_ok(), egui::Button::new("OK"))
-                        .clicked()
-                    {
-                        out = result.ok().map(Some);
-                    }
-                    if ui.button("Cancelar").clicked() {
-                        out = Some(None);
-                    }
-                });
+        ok_cancel_window(ctx, title, |ui| {
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| self.choices(ui));
+                // (um separador vertical aqui esticaria a janela até a borda da tela)
+                ui.add_space(12.0);
+                self.preview(ui, page);
             });
-        if !open {
-            return Some(None);
-        }
-        out
+            self.watermark(total)
+        })
     }
 
     fn choices(&mut self, ui: &mut egui::Ui) {
@@ -258,17 +317,14 @@ impl WatermarkDialog {
                 if ui.button("Escolher…").clicked() {
                     self.wants_file = true;
                 }
-                ui.label(self.path.as_ref().map_or("(nenhum arquivo)".into(), |p| {
-                    p.file_name()
-                        .map_or(String::new(), |n| n.to_string_lossy().into_owned())
-                }));
+                ui.label(
+                    self.path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .map_or("(nenhum arquivo)".into(), |n| n.to_string_lossy()),
+                );
             });
-            if self
-                .path
-                .as_ref()
-                .and_then(|p| p.extension())
-                .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
-            {
+            if self.source_is_pdf() {
                 ui.horizontal(|ui| {
                     ui.label("Página");
                     ui.add(egui::DragValue::new(&mut self.pdf_page).range(1..=9999));
@@ -280,18 +336,7 @@ impl WatermarkDialog {
                     .desired_rows(2)
                     .hint_text("Ex.: CONFIDENCIAL"),
             );
-            ui.horizontal(|ui| {
-                egui::ComboBox::from_id_salt("marca-fonte")
-                    .selected_text(FONTS[self.font].0)
-                    .show_index(ui, &mut self.font, FONTS.len(), |i| FONTS[i].0);
-                ui.checkbox(&mut self.bold, "Negrito");
-                ui.add(
-                    egui::DragValue::new(&mut self.size)
-                        .range(4.0..=500.0)
-                        .suffix(" pt"),
-                );
-                ui.color_edit_button_srgb(&mut self.color);
-            });
+            look_editor(ui, "marca-fonte", &mut self.look, 500.0);
         }
         ui.add_space(6.0);
         ui.strong("Aparência");
@@ -300,7 +345,7 @@ impl WatermarkDialog {
             for (i, (label, _)) in ROTATIONS.iter().enumerate() {
                 ui.radio_value(&mut self.rotation, i, *label);
             }
-            if self.rotation == 3 {
+            if ROTATIONS[self.rotation].1.is_none() {
                 ui.add(
                     egui::DragValue::new(&mut self.custom_rotation)
                         .range(-360.0..=360.0)
@@ -325,65 +370,54 @@ impl WatermarkDialog {
         });
         ui.add_space(6.0);
         ui.strong("Posição");
-        for (label, names, (choice, off), id) in [
+        for (label, names, (align, off), id) in [
             ("Vertical", VERTICAL, &mut self.vertical, "marca-v"),
             ("Horizontal", HORIZONTAL, &mut self.horizontal, "marca-h"),
         ] {
             ui.horizontal(|ui| {
                 ui.label(label);
+                let current = names.iter().find(|n| n.1 == *align).map_or("", |n| n.0);
                 egui::ComboBox::from_id_salt(id)
-                    .selected_text(names[*choice])
-                    .show_index(ui, choice, 3, |i| names[i]);
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        for (name, a) in names {
+                            ui.selectable_value(align, a, name);
+                        }
+                    });
                 ui.add(egui::DragValue::new(off).suffix(" pt"));
             });
         }
         ui.add_space(6.0);
-        pages_choice(ui, "marca-paginas", &mut self.pages, &mut self.range);
+        self.pages.ui(ui, "marca-paginas");
     }
 
     /// Prévia esquemática: a página e a marca (texto girado ou o quadro do arquivo).
     fn preview(&self, ui: &mut egui::Ui, page: (f32, f32)) {
-        let h = 260.0;
-        let w = h * page.0 / page.1.max(1.0);
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, egui::Color32::WHITE);
-        painter.rect_stroke(
-            rect,
-            0.0,
-            egui::Stroke::new(1.0, egui::Color32::GRAY),
-            egui::StrokeKind::Inside,
-        );
-        let k = w / page.0.max(1.0);
-        let alpha = (self.opacity / 100.0 * 255.0) as u8;
-        let at = |(choice, off): (usize, f32), lo: f32, hi: f32, size: f32| match choice {
-            0 => lo + off * k + size / 2.0,
-            2 => hi - off * k - size / 2.0,
-            _ => (lo + hi) / 2.0 + off * k,
+        let (painter, rect, k) = preview_page(ui, page, 260.0);
+        let alpha = self.opacity / 100.0;
+        let at = |(align, off): (Align, f32), lo: f32, hi: f32, size: f32| {
+            align.center(off * k, lo, hi, size)
         };
         if self.from_file {
             let (bw, bh) = if self.relative {
-                (w * self.scale / 100.0, h * self.scale / 100.0)
+                let f = self.scale / 100.0;
+                (rect.width() * f, rect.height() * f)
             } else {
-                (w * 0.4, h * 0.3)
+                (rect.width() * 0.4, rect.height() * 0.3)
             };
             let c = egui::pos2(
                 at(self.horizontal, rect.left(), rect.right(), bw),
                 at(self.vertical, rect.top(), rect.bottom(), bh),
             );
             let r = egui::Rect::from_center_size(c, egui::vec2(bw, bh));
-            painter.rect_filled(
-                r,
-                0.0,
-                egui::Color32::from_gray(160).gamma_multiply(alpha as f32 / 255.0),
-            );
+            painter.rect_filled(r, 0.0, egui::Color32::from_gray(160).gamma_multiply(alpha));
             return;
         }
-        let [cr, cg, cb] = self.color;
+        let [cr, cg, cb] = self.look.color;
         let galley = painter.layout(
             self.text.clone(),
-            egui::FontId::proportional((self.size * k).max(4.0)),
-            egui::Color32::from_rgba_unmultiplied(cr, cg, cb, alpha),
+            egui::FontId::proportional((self.look.size * k).max(4.0)),
+            egui::Color32::from_rgb(cr, cg, cb).gamma_multiply(alpha),
             f32::INFINITY,
         );
         let size = galley.size();
@@ -394,29 +428,12 @@ impl WatermarkDialog {
         );
         // o texto gira em torno do centro dele
         let (s, co) = angle.sin_cos();
-        let half = egui::vec2(size.x / 2.0, size.y / 2.0);
+        let half = size / 2.0;
         let corner = c - egui::vec2(half.x * co - half.y * s, half.x * s + half.y * co);
         painter.add(
             egui::epaint::TextShape::new(corner, galley, egui::Color32::BLACK).with_angle(angle),
         );
     }
-}
-
-/// Escolha de páginas (todas, intervalo, pares, ímpares), comum às duas janelas.
-pub fn pages_choice(ui: &mut egui::Ui, id: &str, choice: &mut usize, range: &mut String) {
-    ui.horizontal(|ui| {
-        ui.label("Páginas");
-        egui::ComboBox::from_id_salt(id)
-            .selected_text(PAGES[*choice])
-            .show_index(ui, choice, PAGES.len(), |i| PAGES[i]);
-        if *choice == 1 {
-            ui.add(
-                egui::TextEdit::singleline(range)
-                    .desired_width(90.0)
-                    .hint_text("1-3, 5"),
-            );
-        }
-    });
 }
 
 #[cfg(test)]
@@ -457,28 +474,33 @@ mod tests {
     fn a_bad_page_range_blocks_ok() {
         let mut d = WatermarkDialog {
             text: "X".into(),
-            pages: 1,
-            range: "2-9".into(),
+            pages: Pages {
+                choice: 1,
+                range: "2-9".into(),
+            },
             ..Default::default()
         };
         assert!(d.watermark(3).unwrap_err().contains("3 páginas"));
-        d.range = "2-3".into();
+        d.pages.range = "2-3".into();
         assert_eq!(d.watermark(3).unwrap().pages, PageSet::Range("2-3".into()));
     }
 
     #[test]
     fn updating_starts_from_the_current_mark() {
-        let mut d = WatermarkDialog {
+        let d = WatermarkDialog {
             text: "FINAL".into(),
             rotation: 3,
             custom_rotation: 30.0,
             relative: true,
             scale: 40.0,
             behind: true,
-            pages: 3,
+            vertical: (Align::Start, 20.0),
+            pages: Pages {
+                choice: 3,
+                range: String::new(),
+            },
             ..Default::default()
         };
-        d.vertical = (0, 20.0);
         let w = d.watermark(5).unwrap();
         let back = WatermarkDialog::from_watermark(&w).watermark(5).unwrap();
         assert_eq!(back, w);

@@ -8,7 +8,7 @@
 //! o texto antigo (formulário, fonte Type3), a edição é recusada e o documento volta como estava.
 use crate::doc::PdfDoc;
 use crate::error::{refused, Result};
-use crate::page_content::{invert, num, own_resource};
+use crate::page_content::{invert, matrix_ops, num, own_resource, rgb_ops};
 use crate::text_fit::LINE_HEIGHT;
 use crate::types::PdfRect;
 use mupdf::pdf::{
@@ -672,11 +672,10 @@ impl PdfDoc {
         let mut page_obj = pdf_page.object();
         let to_screen = page_obj.page_ctm()?;
         let name = self.font_resource(&mut page_obj, &style.font)?;
-        let [r, g, b] = style.color.map(|c| num(c as f32 / 255.0));
-        let m = invert(&to_screen)?;
         let mut ops = format!(
-            " q {} cm BT {r} {g} {b} rg /{name} {} Tf {}",
-            [m.a, m.b, m.c, m.d, m.e, m.f].map(num).join(" "),
+            " q {} cm BT {} /{name} {} Tf {}",
+            matrix_ops(&invert(&to_screen)?),
+            rgb_ops(style.color),
             num(style.size),
             if style.invisible { "3 Tr " } else { "" }
         );

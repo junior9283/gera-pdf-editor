@@ -130,14 +130,9 @@ pub enum Request {
         at: (f32, f32),
         text: String,
     },
-    /// Marca d'água (`replace`: no lugar da existente — o Atualizar).
-    AddWatermark {
-        watermark: Box<crate::Watermark>,
-        replace: bool,
-    },
-    /// Cabeçalho e rodapé (`replace`: no lugar dos existentes).
-    AddHeaderFooter {
-        header_footer: Box<crate::HeaderFooter>,
+    /// Marca d'água ou cabeçalho e rodapé (`replace`: no lugar dos existentes — o Atualizar).
+    AddPagination {
+        config: Box<crate::PaginationConfig>,
         replace: bool,
     },
     /// Tira as marcas d'água (ou os cabeçalhos e rodapés) de todas as páginas.
@@ -511,25 +506,23 @@ impl State {
                 d.add_text(page, at, &text)
                     .map(|()| Changed::Pages(vec![page]))
             }),
-            Request::AddWatermark { watermark, replace } => self.edit(send, |d| {
-                d.add_watermark(&watermark, replace)
-                    .map(|()| Changed::Document)
-            }),
-            Request::AddHeaderFooter {
-                header_footer,
-                replace,
-            } => self.edit(send, |d| {
-                d.add_header_footer(&header_footer, replace)
+            Request::AddPagination { config, replace } => self.edit(send, |d| {
+                d.add_pagination(&config, replace)
                     .map(|()| Changed::Document)
             }),
             Request::RemovePagination(kind) => self.edit(send, |d| {
                 d.remove_pagination(kind).map(|_| Changed::Document)
             }),
-            Request::PaginationState(kind) => send(Response::PaginationState {
-                kind,
-                present: self.with_doc(|d| d.has_pagination(kind)).unwrap_or(false),
-                config: self.with_doc(|d| d.pagination_config(kind)).unwrap_or(None),
-            }),
+            Request::PaginationState(kind) => {
+                let (present, config) = self
+                    .with_doc(|d| d.pagination_state(kind))
+                    .unwrap_or((false, None));
+                send(Response::PaginationState {
+                    kind,
+                    present,
+                    config,
+                })
+            }
             Request::Pages(op) => {
                 self.edit(send, |d| d.apply_pages(op).map(|()| Changed::Document))
             }

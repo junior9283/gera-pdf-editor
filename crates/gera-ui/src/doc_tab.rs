@@ -451,7 +451,12 @@ impl DocTab {
         self.worker.send(Request::Open { path, password });
     }
 
-    fn on_opened(&mut self, summary: DocSummary) {
+    /// O documento todo chegou (aberto ou mudado): anotações, campos e o estado das ferramentas.
+    /// Devolve o caminho e os tamanhos das páginas, para a vista.
+    fn apply_summary(
+        &mut self,
+        summary: DocSummary,
+    ) -> (std::path::PathBuf, Vec<pdf_core::PageSize>) {
         self.security = summary.security;
         self.annots = summary.annots;
         self.fields = summary.fields;
@@ -461,17 +466,18 @@ impl DocTab {
             self.worker.send(r);
         }
         self.form.notes = summary.form_notes;
-        self.history = HistoryState::default();
         self.outline = summary.outline;
+        (summary.path, summary.sizes)
+    }
+
+    fn on_opened(&mut self, summary: DocSummary) {
+        let (path, sizes) = self.apply_summary(summary);
+        self.history = HistoryState::default();
         self.password_prompt = None;
         self.edit.reset();
-        self.status = format!(
-            "{} — {} páginas",
-            summary.path.display(),
-            summary.sizes.len()
-        );
+        self.status = format!("{} — {} páginas", path.display(), sizes.len());
         let dark = self.dark;
-        let mut view = DocView::new(summary.path, summary.sizes);
+        let mut view = DocView::new(path, sizes);
         view.dark = dark;
         self.view = Some(view);
         self.search.text.clear(); // descarta a busca (e os destaques) do documento anterior
@@ -483,29 +489,17 @@ impl DocTab {
 
     /// O documento mudou de páginas: recarrega tudo, ficando perto da página em que estava.
     fn on_pages_changed(&mut self, summary: DocSummary, history: HistoryState) {
-        self.security = summary.security;
-        self.annots = summary.annots;
-        self.fields = summary.fields;
-        self.prepare.on_fields(&self.fields);
-        self.edit_pdf.clear();
-        self.form.notes = summary.form_notes;
-        self.outline = summary.outline;
+        let (_, sizes) = self.apply_summary(summary);
         self.history = history;
-        if let Some(r) = self.pagination.refresh() {
-            self.worker.send(r);
-        }
         self.edit.keep_valid_selection(&self.annots);
-        let page = self
-            .last
-            .current_page
-            .min(summary.sizes.len().saturating_sub(1));
+        let page = self.last.current_page.min(sizes.len().saturating_sub(1));
         // com páginas a mais ou a menos, a seleção antiga marcaria outras páginas
-        let same_count = self.view.as_ref().map(|v| v.sizes.len()) == Some(summary.sizes.len());
+        let same_count = self.view.as_ref().map(|v| v.sizes.len()) == Some(sizes.len());
         if let Some(org) = self.organize.as_mut().filter(|_| !same_count) {
             org.sel = Default::default();
         }
         if let Some(view) = self.view.as_mut() {
-            view.set_pages(summary.sizes);
+            view.set_pages(sizes);
             self.jump_to = view.go_to(page as i32, None);
         }
         self.search.start(&self.worker); // os resultados antigos apontam para páginas velhas
@@ -725,9 +719,6 @@ impl DocTab {
                     self.edit.keep_valid_selection(&self.annots);
                     self.edit_pdf.invalidate(&pages);
                     self.history = history;
-                    if let Some(r) = self.pagination.refresh() {
-                        self.worker.send(r);
-                    }
                     if let Some(view) = self.view.as_mut() {
                         for page in pages {
                             view.invalidate_page(page);
@@ -1853,7 +1844,7 @@ impl DocTab {
                 }
             }
             (Some(PickFor::WatermarkFile), Picked::Open(files)) => {
-                if let Some(crate::pagination_tool::PaginationDialog::Watermark(d, _)) =
+                if let Some((crate::pagination_tool::PaginationWindow::Watermark(d), _)) =
                     self.pagination.dialog.as_mut()
                 {
                     d.path = files.into_iter().next().or(d.path.take());

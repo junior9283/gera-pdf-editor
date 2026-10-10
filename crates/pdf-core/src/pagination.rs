@@ -11,7 +11,9 @@ use crate::create_export::{oriented, UprightImage};
 use crate::doc::PdfDoc;
 use crate::edit_text::{glyph_run, width};
 use crate::error::{refused, Result};
-use crate::page_content::{invert, mul, num, own_resource, page_content, Lexer, Tok};
+use crate::page_content::{
+    free_name, invert, matrix_ops, mul, num, own_resource, page_content, rgb_ops, Lexer, Tok,
+};
 use mupdf::pdf::{PdfDocument, PdfObject};
 use mupdf::{Buffer, Font, Matrix};
 use serde::{Deserialize, Serialize};
@@ -83,16 +85,16 @@ impl TextLook {
 
     /// Tamanho utilizável (o da janela, ou de uma configuração lida do arquivo).
     fn size(&self) -> f32 {
-        if self.size.is_finite() {
-            self.size.clamp(1.0, 500.0)
-        } else {
-            12.0
-        }
+        finite_clamp(self.size, 1.0, 500.0, 12.0)
     }
+}
 
-    fn color_ops(&self) -> String {
-        let [r, g, b] = self.color.map(|c| num(c as f32 / 255.0));
-        format!("{r} {g} {b} rg")
+/// `v` limitado a `lo..=hi`; não finito vira `default`.
+fn finite_clamp(v: f32, lo: f32, hi: f32, default: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(lo, hi)
+    } else {
+        default
     }
 }
 
@@ -102,6 +104,18 @@ pub enum Align {
     Start,
     Center,
     End,
+}
+
+impl Align {
+    /// Centro de um objeto de tamanho `size` alinhado entre `lo` e `hi`, a `off` da borda (ou do
+    /// centro).
+    pub fn center(self, off: f32, lo: f32, hi: f32, size: f32) -> f32 {
+        match self {
+            Align::Start => lo + off + size / 2.0,
+            Align::Center => (lo + hi) / 2.0 + off,
+            Align::End => hi - off - size / 2.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -185,7 +199,12 @@ pub enum DateFormat {
 }
 
 impl DateFormat {
-    pub fn pattern(self) -> &'static str {
+    /// A data de hoje neste formato.
+    pub fn today(self) -> String {
+        chrono::Local::now().format(self.pattern()).to_string()
+    }
+
+    fn pattern(self) -> &'static str {
         match self {
             DateFormat::DayMonthYear => "%d/%m/%Y",
             DateFormat::DayMonthShort => "%d/%m/%y",
@@ -210,6 +229,26 @@ pub struct HeaderFooter {
     pub pages: PageSet,
 }
 
+impl HeaderFooter {
+    /// O texto de uma caixa na página de posição `index` entre as escolhidas (número = início +
+    /// `index`), com `total` páginas no documento e a data `today`.
+    pub fn expand(&self, text: &str, index: usize, total: i32, today: &str) -> String {
+        let mut t = text
+            .replace("<<n>>", &(self.start as usize + index).to_string())
+            .replace("<<total>>", &total.to_string())
+            .replace("<<data>>", today);
+        if let Some(b) = &self.bates {
+            let digits = b.digits.clamp(1, 12) as usize;
+            let n = b.start as usize + index;
+            t = t.replace(
+                "<<bates>>",
+                &format!("{}{n:0digits$}{}", b.prefix, b.suffix),
+            );
+        }
+        t
+    }
+}
+
 /// O que acrescentar ou remover.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pagination {
@@ -227,11 +266,20 @@ impl Pagination {
     }
 }
 
-/// As escolhas guardadas no documento (para o Atualizar).
+/// As escolhas guardadas no documento (para o Atualizar) — e o que acrescentar.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PaginationConfig {
     Watermark(Watermark),
     HeaderFooter(HeaderFooter),
+}
+
+impl PaginationConfig {
+    pub fn kind(&self) -> Pagination {
+        match self {
+            PaginationConfig::Watermark(_) => Pagination::Watermark,
+            PaginationConfig::HeaderFooter(_) => Pagination::HeaderFooter,
+        }
+    }
 }
 
 /// Um trecho marcado no conteúdo e as escolhas gravadas nele.
@@ -293,6 +341,11 @@ fn marked(content: &[u8], kind: Pagination) -> Vec<Marked> {
     out
 }
 
+/// Pré-filtro barato: só o conteúdo que cita `Pagination` passa pelo tokenizador.
+fn mentions_pagination(content: &[u8]) -> bool {
+    content.windows(10).any(|w| w == b"Pagination")
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02X}")).collect()
 }
@@ -326,13 +379,7 @@ fn without_paths(config: &mut PaginationConfig) {
 /// Escolhas lidas do arquivo, sem caminhos e com os valores limitados.
 fn sanitized(mut config: PaginationConfig) -> PaginationConfig {
     without_paths(&mut config);
-    let fix = |v: f32, lo: f32, hi: f32, default: f32| {
-        if v.is_finite() {
-            v.clamp(lo, hi)
-        } else {
-            default
-        }
-    };
+    let fix = finite_clamp;
     match &mut config {
         PaginationConfig::Watermark(w) => {
             w.rotation = fix(w.rotation, -360.0, 360.0, 0.0);
@@ -369,33 +416,13 @@ fn place(w: &Watermark, bbox: [f32; 4], page: [f32; 4]) -> Matrix {
     let rad = w.rotation.to_radians();
     let (c, sn) = (rad.cos().abs(), rad.sin().abs());
     let (rw, rh) = (s * (bw * c + bh * sn), s * (bw * sn + bh * c));
-    let at = |(align, off): (Align, f32), lo: f32, hi: f32, size: f32| match align {
-        Align::Start => lo + off + size / 2.0,
-        Align::Center => (lo + hi) / 2.0 + off,
-        Align::End => hi - off - size / 2.0,
-    };
-    let cx = at(w.horizontal, x0, x1, rw);
-    let cy = at(w.vertical, y0, y1, rh);
+    let cx = w.horizontal.0.center(w.horizontal.1, x0, x1, rw);
+    let cy = w.vertical.0.center(w.vertical.1, y0, y1, rh);
     let mut m = Matrix::new_translate(-(bx + bw / 2.0), -(by + bh / 2.0));
     m = mul(&m, &Matrix::new_scale(s, -s));
     // na tela o y desce: anti-horário visto é o ângulo negativo
     m = mul(&m, &Matrix::new_rotate(-w.rotation));
     mul(&m, &Matrix::new_translate(cx, cy))
-}
-
-fn matrix_ops(m: &Matrix) -> String {
-    [m.a, m.b, m.c, m.d, m.e, m.f].map(num).join(" ")
-}
-
-/// Primeiro nome `prefixN` livre no dicionário.
-fn free_name(dict: &PdfObject, prefix: &str) -> Result<String> {
-    for n in 0.. {
-        let name = format!("{prefix}{n}");
-        if dict.get_dict(name.as_str())?.is_none() {
-            return Ok(name);
-        }
-    }
-    unreachable!("sempre há um nome livre")
 }
 
 /// O início do trecho marcado, com as escolhas só no primeiro.
@@ -413,6 +440,15 @@ fn artifact(subtype: &str, config: Option<&PaginationConfig>) -> Result<String> 
 }
 
 impl PdfDoc {
+    /// Acrescenta a marca d'água ou o cabeçalho e rodapé (`replace`: no lugar dos existentes — o
+    /// Atualizar).
+    pub fn add_pagination(&mut self, config: &PaginationConfig, replace: bool) -> Result<()> {
+        match config {
+            PaginationConfig::Watermark(w) => self.add_watermark(w, replace),
+            PaginationConfig::HeaderFooter(h) => self.add_header_footer(h, replace),
+        }
+    }
+
     /// Acrescenta a marca d'água (`replace`: no lugar das que já existem — o Atualizar).
     pub fn add_watermark(&mut self, w: &Watermark, replace: bool) -> Result<()> {
         self.require_modifiable("acrescentar a marca d'água")?;
@@ -422,11 +458,7 @@ impl PdfDoc {
                 d.strip(Pagination::Watermark)?;
             }
             let (form, bbox) = d.watermark_form(&w.source)?;
-            let opacity = if w.opacity.is_finite() {
-                w.opacity.clamp(0.0, 1.0)
-            } else {
-                1.0
-            };
+            let opacity = finite_clamp(w.opacity, 0.0, 1.0, 1.0);
             let gs = d
                 .inner
                 .new_object_from_str(&format!("<</Type/ExtGState/ca {0}/CA {0}>>", num(opacity)))?;
@@ -437,7 +469,7 @@ impl PdfDoc {
                 let mut pdf_page = d.inner.load_pdf_page(page)?;
                 let mut page_obj = pdf_page.object();
                 let to_screen = page_obj.page_ctm()?;
-                let b = d.load(page)?.bounds()?;
+                let b = pdf_page.bounds()?;
                 let mut xobjects = own_resource(&d.inner, &mut page_obj, "XObject")?;
                 let xo = free_name(&xobjects, "GeraWm")?;
                 xobjects.dict_put(xo.as_str(), form.clone())?;
@@ -480,7 +512,7 @@ impl PdfDoc {
                 let w = widths.iter().copied().fold(size, f32::max);
                 let lh = 1.2 * size;
                 let h = lines.len() as f32 * lh;
-                let mut ops = format!("BT {} /F0 {} Tf ", look.color_ops(), num(size));
+                let mut ops = format!("BT {} /F0 {} Tf ", rgb_ops(look.color), num(size));
                 for (i, (line, lw)) in lines.iter().zip(&widths).enumerate() {
                     let y = h - i as f32 * lh - 0.95 * size;
                     ops.push_str(&format!(
@@ -501,7 +533,10 @@ impl PdfDoc {
                 let up = UprightImage::open(path)?;
                 let img = self.inner.add_image(&up.img)?;
                 let [a, b, c, d, e, f] = oriented(up.orientation, up.width, up.height);
-                let ops = format!("q {} cm /Im0 Do Q", [a, b, c, d, e, f].map(num).join(" "));
+                let ops = format!(
+                    "q {} cm /Im0 Do Q",
+                    matrix_ops(&Matrix::new(a, b, c, d, e, f))
+                );
                 let mut res = self.inner.new_object_from_str("<</XObject<<>>>>")?;
                 let mut x = res.get_dict("XObject")?.expect("acabou de ser posto");
                 x.dict_put("Im0", img)?;
@@ -560,9 +595,7 @@ impl PdfDoc {
         if h.texts.iter().all(|t| t.trim().is_empty()) {
             return Err(refused("escreva o texto de alguma das caixas"));
         }
-        let today = chrono::Local::now()
-            .format(h.date_format.pattern())
-            .to_string();
+        let today = h.date_format.today();
         self.with_snapshot(|d| {
             if replace {
                 d.strip(Pagination::HeaderFooter)?;
@@ -572,33 +605,17 @@ impl PdfDoc {
             let config = PaginationConfig::HeaderFooter(h.clone());
             let [mt, mb, ml, mr] = h.margins;
             for (i, &page) in pages.iter().enumerate() {
-                let number = h.start as usize + i;
-                let expand = |t: &str| {
-                    let mut t = t
-                        .replace("<<n>>", &number.to_string())
-                        .replace("<<total>>", &total.to_string())
-                        .replace("<<data>>", &today);
-                    if let Some(b) = &h.bates {
-                        let digits = b.digits.clamp(1, 12) as usize;
-                        let n = b.start as usize + i;
-                        t = t.replace(
-                            "<<bates>>",
-                            &format!("{}{n:0digits$}{}", b.prefix, b.suffix),
-                        );
-                    }
-                    t
-                };
                 let mut pdf_page = d.inner.load_pdf_page(page)?;
                 let mut page_obj = pdf_page.object();
-                let to_screen = page_obj.page_ctm()?;
-                let b = d.load(page)?.bounds()?;
+                let to_screen = matrix_ops(&invert(&page_obj.page_ctm()?)?);
+                let b = pdf_page.bounds()?;
                 let name = d.font_resource(&mut page_obj, &font)?;
                 let lh = 1.2 * size;
                 let mut ops = String::new();
                 for (slots, subtype) in [(0..3, "Header"), (3..6, "Footer")] {
                     let mut runs = String::new();
                     for slot in slots {
-                        let text = expand(&h.texts[slot]);
+                        let text = h.expand(&h.texts[slot], i, total, &today);
                         let lines: Vec<&str> = text.lines().collect();
                         if text.trim().is_empty() {
                             continue;
@@ -630,10 +647,9 @@ impl PdfDoc {
                     }
                     let first = i == 0 && ops.is_empty();
                     ops.push_str(&format!(
-                        "{}q {} cm BT {} /{name} {} Tf {runs}ET Q EMC ",
+                        "{}q {to_screen} cm BT {} /{name} {} Tf {runs}ET Q EMC ",
                         artifact(subtype, first.then_some(&config))?,
-                        matrix_ops(&invert(&to_screen)?),
-                        h.look.color_ops(),
+                        rgb_ops(h.look.color),
                         num(size),
                     ));
                 }
@@ -656,6 +672,9 @@ impl PdfDoc {
         for page in 0..self.page_count()? {
             let mut page_obj = self.inner.find_page(page)?;
             let content = page_content(&page_obj)?;
+            if !mentions_pagination(&content) {
+                continue;
+            }
             let found = marked(&content, kind);
             if found.is_empty() {
                 continue;
@@ -676,40 +695,26 @@ impl PdfDoc {
         Ok(touched)
     }
 
-    /// Há marca d'água (ou cabeçalho e rodapé) em alguma página?
-    pub fn has_pagination(&self, kind: Pagination) -> Result<bool> {
-        for page in 0..self.page_count()? {
-            if !marked(&page_content(&self.inner.find_page(page)?)?, kind).is_empty() {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    /// As escolhas gravadas pelo app na marca (ou no cabeçalho) existente, para o Atualizar.
-    pub fn pagination_config(&self, kind: Pagination) -> Result<Option<PaginationConfig>> {
+    /// Há marca d'água (ou cabeçalho e rodapé)? E as escolhas que o app gravou nela, para o
+    /// Atualizar. Para na primeira página marcada (o app grava as escolhas só no primeiro trecho).
+    pub fn pagination_state(&self, kind: Pagination) -> Result<(bool, Option<PaginationConfig>)> {
         for page in 0..self.page_count()? {
             let content = page_content(&self.inner.find_page(page)?)?;
-            for m in marked(&content, kind) {
-                let Some(config) = m
-                    .config
-                    .as_deref()
-                    .and_then(unhex)
-                    .and_then(|b| serde_json::from_slice::<PaginationConfig>(&b).ok())
-                else {
-                    continue;
-                };
-                let matches = matches!(
-                    (&config, kind),
-                    (PaginationConfig::Watermark(_), Pagination::Watermark)
-                        | (PaginationConfig::HeaderFooter(_), Pagination::HeaderFooter)
-                );
-                if matches {
-                    return Ok(Some(sanitized(config)));
-                }
+            if !mentions_pagination(&content) {
+                continue;
             }
+            let found = marked(&content, kind);
+            if found.is_empty() {
+                continue;
+            }
+            let config = found.iter().find_map(|m| {
+                let c = serde_json::from_slice::<PaginationConfig>(&unhex(m.config.as_deref()?)?)
+                    .ok()?;
+                (c.kind() == kind).then(|| sanitized(c))
+            });
+            return Ok((true, config));
         }
-        Ok(None)
+        Ok((false, None))
     }
 }
 

@@ -5,10 +5,18 @@ use crate::shell::header_footer_dialog::HeaderFooterDialog;
 use crate::shell::watermark_dialog::WatermarkDialog;
 use pdf_core::{Pagination, PaginationConfig, Request};
 
-/// Janela aberta e se ela substitui o existente (Atualizar).
-pub enum PaginationDialog {
-    Watermark(WatermarkDialog, bool),
-    HeaderFooter(HeaderFooterDialog, bool),
+/// A janela aberta.
+pub enum PaginationWindow {
+    Watermark(Box<WatermarkDialog>),
+    HeaderFooter(Box<HeaderFooterDialog>),
+}
+
+/// Nome da ferramenta no meio das frases ("Sem marca d'água.", "Atualizar cabeçalho e rodapé").
+pub fn label(kind: Pagination) -> &'static str {
+    match kind {
+        Pagination::Watermark => "marca d'água",
+        Pagination::HeaderFooter => "cabeçalho e rodapé",
+    }
 }
 
 #[derive(Default)]
@@ -18,7 +26,8 @@ pub struct PaginationTool {
     /// O documento tem a marca (ou o cabeçalho) e as escolhas gravadas, como o worker respondeu.
     pub present: bool,
     config: Option<PaginationConfig>,
-    pub dialog: Option<PaginationDialog>,
+    /// A janela aberta e se ela substitui o existente (Atualizar).
+    pub dialog: Option<(PaginationWindow, bool)>,
 }
 
 impl PaginationTool {
@@ -27,22 +36,20 @@ impl PaginationTool {
         let Some(kind) = self.tool else {
             return;
         };
-        self.dialog = Some(
-            match (kind, update.then_some(self.config.as_ref()).flatten()) {
-                (Pagination::Watermark, Some(PaginationConfig::Watermark(w))) => {
-                    PaginationDialog::Watermark(WatermarkDialog::from_watermark(w), true)
+        let current = update.then_some(self.config.as_ref()).flatten();
+        let window = match kind {
+            Pagination::Watermark => PaginationWindow::Watermark(Box::new(match current {
+                Some(PaginationConfig::Watermark(w)) => WatermarkDialog::from_watermark(w),
+                _ => Default::default(),
+            })),
+            Pagination::HeaderFooter => PaginationWindow::HeaderFooter(Box::new(match current {
+                Some(PaginationConfig::HeaderFooter(h)) => {
+                    HeaderFooterDialog::from_header_footer(h)
                 }
-                (Pagination::Watermark, _) => {
-                    PaginationDialog::Watermark(Default::default(), update)
-                }
-                (Pagination::HeaderFooter, Some(PaginationConfig::HeaderFooter(h))) => {
-                    PaginationDialog::HeaderFooter(HeaderFooterDialog::from_header_footer(h), true)
-                }
-                (Pagination::HeaderFooter, _) => {
-                    PaginationDialog::HeaderFooter(Default::default(), update)
-                }
-            },
-        );
+                _ => Default::default(),
+            })),
+        };
+        self.dialog = Some((window, update));
     }
 
     /// A resposta do worker sobre o documento.
@@ -71,7 +78,7 @@ impl PaginationTool {
 impl DocTab {
     /// As janelas de Adicionar/Atualizar marca d'água e cabeçalho e rodapé.
     pub(crate) fn pagination_windows(&mut self, ctx: &egui::Context) {
-        let Some(view) = self.view.as_ref() else {
+        let (Some(view), Some(kind)) = (self.view.as_ref(), self.pagination.tool) else {
             return;
         };
         let total = view.sizes.len();
@@ -79,45 +86,35 @@ impl DocTab {
             .sizes
             .get(self.last.current_page)
             .map_or((612.0, 792.0), |s| (s.width, s.height));
-        let request = match self.pagination.dialog.as_mut() {
-            Some(PaginationDialog::Watermark(d, replace)) => {
-                let title = if *replace {
-                    "Atualizar marca d'água"
-                } else {
-                    "Adicionar marca d'água"
-                };
+        let Some((window, replace)) = self.pagination.dialog.as_mut() else {
+            return;
+        };
+        let replace = *replace;
+        let title = format!(
+            "{} {}",
+            if replace { "Atualizar" } else { "Adicionar" },
+            label(kind)
+        );
+        let outcome = match window {
+            PaginationWindow::Watermark(d) => {
                 if std::mem::take(&mut d.wants_file) {
                     self.pick_watermark_file(ctx);
                     return;
                 }
-                let replace = *replace;
-                d.show(ctx, title, page, total).map(|out| {
-                    out.map(|w| Request::AddWatermark {
-                        watermark: Box::new(w),
-                        replace,
-                    })
-                })
+                d.show(ctx, &title, page, total)
+                    .map(|o| o.map(PaginationConfig::Watermark))
             }
-            Some(PaginationDialog::HeaderFooter(d, replace)) => {
-                let title = if *replace {
-                    "Atualizar cabeçalho e rodapé"
-                } else {
-                    "Adicionar cabeçalho e rodapé"
-                };
-                let replace = *replace;
-                d.show(ctx, title, page, total).map(|out| {
-                    out.map(|h| Request::AddHeaderFooter {
-                        header_footer: Box::new(h),
-                        replace,
-                    })
-                })
-            }
-            None => None,
+            PaginationWindow::HeaderFooter(d) => d
+                .show(ctx, &title, page, total)
+                .map(|o| o.map(PaginationConfig::HeaderFooter)),
         };
-        if let Some(outcome) = request {
+        if let Some(outcome) = outcome {
             self.pagination.dialog = None;
-            if let Some(r) = outcome {
-                self.worker.send(r);
+            if let Some(config) = outcome {
+                self.worker.send(Request::AddPagination {
+                    config: Box::new(config),
+                    replace,
+                });
             }
         }
     }
@@ -135,7 +132,7 @@ mod tests {
             Some(Request::PaginationState(Pagination::HeaderFooter))
         ));
         let mut d = HeaderFooterDialog::default();
-        d.texts[1] = "Título".into();
+        d.texts()[1] = "Título".into();
         let h = d.header_footer(1).unwrap();
         t.on_state(
             Pagination::HeaderFooter,
@@ -143,14 +140,14 @@ mod tests {
             Some(PaginationConfig::HeaderFooter(h)),
         );
         t.open(true);
-        let Some(PaginationDialog::HeaderFooter(d, true)) = &t.dialog else {
+        let Some((PaginationWindow::HeaderFooter(d), true)) = &mut t.dialog else {
             panic!("Atualizar substitui");
         };
-        assert_eq!(d.texts[1], "Título");
+        assert_eq!(d.texts()[1], "Título");
         t.open(false);
         assert!(matches!(
             t.dialog,
-            Some(PaginationDialog::HeaderFooter(_, false))
+            Some((PaginationWindow::HeaderFooter(_), false))
         ));
     }
 
