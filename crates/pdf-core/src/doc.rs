@@ -77,6 +77,11 @@ impl PdfDoc {
         })
     }
 
+    /// Caminho do arquivo aberto (muda com Salvar como).
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn page_count(&self) -> Result<i32> {
         Ok(self.inner.page_count()?)
     }

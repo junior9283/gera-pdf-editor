@@ -121,6 +121,8 @@ pub struct DocTab {
     identity_name: String,
     /// Painel Comentários (busca, filtros, ordenação e resposta em digitação).
     comments: crate::comments_panel::PanelState,
+    /// Diálogo Dividir documento aberto.
+    split: Option<SplitDialog>,
     /// Modo Organizar páginas (a grade substitui o documento).
     pub(crate) organize: Option<crate::organize::OrganizeState>,
     /// Seletor de arquivos do modo Organizar e para que serve a escolha em andamento.
@@ -133,11 +135,28 @@ pub struct DocTab {
 /// O que fazer com o arquivo escolhido no seletor (modo Organizar).
 enum PickFor {
     File(crate::organize::Purpose),
+    /// Pasta das partes do Dividir.
+    Folder,
     Extract {
         pages: Vec<i32>,
         separate: bool,
         delete_after: bool,
     },
+}
+
+/// Diálogo Dividir documento.
+struct SplitDialog {
+    by: SplitBy,
+    pages: u32,
+    mb: f32,
+    dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SplitBy {
+    Pages,
+    Size,
+    Bookmarks,
 }
 
 impl DocTab {
@@ -173,6 +192,7 @@ impl DocTab {
             identity_name: String::new(),
             comments: Default::default(),
             organize: None,
+            split: None,
             files: Default::default(),
             picking: None,
             delete_after_extract: None,
@@ -491,6 +511,16 @@ impl DocTab {
                     self.delete_after_extract = None;
                     self.status = format!("Não foi possível organizar as páginas: {msg}");
                 }
+                Response::Split(files) => {
+                    self.status = match (files.len(), files.first().and_then(|f| f.parent())) {
+                        (1, Some(dir)) => format!("1 arquivo criado em {}", dir.display()),
+                        (n, Some(dir)) => format!("{n} arquivos criados em {}", dir.display()),
+                        _ => "Nenhum arquivo criado.".into(),
+                    };
+                }
+                Response::SplitFailed(msg) => {
+                    self.status = format!("Não foi possível dividir: {msg}");
+                }
                 Response::Extracted(files) => {
                     if let Some(pages) = self.delete_after_extract.take() {
                         self.worker
@@ -683,6 +713,8 @@ impl DocTab {
         self.edit.drop_stale_drag(down);
         self.edit.note_window(ui);
         self.edit.props_window(ui, &self.annots);
+        self.split_window(ui);
+        self.poll_files();
         self.identity_window(ui);
         self.send_edits();
         self.password_window(ui);
@@ -767,6 +799,97 @@ impl DocTab {
         self.view.as_ref().map(|v| v.zoom * 100.0)
     }
 
+    /// Abre o diálogo Dividir documento (partes na pasta do documento, por padrão).
+    pub fn open_split(&mut self) {
+        let dir = self.path.parent().map(PathBuf::from).unwrap_or_default();
+        self.split = Some(SplitDialog {
+            by: SplitBy::Pages,
+            pages: 1,
+            mb: 10.0,
+            dir,
+        });
+    }
+
+    fn split_window(&mut self, ui: &mut egui::Ui) {
+        let Some(d) = self.split.as_mut() else {
+            return;
+        };
+        let (mut go, mut cancel, mut pick) = (false, false, false);
+        egui::Window::new("Dividir documento")
+            .collapsible(false)
+            .resizable(false)
+            .show(ui, |ui| {
+                ui.label("Dividir por");
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut d.by, SplitBy::Pages, "Número de páginas:");
+                    ui.add(egui::DragValue::new(&mut d.pages).range(1..=9999));
+                });
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut d.by, SplitBy::Size, "Tamanho máximo do arquivo:");
+                    ui.add(
+                        egui::DragValue::new(&mut d.mb)
+                            .range(0.1..=10_000.0)
+                            .speed(0.5)
+                            .suffix(" MB"),
+                    );
+                });
+                ui.radio_value(
+                    &mut d.by,
+                    SplitBy::Bookmarks,
+                    "Marcadores de primeiro nível",
+                );
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let folder = d.dir.file_name().map_or_else(
+                        || d.dir.display().to_string(),
+                        |n| n.to_string_lossy().into_owned(),
+                    );
+                    ui.label(format!("Pasta: {folder}"))
+                        .on_hover_text(d.dir.display().to_string());
+                    pick = ui.button("Escolher pasta…").clicked();
+                });
+                let stem = self
+                    .path
+                    .file_stem()
+                    .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+                let example = match d.by {
+                    SplitBy::Bookmarks => format!("{stem}_<marcador>.pdf"),
+                    _ => format!("{stem}_Parte1.pdf, {stem}_Parte2.pdf…"),
+                };
+                ui.label(
+                    egui::RichText::new(format!("Arquivos: {example}"))
+                        .small()
+                        .weak(),
+                );
+                ui.horizontal(|ui| {
+                    go = ui.button("Dividir").clicked();
+                    cancel = ui.button("Cancelar").clicked();
+                });
+            });
+        if pick {
+            let start = Some(d.dir.clone());
+            if !self.files.busy() {
+                self.picking = Some(PickFor::Folder);
+                self.files.pick_folder(ui.ctx(), start);
+            }
+        }
+        if go {
+            let rule = match d.by {
+                SplitBy::Pages => pdf_core::SplitRule::Pages(d.pages),
+                SplitBy::Size => pdf_core::SplitRule::MaxBytes((d.mb * 1_048_576.0) as u64),
+                SplitBy::Bookmarks => pdf_core::SplitRule::TopBookmarks,
+            };
+            self.worker.send(Request::Split {
+                rule,
+                dir: d.dir.clone(),
+            });
+            self.status = "Dividindo o documento…".into();
+        }
+        if go || cancel {
+            self.split = None;
+        }
+    }
+
     /// Abre o Organizar páginas, já com um diálogo se pedido (Inserir / Recortar do hub).
     pub fn open_organize(&mut self, ctx: &egui::Context, tool: &str) {
         let org = self.organize.get_or_insert_with(Default::default);
@@ -774,6 +897,10 @@ impl DocTab {
             app_state::tools_catalog::INSERT => {
                 self.picking = Some(PickFor::File(crate::organize::Purpose::Insert));
                 self.files.open(ctx);
+            }
+            app_state::tools_catalog::SPLIT => {
+                self.organize = None;
+                self.open_split();
             }
             app_state::tools_catalog::CROP => {
                 org.dialog = Some(crate::organize::Dialog::Crop { mm: [0.0; 4] })
@@ -784,7 +911,7 @@ impl DocTab {
 
     /// A grade do Organizar páginas e as ações dela.
     fn organize_view(&mut self, ui: &mut egui::Ui) {
-        use crate::organize::{show, Dialog, OrgAction, Purpose};
+        use crate::organize::{show, OrgAction};
         let (Some(view), Some(org)) = (self.view.as_mut(), self.organize.as_mut()) else {
             return;
         };
@@ -797,10 +924,12 @@ impl DocTab {
                 OrgAction::Undo => self.worker.send(Request::Undo),
                 OrgAction::Redo => self.worker.send(Request::Redo),
                 OrgAction::Close => self.organize = None,
-                OrgAction::PickFile(purpose) => {
+                OrgAction::Split => self.open_split(),
+                OrgAction::PickFile(purpose) if !self.files.busy() => {
                     self.picking = Some(PickFor::File(purpose));
                     self.files.open(ui.ctx());
                 }
+                OrgAction::PickFile(_) => {}
                 OrgAction::Extract {
                     pages,
                     separate,
@@ -821,7 +950,11 @@ impl DocTab {
                 }
             }
         }
-        // o arquivo escolhido no seletor
+    }
+
+    /// O arquivo ou a pasta escolhidos no seletor do Organizar/Dividir.
+    fn poll_files(&mut self) {
+        use crate::organize::{Dialog, Purpose};
         let Some(picked) = self.files.poll() else {
             return;
         };
@@ -865,6 +998,11 @@ impl DocTab {
                 });
                 // só exclui depois que a extração deu certo (resposta Extracted)
                 self.delete_after_extract = delete_after.then_some(pages);
+            }
+            (Some(PickFor::Folder), Picked::Folder(dir)) => {
+                if let Some(split) = self.split.as_mut() {
+                    split.dir = dir;
+                }
             }
             (_, Picked::Failed) => {
                 self.status = "Não foi possível abrir o seletor de arquivos.".into()

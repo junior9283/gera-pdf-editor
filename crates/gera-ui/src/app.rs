@@ -46,6 +46,8 @@ pub struct GeraApp {
     show_about: bool,
     /// Diálogo Identidade aberto pelo menu: nome sendo digitado.
     identity: Option<String>,
+    /// Janela Combinar arquivos.
+    combine: crate::shell::combine::CombineWindow,
     bench: Option<Bench>,
 }
 
@@ -79,6 +81,7 @@ impl GeraApp {
             show_shortcuts: false,
             show_about: false,
             identity: None,
+            combine: Default::default(),
             bench,
         };
         app.refresh_recent_exists();
@@ -239,7 +242,9 @@ impl GeraApp {
                     }
                 }
                 Picked::SaveAs { doc, dest } => self.save_as(doc, dest),
-                Picked::Cancelled => self.comment_after_open = false,
+                Picked::Cancelled | Picked::Folder(_) | Picked::SaveTo(_) => {
+                    self.comment_after_open = false
+                }
                 Picked::Failed => {
                     self.comment_after_open = false;
                     self.status = "Não foi possível abrir o seletor de arquivos.".into();
@@ -550,11 +555,18 @@ impl GeraApp {
             .collect()
     }
 
-    /// Cartão ou item de ferramenta clicado. Só "Comentar" existe nesta fase.
+    /// Cartão ou item de ferramenta clicado.
     fn run_tool(&mut self, ctx: &egui::Context, id: &str) {
+        if id == tools_catalog::COMBINE {
+            self.combine.open = true;
+            return;
+        }
         if matches!(
             id,
-            tools_catalog::ORGANIZE | tools_catalog::INSERT | tools_catalog::CROP
+            tools_catalog::ORGANIZE
+                | tools_catalog::INSERT
+                | tools_catalog::CROP
+                | tools_catalog::SPLIT
         ) {
             match self.last_doc.clone().and_then(|p| self.tabs.find(&p)) {
                 Some(tab) => {
@@ -687,6 +699,10 @@ impl eframe::App for GeraApp {
         self.drive_close(ui);
         help::shortcuts_window(ui, &mut self.show_shortcuts);
         help::about_window(ui, &mut self.show_about);
+        self.combine.open_docs = self.docs.iter().map(|d| d.path.clone()).collect();
+        if let Some(merged) = self.combine.show(ui) {
+            self.open_path(ui.ctx(), merged);
+        }
         self.identity_window(ui);
     }
 }

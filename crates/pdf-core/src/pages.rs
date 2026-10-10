@@ -146,7 +146,12 @@ fn graft_page(
 
 /// Copia as páginas `pages` de `src` para antes de `at` em `dest`. **Muda `src`** (ver
 /// `copied_annots`): use um documento que pode ser alterado.
-fn copy_pages(dest: &mut PdfDocument, src: &PdfDocument, pages: &[i32], at: i32) -> Result<()> {
+pub(crate) fn copy_pages(
+    dest: &mut PdfDocument,
+    src: &PdfDocument,
+    pages: &[i32],
+    at: i32,
+) -> Result<()> {
     let mut map = dest.new_graft_map()?;
     for (k, &s) in pages.iter().enumerate() {
         let page = graft_page(dest, src, &mut map, s)?;
@@ -177,7 +182,23 @@ fn drop_dest_to(obj: &mut PdfObject, gone: &HashSet<i32>) -> Result<()> {
     Ok(())
 }
 
+/// Grava um PDF novo (parte, extração, combinação): sem senha, como o Acrobat faz.
+pub(crate) fn write_new(doc: &PdfDocument, path: &Path) -> Result<()> {
+    let mut opts = PdfWriteOptions::default();
+    opts.set_encryption(Encryption::None);
+    write_atomic(doc, path, opts)
+}
+
 impl PdfDoc {
+    /// Cópia em memória do documento como está (sem as anotações apagadas), para copiar
+    /// páginas dela: copiar mexe na origem (ver `copied_annots`).
+    pub(crate) fn replica(&self) -> Result<PdfDocument> {
+        let snap = self.snapshot()?;
+        let source = reopen(&snap.bytes, self.password.as_deref())?;
+        purge(&source, &snap.hidden)?;
+        Ok(source)
+    }
+
     /// Aplica a operação; em erro o documento volta ao que era e o histórico não muda.
     pub fn apply_pages(&mut self, op: PageOp) -> Result<()> {
         // o que dá para recusar sem tocar no documento (serializar um PDF grande custa)
@@ -435,17 +456,12 @@ impl PdfDoc {
         } else {
             vec![(pages, dest.to_path_buf())]
         };
-        // a cópia sai de uma réplica em memória (copiar mexe na origem), sem as apagadas
-        let snap = self.snapshot()?;
-        let source = reopen(&snap.bytes, self.password.as_deref())?;
-        purge(&source, &snap.hidden)?;
+        let source = self.replica()?;
         let mut written = Vec::new();
         for (group, path) in groups {
             let mut out = PdfDocument::new();
             copy_pages(&mut out, &source, &group, 0)?;
-            let mut opts = PdfWriteOptions::default();
-            opts.set_encryption(Encryption::None);
-            write_atomic(&out, &path, opts)?;
+            write_new(&out, &path)?;
             written.push(path);
         }
         Ok(written)
@@ -461,7 +477,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// `dir/stem.pdf`, ou `dir/stem (2).pdf`… se já existir.
-fn free_name(dest: &Path, stem: &str) -> PathBuf {
+pub(crate) fn free_name(dest: &Path, stem: &str) -> PathBuf {
     let first = dest.with_file_name(format!("{stem}.pdf"));
     if !first.exists() {
         return first;

@@ -46,6 +46,8 @@ pub const COMMENT: &str = "comentar";
 pub const ORGANIZE: &str = "organizar";
 pub const INSERT: &str = "inserir";
 pub const CROP: &str = "recortar";
+pub const SPLIT: &str = "dividir";
+pub const COMBINE: &str = "combinar";
 
 const fn tool(
     id: &'static str,
@@ -71,7 +73,7 @@ pub const CATALOG: &[ToolEntry] = &[
     tool("editar", "Editar PDF", "✏", CreateEdit, Planned("v4"), "Alterar texto e imagens"),
     tool("exportar", "Exportar PDF", "📤", CreateEdit, Planned("v5"), "Converter para Word, Excel ou imagens"),
     tool("ocr", "Digitalizar e OCR", "🔎", CreateEdit, Planned("v5"), "Reconhecer texto em páginas escaneadas"),
-    tool("combinar", "Combinar arquivos", "🗐", CreateEdit, Planned("v2"), "Juntar vários PDFs em um"),
+    tool(COMBINE, "Combinar arquivos", "🗐", CreateEdit, Ready, "Juntar vários PDFs em um"),
     tool(COMMENT, "Comentar", "💬", Review, Ready, "Destacar, sublinhar, notas e desenho"),
     tool("assinar", "Preencher e assinar", "🖊", Review, Planned("v3"), "Preencher campos e assinar"),
     tool("certificados", "Certificados", "🔏", Review, Planned("v3"), "Assinatura digital com certificado"),
@@ -81,7 +83,7 @@ pub const CATALOG: &[ToolEntry] = &[
     tool("comprimir", "Comprimir PDF", "⛃", Protect, Planned("v5"), "Reduzir o tamanho do arquivo"),
     tool("formulario", "Preparar formulário", "🗋", Protect, Planned("v3"), "Criar campos de formulário"),
     tool("organizar", "Organizar páginas", "🗁", Organize, Ready, "Reordenar, girar e excluir páginas"),
-    tool("dividir", "Dividir PDF", "✂", Organize, Planned("v2"), "Separar em vários arquivos"),
+    tool(SPLIT, "Dividir PDF", "✂", Organize, Ready, "Separar em vários arquivos"),
     tool("inserir", "Inserir páginas", "➕", Organize, Ready, "Trazer páginas de outro arquivo"),
     tool("marca-dagua", "Marca d'água", "💧", Organize, Planned("v2"), "Texto ou imagem em todas as páginas"),
     tool("cabecalho", "Cabeçalho e rodapé", "📑", Organize, Planned("v2"), "Numeração e textos nas margens"),
@@ -135,9 +137,9 @@ mod tests {
             .filter(|t| t.status == Status::Ready)
             .map(|t| t.id)
             .collect();
-        assert_eq!(ready, [COMMENT, "organizar", "inserir", "recortar"]);
+        assert_eq!(ready, [COMBINE, COMMENT, ORGANIZE, SPLIT, INSERT, CROP]);
         assert_eq!(find(COMMENT).map(badge).as_deref(), Some(""));
-        assert_eq!(find("dividir").map(badge).as_deref(), Some("Em breve · v2"));
+        assert_eq!(find("assinar").map(badge).as_deref(), Some("Em breve · v3"));
         assert!(find("inexistente").is_none());
         assert!(CATALOG.iter().all(|t| t.status == Status::Ready
             || matches!(t.status, Status::Planned(p) if p.starts_with('v'))));
