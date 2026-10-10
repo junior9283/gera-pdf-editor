@@ -402,6 +402,20 @@ fn issued_by(child: &Certificate, issuer: &Certificate) -> bool {
     verify_with_cert(issuer, &digest, &tbs, sig).is_ok()
 }
 
+/// O certificado é de uma autoridade certificadora (extensão basicConstraints com cA)?
+fn is_ca(cert: &Certificate) -> bool {
+    use x509_cert::ext::pkix::BasicConstraints;
+    cert.tbs_certificate
+        .extensions
+        .as_ref()
+        .is_some_and(|exts| {
+            exts.iter().any(|e| {
+                e.extn_id == const_oid::db::rfc5280::ID_CE_BASIC_CONSTRAINTS
+                    && BasicConstraints::from_der(e.extn_value.as_bytes()).is_ok_and(|b| b.ca)
+            })
+        })
+}
+
 /// Cadeia a partir do titular, só com emissores cuja assinatura confere (até 8 níveis).
 fn verified_chain(leaf: Certificate, pool: &[Certificate]) -> Vec<Certificate> {
     let mut chain = vec![leaf];
@@ -410,9 +424,10 @@ fn verified_chain(leaf: Certificate, pool: &[Certificate]) -> Vec<Certificate> {
         if cur.tbs_certificate.issuer == cur.tbs_certificate.subject {
             break; // raiz (autoassinado)
         }
+        // emissor só se for autoridade certificadora (basicConstraints cA) e a assinatura conferir
         match pool
             .iter()
-            .find(|p| !chain.contains(p) && issued_by(cur, p))
+            .find(|p| !chain.contains(p) && is_ca(p) && issued_by(cur, p))
         {
             Some(issuer) => chain.push(issuer.clone()),
             None => break,
@@ -498,8 +513,9 @@ impl PdfDoc {
                     ))
                 };
                 let (signed_at, reason, location) = match modified_after {
+                    // sem a versão assinada, nada de mostrar os detalhes atuais (podem ser forjados)
                     true => signed_details(&file, end, self.password.as_deref(), page, &field)
-                        .map_or_else(current, Ok)?,
+                        .unwrap_or_default(),
                     false => current()?,
                 };
                 out.push(SignatureInfo {
@@ -681,6 +697,7 @@ fn trimmed_len(file: &[u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::digital_id::SigningKey;
 
     #[test]
     fn pdf_dates_are_shown_like_acrobat() {
@@ -689,6 +706,41 @@ mod tests {
             "2026.10.10 15:30:00 -03'00'"
         );
         assert_eq!(display_date("lixo"), "lixo");
+    }
+
+    #[test]
+    fn a_certificate_that_is_not_a_ca_cannot_issue_others() {
+        use x509_cert::builder::{Builder, CertificateBuilder, Profile};
+        use x509_cert::spki::SubjectPublicKeyInfoOwned;
+        let dir = tempfile::tempdir().unwrap();
+        // A: ID comum (folha, sem cA); B: certificado "emitido" pela chave de A
+        let a = DigitalId::create_self_signed("A", "", "", "x", &dir.path().join("a.pfx")).unwrap();
+        let a_cert = Certificate::from_der(&a.cert_der).unwrap();
+        let SigningKey::Rsa(a_key) = &a.key else {
+            panic!()
+        };
+        let signer = rsa::pkcs1v15::SigningKey::<sha2::Sha256>::new((**a_key).clone());
+        let b_key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 1024).unwrap();
+        let spki = SubjectPublicKeyInfoOwned::from_key(b_key.to_public_key()).unwrap();
+        let subject: x509_cert::name::Name = "CN=B".parse().unwrap();
+        let validity =
+            x509_cert::time::Validity::from_now(std::time::Duration::from_secs(3600)).unwrap();
+        let serial = x509_cert::serial_number::SerialNumber::new(&[7]).unwrap();
+        let profile = Profile::Leaf {
+            issuer: a_cert.tbs_certificate.subject.clone(),
+            enable_key_agreement: false,
+            enable_key_encipherment: false,
+        };
+        let b = CertificateBuilder::new(profile, serial, validity, subject, spki, &signer)
+            .unwrap()
+            .build::<rsa::pkcs1v15::Signature>()
+            .unwrap();
+        assert!(issued_by(&b, &a_cert), "a assinatura em si confere");
+        assert_eq!(
+            verified_chain(b.clone(), &[a_cert]).len(),
+            1,
+            "A não é autoridade certificadora"
+        );
     }
 
     #[test]
