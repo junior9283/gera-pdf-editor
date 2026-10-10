@@ -227,7 +227,7 @@ fn hit_at(annots: &[AnnotInfo], page: i32, p: (f32, f32), map: &PageMap) -> Opti
         .iter()
         .rev()
         // respostas e status ficam no painel Comentários, não na página
-        .filter(|a| a.page == page && a.reply_to.is_none())
+        .filter(|a| a.page == page && !a.is_reply())
         .find(|a| match a.line {
             Some((s, e)) => dist_to_segment(p, s, e) <= tol + a.width.unwrap_or(1.0) / 2.0,
             None => annot_hit(&[(a.id, a.rect)], p, tol).is_some(),

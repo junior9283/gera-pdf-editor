@@ -1,6 +1,7 @@
 //! Painel Comentários: conversa (comentário, respostas, status e visto), filtros, ordenação e busca.
-use crate::review::ReviewState;
+use crate::review::{ReviewState, MARKED};
 use pdf_core::{AnnotInfo, AnnotKind, StateModel};
+use std::collections::HashMap;
 
 /// Um comentário com a conversa: respostas (por data), status de revisão e visto vigentes.
 #[derive(Debug, Clone, PartialEq)]
@@ -29,7 +30,7 @@ fn chrono_key(a: &AnnotInfo) -> (&str, i32) {
 pub fn threads(annots: &[AnnotInfo]) -> Vec<Thread> {
     let mut out: Vec<Thread> = annots
         .iter()
-        .filter(|a| a.reply_to.is_none())
+        .filter(|a| !a.is_reply())
         .map(|a| Thread {
             root: a.clone(),
             replies: Vec::new(),
@@ -37,18 +38,24 @@ pub fn threads(annots: &[AnnotInfo]) -> Vec<Thread> {
             checked: false,
         })
         .collect();
-    let mut children: Vec<&AnnotInfo> = annots.iter().filter(|a| a.reply_to.is_some()).collect();
+    let index: HashMap<i32, usize> = out
+        .iter()
+        .enumerate()
+        .map(|(n, t)| (t.root.id, n))
+        .collect();
+    let mut children: Vec<&AnnotInfo> = annots.iter().filter(|a| a.is_reply()).collect();
     children.sort_by(|x, y| chrono_key(x).cmp(&chrono_key(y)));
     for child in children {
-        let Some(t) = out.iter_mut().find(|t| Some(t.root.id) == child.reply_to) else {
+        let Some(&n) = child.reply_to.and_then(|p| index.get(&p)) else {
             continue;
         };
+        let t = &mut out[n];
         match &child.state {
             None => t.replies.push(child.clone()),
             Some((StateModel::Review, s)) => {
                 t.review = ReviewState::from_pdf(s).map(|r| (r, child.author.clone()));
             }
-            Some((StateModel::Marked, s)) => t.checked = s == "Marked",
+            Some((StateModel::Marked, s)) => t.checked = s == MARKED,
         }
     }
     out
@@ -132,9 +139,9 @@ fn place(a: &AnnotInfo) -> (i32, i64, i64) {
 pub fn sorted(mut threads: Vec<Thread>, by: SortBy) -> Vec<Thread> {
     match by {
         SortBy::Page => threads.sort_by_key(|t| place(&t.root)),
-        SortBy::Author => threads.sort_by_key(|t| (fold(&t.root.author), place(&t.root))),
+        SortBy::Author => threads.sort_by_cached_key(|t| (fold(&t.root.author), place(&t.root))),
         SortBy::Date => threads.sort_by(|x, y| chrono_key(&x.root).cmp(&chrono_key(&y.root))),
-        SortBy::Kind => threads.sort_by_key(|t| (format!("{:?}", t.root.kind), place(&t.root))),
+        SortBy::Kind => threads.sort_by_key(|t| (t.root.kind as u8, place(&t.root))),
     }
     threads
 }

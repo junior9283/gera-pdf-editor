@@ -1,5 +1,9 @@
 //! Status de revisão de um comentário, como no Acrobat (Definir status ▸ …).
 
+/// Estados do visto (/StateModel /Marked), como o Acrobat grava.
+pub const MARKED: &str = "Marked";
+pub const UNMARKED: &str = "Unmarked";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReviewState {
     None,

@@ -171,6 +171,11 @@ impl AnnotInfo {
         )
     }
 
+    /// Resposta ou status de outro comentário (fica no painel Comentários, não na página).
+    pub fn is_reply(&self) -> bool {
+        self.reply_to.is_some()
+    }
+
     /// Tem alças nos cantos para mudar de tamanho (a linha tem alças nas pontas).
     pub fn resizable(&self) -> bool {
         matches!(

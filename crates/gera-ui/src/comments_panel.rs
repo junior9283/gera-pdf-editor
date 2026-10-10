@@ -1,7 +1,8 @@
 use app_state::comments::{sorted, threads, CommentFilter, SortBy, Thread};
 use app_state::pdf_date::format_pdf_date;
-use app_state::review::ReviewState;
+use app_state::review::{ReviewState, MARKED, UNMARKED};
 use pdf_core::{AnnotInfo, AnnotKind, AnnotOp, StateModel};
+use std::collections::HashMap;
 
 /// Estado do painel em cada aba: busca/filtros, ordenação e a resposta sendo digitada.
 #[derive(Default)]
@@ -36,6 +37,15 @@ pub fn can_reply(text: &str) -> bool {
     !text.trim().is_empty()
 }
 
+/// Seleciona o comentário e leva até ele na página.
+fn select(t: &Thread) -> PanelAction {
+    PanelAction::Select {
+        page: t.root.page,
+        id: t.root.id,
+        at: (t.root.rect.x0, t.root.rect.y0),
+    }
+}
+
 fn set_state(t: &Thread, model: StateModel, state: &str) -> PanelAction {
     PanelAction::Op(AnnotOp::SetState {
         page: t.root.page,
@@ -49,11 +59,7 @@ fn set_state(t: &Thread, model: StateModel, state: &str) -> PanelAction {
 fn card_menu(ui: &mut egui::Ui, t: &Thread, out: &mut Vec<PanelAction>) {
     let (page, id) = (t.root.page, t.root.id);
     if ui.button("Responder").clicked() {
-        out.push(PanelAction::Select {
-            page,
-            id,
-            at: (t.root.rect.x0, t.root.rect.y0),
-        });
+        out.push(select(t));
     }
     ui.menu_button("Definir status", |ui| {
         for s in ReviewState::ALL {
@@ -63,12 +69,9 @@ fn card_menu(ui: &mut egui::Ui, t: &Thread, out: &mut Vec<PanelAction>) {
             }
         }
     });
-    let checked = t.checked;
-    if ui
-        .checkbox(&mut checked.clone(), "Marcar com visto")
-        .clicked()
-    {
-        let state = if checked { "Unmarked" } else { "Marked" };
+    let mut on = t.checked;
+    if ui.checkbox(&mut on, "Marcar com visto").changed() {
+        let state = if on { MARKED } else { UNMARKED };
         out.push(set_state(t, StateModel::Marked, state));
     }
     ui.separator();
@@ -203,11 +206,7 @@ fn card(
         let resp = resp.interact(egui::Sense::click());
         if resp.clicked() {
             st.reply.clear();
-            out.push(PanelAction::Select {
-                page: t.root.page,
-                id: t.root.id,
-                at: (t.root.rect.x0, t.root.rect.y0),
-            });
+            out.push(select(t));
         }
         resp.context_menu(|ui| card_menu(ui, t, out));
     }
@@ -300,10 +299,12 @@ pub fn show(
     toolbar(ui, st, &all);
     ui.separator();
     let total = all.len();
-    let shown = sorted(all.clone(), st.sort)
-        .into_iter()
-        .filter(|t| st.filter.matches(t))
-        .collect::<Vec<_>>();
+    let filtered: Vec<Thread> = all.into_iter().filter(|t| st.filter.matches(t)).collect();
+    let shown = sorted(filtered, st.sort);
+    let mut per_page: HashMap<i32, usize> = HashMap::new();
+    for t in &shown {
+        *per_page.entry(t.root.page).or_default() += 1;
+    }
     // um cartão selecionado na página que ainda não estava: rola até ele
     let scroll_to = (selected != st.last_selected).then_some(selected).flatten();
     st.last_selected = selected;
@@ -322,7 +323,7 @@ pub fn show(
             for t in &shown {
                 if st.sort == SortBy::Page && last_page != Some(t.root.page) {
                     last_page = Some(t.root.page);
-                    let n = shown.iter().filter(|x| x.root.page == t.root.page).count();
+                    let n = per_page[&t.root.page];
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new(page_header(t.root.page, n)).strong());
                 }

@@ -163,7 +163,7 @@ fn annotation_list(ui: &mut egui::Ui, annots: &[AnnotInfo]) -> SidebarAction {
         .auto_shrink(false)
         .show(ui, |ui| {
             // respostas e status aparecem dentro do comentário, no painel Comentários
-            let mut roots = annots.iter().filter(|a| a.reply_to.is_none()).peekable();
+            let mut roots = annots.iter().filter(|a| !a.is_reply()).peekable();
             if roots.peek().is_none() {
                 ui.label("Nenhuma anotação.");
             }
