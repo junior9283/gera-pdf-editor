@@ -53,10 +53,7 @@ fn blocks_are_listed_with_style() {
     let (_dir, d) = open(PAGE, 0);
     let blocks = d.page_text_blocks(0).unwrap();
     let title = blocks.iter().find(|b| b.text == "Texto acima").unwrap();
-    assert!(
-        (title.size - 18.0).abs() < 0.5 && title.editable,
-        "{title:?}"
-    );
+    assert!((title.size - 18.0).abs() < 0.5, "{title:?}");
     // na tela (y para baixo) a linha de base está em 792 - 720 = 72
     assert!(title.rect.y0 < 72.0 && title.rect.y1 > 72.0 && (title.rect.x0 - 72.0).abs() < 2.0);
     let red = blocks.iter().find(|b| b.text == "Segunda linha").unwrap();
@@ -180,7 +177,6 @@ fn rotated_page_edits_in_screen_space() {
         .into_iter()
         .find(|b| b.text == "Girado")
         .unwrap();
-    assert!(b.editable, "horizontal na tela");
     assert!(
         (b.rect.x0 - r.x0).abs() < 2.0 && (b.rect.y0 - r.y0).abs() < 2.0,
         "{r:?} → {:?}",

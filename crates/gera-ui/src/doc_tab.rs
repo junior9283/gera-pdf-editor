@@ -1778,17 +1778,13 @@ impl DocTab {
                     return;
                 };
                 match target {
-                    Some((page, name)) => send_edit_action(
-                        &self.worker,
-                        &mut self.status,
-                        crate::edit_pdf::EditAction::Edit {
-                            page,
-                            name,
-                            edit: pdf_core::ImageEdit::Replace { path },
-                        },
-                    ),
+                    Some((page, name)) => self.worker.send(Request::EditImage {
+                        page,
+                        name,
+                        edit: pdf_core::ImageEdit::Replace { path },
+                    }),
                     None => {
-                        self.edit_pdf.placing = Some(path);
+                        self.edit_pdf.placing = Some(crate::edit_pdf::Placing::Image(path));
                         self.status =
                             "Clique na página para colocar a imagem (Esc cancela).".into();
                     }
@@ -2095,19 +2091,9 @@ impl Drop for DocTab {
 
 /// Editar PDF: a edição vai ao worker; os avisos, para a barra de status.
 fn send_edit_action(worker: &Worker, status: &mut String, action: crate::edit_pdf::EditAction) {
-    use crate::edit_pdf::EditAction;
     match action {
-        EditAction::Edit { page, name, edit } => {
-            worker.send(Request::EditImage { page, name, edit })
-        }
-        EditAction::Add { page, path, center } => {
-            worker.send(Request::AddImage { page, path, center })
-        }
-        EditAction::EditText { page, rect, text } => {
-            worker.send(Request::EditTextBlock { page, rect, text })
-        }
-        EditAction::AddText { page, at, text } => worker.send(Request::AddText { page, at, text }),
-        EditAction::Notice(msg) => *status = msg,
+        crate::edit_pdf::EditAction::Send(request) => worker.send(request),
+        crate::edit_pdf::EditAction::Notice(msg) => *status = msg,
     }
 }
 

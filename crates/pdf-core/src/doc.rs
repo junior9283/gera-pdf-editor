@@ -133,6 +133,19 @@ impl PdfDoc {
         }
     }
 
+    /// Roda `edit` na página com as recusas de alteração; em erro o documento volta como
+    /// estava, e em sucesso o desfazer ganha o instantâneo de antes.
+    pub(crate) fn guarded_page_edit(
+        &mut self,
+        page: i32,
+        action: &str,
+        edit: impl FnOnce(&mut Self) -> Result<()>,
+    ) -> Result<()> {
+        self.require_modifiable(action)?;
+        self.check_page(page)?;
+        self.with_snapshot(edit)
+    }
+
     /// Recusa alterar o conteúdo de um documento assinado (`action` invalidaria as assinaturas)
     /// ou que não permite alterações.
     pub(crate) fn require_modifiable(&self, action: &str) -> Result<()> {
@@ -1052,6 +1065,7 @@ impl PdfDoc {
         Ok(Snapshot {
             bytes,
             hidden: self.history.hidden.clone(),
+            added_fonts: self.added_fonts.clone(),
         })
     }
 
@@ -1059,6 +1073,7 @@ impl PdfDoc {
     pub(crate) fn restore(&mut self, snap: &Snapshot) -> Result<()> {
         self.inner = reopen(&snap.bytes, self.password.as_deref())?;
         self.history.hidden = snap.hidden.clone();
+        self.added_fonts = snap.added_fonts.clone();
         Ok(())
     }
 

@@ -8,6 +8,7 @@
 use crate::create_export::{oriented, UprightImage};
 use crate::doc::PdfDoc;
 use crate::error::{refused, Result};
+use crate::page_content::{invert, num, own_resource};
 use crate::types::PdfRect;
 use mupdf::pdf::{PdfDocument, PdfObject};
 use mupdf::text_page::TextBlockType;
@@ -47,15 +48,10 @@ pub enum ImageEdit {
     },
 }
 
-pub(crate) fn mul(a: &Matrix, b: &Matrix) -> Matrix {
+fn mul(a: &Matrix, b: &Matrix) -> Matrix {
     let mut m = a.clone();
     m.concat(b.clone());
     m
-}
-
-pub(crate) fn invert(m: &Matrix) -> Result<Matrix> {
-    m.invert()
-        .ok_or_else(|| refused("imagem com transformação inválida"))
 }
 
 /// Caixa do quadrado unitário pela matriz.
@@ -408,29 +404,6 @@ fn xobject_kind(xobjects: Option<&PdfObject>, name: &[u8]) -> Result<Option<Vec<
     Ok(x.get_dict("Subtype")?.and_then(|s| s.as_name().ok()))
 }
 
-/// O dicionário `kind` (/XObject, /Font) próprio dos recursos da página, para acrescentar ou tirar
-/// itens: os recursos (herdados ou de outras páginas) são copiados, para não mudar as outras páginas.
-pub(crate) fn own_resource(
-    doc: &PdfDocument,
-    page_obj: &mut PdfObject,
-    kind: &str,
-) -> Result<PdfObject> {
-    let copy = |o: Option<PdfObject>| -> Result<PdfObject> {
-        Ok(match o {
-            Some(d) if d.is_dict()? => d.copy_dict()?,
-            _ => doc.new_dict()?,
-        })
-    };
-    let mut res = copy(page_obj.get_dict_inheritable("Resources")?)?;
-    let dict = copy(res.get_dict(kind)?)?;
-    res.dict_put(kind, dict)?;
-    page_obj.dict_put("Resources", res)?;
-    Ok(page_obj
-        .get_dict("Resources")?
-        .and_then(|r| r.get_dict(kind).ok().flatten())
-        .expect("acabou de ser posto"))
-}
-
 /// Acrescenta a imagem do arquivo aos recursos da página com um nome livre; devolve o nome.
 fn add_xobject(
     doc: &mut PdfDocument,
@@ -445,17 +418,6 @@ fn add_xobject(
         .expect("sempre há um nome livre");
     xobjects.dict_put(name.as_str(), image)?;
     Ok(name)
-}
-
-/// Número para o conteúdo da página: até 6 casas, sem zeros sobrando.
-pub(crate) fn num(v: f32) -> String {
-    let s = format!("{v:.6}");
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s == "-0" {
-        "0".into()
-    } else {
-        s.into()
-    }
 }
 
 /// Com espaço dos dois lados: o vizinho pode estar colado (`cm/Im0 Do`, válido no PDF).
@@ -539,19 +501,6 @@ impl PdfDoc {
             pdf_page.insert_contents(&mut doc.inner, draw_ops(&x, &name).as_bytes(), true)?;
             Ok(())
         })
-    }
-
-    /// Roda `edit` na página com as recusas de alteração; em erro o documento volta como
-    /// estava, e em sucesso o desfazer ganha o instantâneo de antes.
-    pub(crate) fn guarded_page_edit(
-        &mut self,
-        page: i32,
-        action: &str,
-        edit: impl FnOnce(&mut Self) -> Result<()>,
-    ) -> Result<()> {
-        self.require_modifiable(action)?;
-        self.check_page(page)?;
-        self.with_snapshot(edit)
     }
 
     fn apply_image_edit(&mut self, page: i32, name: &str, edit: ImageEdit) -> Result<()> {

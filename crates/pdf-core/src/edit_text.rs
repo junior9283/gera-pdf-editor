@@ -7,9 +7,9 @@
 //! padrão equivalente (Helvetica, Times ou Courier, com negrito e itálico). Se a redação não tirar
 //! o texto antigo (formulário, fonte Type3), a edição é recusada e o documento volta como estava.
 use crate::doc::PdfDoc;
-use crate::edit_images::{invert, num, own_resource};
 use crate::error::{refused, Result};
-use crate::text_fit::text_width;
+use crate::page_content::{invert, num, own_resource};
+use crate::text_fit::LINE_HEIGHT;
 use crate::types::PdfRect;
 use mupdf::pdf::{
     PdfAnnotationType, PdfObject, PdfRedactImageMethod, PdfRedactLineArtMethod, PdfRedactOptions,
@@ -31,8 +31,6 @@ pub struct PageTextBlock {
     pub color: [u8; 3],
     /// Nome da fonte (sem o prefixo de subconjunto).
     pub font: String,
-    /// Só blocos de linhas horizontais (na tela) são editáveis.
-    pub editable: bool,
 }
 
 /// Direção do texto na tela (vetor unitário).
@@ -65,35 +63,34 @@ struct Glyph {
     font: Option<Font>,
 }
 
-/// Trecho de uma linha (as lacunas grandes separam colunas).
+/// Trecho de uma linha (as lacunas grandes separam colunas), com as medidas usadas para juntar
+/// os trechos em parágrafos.
 struct Segment {
     glyphs: Vec<Glyph>,
     dir: Dir,
+    /// Linha de base (perpendicular à direção), maior tamanho de letra, começo e fim ao longo da
+    /// linha.
+    baseline: f32,
+    size: f32,
+    span: (f32, f32),
 }
 
 impl Segment {
-    fn first(&self) -> &Glyph {
-        &self.glyphs[0]
-    }
-
-    fn baseline(&self) -> f32 {
-        self.dir.across(self.first().origin)
-    }
-
-    fn size(&self) -> f32 {
-        self.glyphs.iter().map(|g| g.size).fold(0.0, f32::max)
-    }
-
-    /// Começo e fim ao longo da linha.
-    fn span(&self) -> (f32, f32) {
-        let d = self.dir;
-        self.glyphs.iter().fold((f32::MAX, f32::MIN), |(a, b), g| {
+    fn new(glyphs: Vec<Glyph>, dir: Dir) -> Self {
+        let span = glyphs.iter().fold((f32::MAX, f32::MIN), |(a, b), g| {
             let (p, q) = (
-                d.along((g.quad.ul.x, g.quad.ul.y)),
-                d.along((g.quad.ur.x, g.quad.ur.y)),
+                dir.along((g.quad.ul.x, g.quad.ul.y)),
+                dir.along((g.quad.ur.x, g.quad.ur.y)),
             );
             (a.min(p.min(q)), b.max(p.max(q)))
-        })
+        });
+        Self {
+            baseline: dir.across(glyphs[0].origin),
+            size: glyphs.iter().map(|g| g.size).fold(0.0, f32::max),
+            span,
+            glyphs,
+            dir,
+        }
     }
 
     fn bounds(&self) -> Rect {
@@ -118,25 +115,22 @@ fn dir_of(q: &Quad) -> Dir {
 
 /// Divide a linha onde há lacuna maior que dois emes (colunas) ou a direção muda.
 fn split_line(glyphs: Vec<Glyph>) -> Vec<Segment> {
-    let mut out: Vec<Segment> = Vec::new();
+    let mut out: Vec<(Vec<Glyph>, Dir)> = Vec::new();
     for g in glyphs {
         let dir = dir_of(&g.quad);
-        let joins = out.last().is_some_and(|s| {
-            let prev = s.glyphs.last().expect("trecho sem letras não existe");
-            let end = s.dir.along((prev.quad.ur.x, prev.quad.ur.y));
-            let start = s.dir.along((g.quad.ul.x, g.quad.ul.y));
-            (g.c == ' ' || s.dir.same(dir)) && start - end <= 2.0 * g.size.max(prev.size)
+        let joins = out.last().is_some_and(|(s, d)| {
+            let prev = s.last().expect("trecho sem letras não existe");
+            let end = d.along((prev.quad.ur.x, prev.quad.ur.y));
+            let start = d.along((g.quad.ul.x, g.quad.ul.y));
+            (g.c == ' ' || d.same(dir)) && start - end <= 2.0 * g.size.max(prev.size)
         });
         match out.last_mut() {
-            Some(s) if joins => s.glyphs.push(g),
+            Some((s, _)) if joins => s.push(g),
             _ if g.c.is_whitespace() => {}
-            _ => out.push(Segment {
-                glyphs: vec![g],
-                dir,
-            }),
+            _ => out.push((vec![g], dir)),
         }
     }
-    out
+    out.into_iter().map(|(g, d)| Segment::new(g, d)).collect()
 }
 
 /// Junta os trechos em parágrafos: mesma direção, tamanho parecido, logo abaixo do anterior e
@@ -144,18 +138,18 @@ fn split_line(glyphs: Vec<Glyph>) -> Vec<Segment> {
 fn group(segments: Vec<Segment>) -> Vec<Vec<Segment>> {
     let mut blocks: Vec<Vec<Segment>> = Vec::new();
     for s in segments {
-        let size = s.size();
-        let (a, b) = s.span();
+        let size = s.size;
+        let (a, b) = s.span;
         let target = blocks.iter_mut().rev().find(|block| {
             let last = block.last().expect("bloco sem linhas não existe");
-            let step = s.baseline() - last.baseline();
-            let (la, lb) = last.span();
+            let step = s.baseline - last.baseline;
+            let (la, lb) = last.span;
             let regular = block.len() < 2 || {
-                let prev = block[block.len() - 2].baseline();
-                (step - (last.baseline() - prev)).abs() <= 0.3 * size
+                let prev = block[block.len() - 2].baseline;
+                (step - (last.baseline - prev)).abs() <= 0.3 * size
             };
             last.dir.same(s.dir)
-                && (last.size() - size).abs() <= 0.15 * size.max(last.size())
+                && (last.size - size).abs() <= 0.15 * size.max(last.size)
                 && step > 0.3 * size
                 && step <= 1.7 * size
                 && a < lb
@@ -213,7 +207,7 @@ impl Block {
             .expect("trecho sempre tem letra");
         let dir = lines[0].dir;
         let n = lines.len();
-        let gap = (n > 1).then(|| (lines[n - 1].baseline() - lines[0].baseline()) / (n - 1) as f32);
+        let gap = (n > 1).then(|| (lines[n - 1].baseline - lines[0].baseline) / (n - 1) as f32);
         let rects: Vec<Rect> = lines.iter().map(Segment::bounds).collect();
         let text = lines
             .iter()
@@ -239,13 +233,12 @@ impl Block {
                 size: size as f32 / 10.0,
                 color: [(argb >> 16) as u8, (argb >> 8) as u8, argb as u8],
                 font: strip_subset(&name).to_owned(),
-                editable: true,
             },
             lines: rects,
             font,
-            origin: lines[0].first().origin,
+            origin: lines[0].glyphs[0].origin,
             dir,
-            end: lines.iter().map(|l| l.span().1).fold(f32::MIN, f32::max),
+            end: lines.iter().map(|l| l.span.1).fold(f32::MIN, f32::max),
             gap,
         }
     }
@@ -266,10 +259,11 @@ struct Style {
     color: [u8; 3],
 }
 
-/// Tamanho de fonte padrão do Adicionar texto, como no Acrobat.
-const NEW_TEXT_SIZE: f32 = 12.0;
-/// Entrelinha quando o bloco tem uma linha só.
-const LINE_HEIGHT: f32 = 1.2;
+/// Tamanho de fonte do Adicionar texto, como no Acrobat.
+pub const NEW_TEXT_SIZE: f32 = 12.0;
+/// Margem da página até onde a linha solta e o texto novo crescem, e a largura mínima deles.
+pub const TEXT_MARGIN: f32 = 36.0;
+pub const MIN_TEXT_WIDTH: f32 = 72.0;
 
 fn strip_subset(name: &str) -> &str {
     match name.split_once('+') {
@@ -313,55 +307,53 @@ fn covers(font: &Font, text: &str) -> bool {
         .all(|c| font.encode_character(c as i32).is_ok_and(|g| g > 0))
 }
 
-/// Largura do texto, com espaço sem glifo valendo um quarto de eme.
+/// Avanço de um caractere; o espaço sem glifo vale um quarto de eme.
+fn advance(font: &Font, c: char, size: f32) -> Result<f32> {
+    let g = font.encode_character(c as i32)?;
+    Ok(if g == 0 && c == ' ' {
+        0.25 * size
+    } else {
+        font.advance_glyph(g)? * size
+    })
+}
+
 fn width(font: &Font, s: &str, size: f32) -> Result<f32> {
-    let mut w = 0.0;
-    for c in s.chars() {
-        let g = font.encode_character(c as i32)?;
-        w += if g == 0 && c == ' ' {
-            0.25 * size
-        } else {
-            text_width(font, &c.to_string(), size)?
-        };
-    }
-    Ok(w)
+    s.chars().map(|c| advance(font, c, size)).sum()
 }
 
 /// Quebra o texto em linhas de até `maxw`: parágrafos nos `\n`, depois entre palavras; uma palavra
-/// maior que a linha quebra no meio.
+/// maior que a linha quebra no meio. Cada palavra é medida uma vez.
 fn wrap(font: &Font, text: &str, size: f32, maxw: f32) -> Result<Vec<String>> {
     let maxw = maxw.max(size);
+    let space = advance(font, ' ', size)?;
     let mut lines = Vec::new();
     for paragraph in text.split('\n') {
-        let mut line = String::new();
+        let (mut line, mut used) = (String::new(), 0.0);
         for word in paragraph.split(' ') {
-            let candidate = if line.is_empty() {
-                word.to_owned()
-            } else {
-                format!("{line} {word}")
-            };
-            if line.is_empty() || width(font, &candidate, size)? <= maxw {
-                line = candidate;
-            } else {
+            let w = width(font, word, size)?;
+            if !line.is_empty() && used + space + w > maxw {
                 lines.push(std::mem::take(&mut line));
-                line = word.to_owned();
+                used = 0.0;
             }
-            // palavra maior que a linha: corta onde couber
-            while width(font, &line, size)? > maxw && line.chars().count() > 1 {
-                let mut cut = String::new();
-                for c in line.chars() {
-                    cut.push(c);
-                    if width(font, &cut, size)? > maxw {
-                        cut.pop();
-                        break;
+            if line.is_empty() && w > maxw {
+                // palavra maior que a linha: corta onde couber
+                for c in word.chars() {
+                    let a = advance(font, c, size)?;
+                    if !line.is_empty() && used + a > maxw {
+                        lines.push(std::mem::take(&mut line));
+                        used = 0.0;
                     }
+                    line.push(c);
+                    used += a;
                 }
-                if cut.is_empty() {
-                    cut = line.chars().next().map(String::from).unwrap_or_default();
-                }
-                line = line[cut.len()..].to_owned();
-                lines.push(cut);
+                continue;
             }
+            if !line.is_empty() {
+                line.push(' ');
+                used += space;
+            }
+            line.push_str(word);
+            used += w;
         }
         lines.push(line);
     }
@@ -397,13 +389,9 @@ fn fingerprint(font: &Font) -> String {
 }
 
 /// A caixa de `rect` reduzida para conferir o que sobrou depois da redação.
-fn inner(rect: &Rect) -> Rect {
+fn inner(rect: &Rect) -> PdfRect {
     let (dx, dy) = ((rect.x1 - rect.x0) * 0.1, (rect.y1 - rect.y0) * 0.25);
-    Rect::new(rect.x0 + dx, rect.y0 + dy, rect.x1 - dx, rect.y1 - dy)
-}
-
-fn contains(r: &Rect, x: f32, y: f32) -> bool {
-    x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1
+    PdfRect::new(rect.x0 + dx, rect.y0 + dy, rect.x1 - dx, rect.y1 - dy)
 }
 
 impl PdfDoc {
@@ -460,9 +448,6 @@ impl PdfDoc {
                 .filter(|b| distance(b) <= 8.0)
                 .min_by(|a, b| distance(a).total_cmp(&distance(b)))
                 .ok_or_else(|| refused("o bloco de texto não está mais na página"))?;
-            if !block.info.editable {
-                return Err(refused("este texto não pode ser editado"));
-            }
             doc.redact_lines(page, &block.lines)?;
             let text = text.trim_end();
             if text.trim().is_empty() {
@@ -521,7 +506,7 @@ impl PdfDoc {
     /// Espaço de `origin` até a margem da página (36 pt) na direção `dir`.
     fn room(&self, page: i32, origin: (f32, f32), dir: Dir) -> Result<f32> {
         let b = self.load(page)?.bounds()?;
-        let m = 36.0;
+        let m = TEXT_MARGIN;
         let limit = |p: f32, d: f32, lo: f32, hi: f32| {
             if d > 1e-3 {
                 (hi - m - p) / d
@@ -532,7 +517,7 @@ impl PdfDoc {
             }
         };
         let t = limit(origin.0, dir.0, b.x0, b.x1).min(limit(origin.1, dir.1, b.y0, b.y1));
-        Ok(t.max(72.0))
+        Ok(t.max(MIN_TEXT_WIDTH))
     }
 
     /// Redação só de texto nas caixas das linhas; recusa se o texto antigo continuar lá.
@@ -555,7 +540,7 @@ impl PdfDoc {
             text: PdfRedactTextMethod::Remove,
         })?;
         let tp = self.load(page)?.to_text_page(TextPageFlags::empty())?;
-        let boxes: Vec<Rect> = lines.iter().map(inner).collect();
+        let boxes: Vec<PdfRect> = lines.iter().map(inner).collect();
         for block in tp.blocks() {
             for line in block.lines() {
                 for ch in line.chars() {
@@ -564,7 +549,7 @@ impl PdfDoc {
                     }
                     let q = ch.quad();
                     let (x, y) = ((q.ul.x + q.lr.x) / 2.0, (q.ul.y + q.lr.y) / 2.0);
-                    if boxes.iter().any(|b| contains(b, x, y)) {
+                    if boxes.iter().any(|b| b.contains(x, y)) {
                         return Err(refused(
                             "este texto não pode ser editado (faz parte de um formulário ou usa \
                              uma fonte especial)",
@@ -621,28 +606,28 @@ impl PdfDoc {
     fn font_resource(&mut self, page_obj: &mut PdfObject, font: &Font) -> Result<String> {
         let print = fingerprint(font);
         let mut fonts = own_resource(&self.inner, page_obj, "Font")?;
-        for n in 0.. {
-            let name = format!("GeraFn{n}");
-            let Some(f) = fonts.get_dict(name.as_str())? else {
-                let obj = self.inner.add_font(font)?;
-                let num = obj.as_indirect()?;
-                // um número de objeto reaproveitado (depois de desfazer) deixa de valer para a antiga
-                self.added_fonts.retain(|(_, n)| *n != num);
-                self.added_fonts.push((print, num));
-                fonts.dict_put(name.as_str(), obj)?;
-                return Ok(name);
-            };
-            let ours = f.is_indirect()? && {
-                let num = f.as_indirect()?;
-                self.added_fonts
-                    .iter()
-                    .any(|(p, n)| *n == num && *p == print)
-            };
-            if ours {
-                return Ok(name);
-            }
+        // o primeiro GeraFnN livre ou que já é esta fonte (acrescentada nesta sessão)
+        let mut existing = None;
+        let name = (0..)
+            .map(|n| format!("GeraFn{n}"))
+            .find(|name| {
+                existing = fonts.get_dict(name.as_str()).ok().flatten();
+                existing.as_ref().is_none_or(|f| {
+                    f.is_indirect().unwrap_or(false)
+                        && f.as_indirect().is_ok_and(|num| {
+                            self.added_fonts
+                                .iter()
+                                .any(|(p, n)| *n == num && *p == print)
+                        })
+                })
+            })
+            .expect("sempre há um nome livre");
+        if existing.is_none() {
+            let obj = self.inner.add_font(font)?;
+            self.added_fonts.push((print, obj.as_indirect()?));
+            fonts.dict_put(name.as_str(), obj)?;
         }
-        unreachable!("o laço só sai por return")
+        Ok(name)
     }
 }
 

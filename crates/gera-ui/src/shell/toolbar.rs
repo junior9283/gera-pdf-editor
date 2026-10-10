@@ -160,16 +160,16 @@ pub fn prepare_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
 pub fn edit_pdf_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     let mut out = None;
     ui.horizontal(|ui| {
-        let adding = doc.edit_pdf.adding_text;
+        use crate::edit_pdf::Placing;
+        let adding = matches!(doc.edit_pdf.placing, Some(Placing::Text));
         if ui
             .add(egui::Button::selectable(adding, "T Adicionar texto"))
             .on_hover_text("Clique na página onde o texto deve começar")
             .clicked()
         {
-            doc.edit_pdf.placing = None;
-            doc.edit_pdf.adding_text = !adding;
+            doc.edit_pdf.placing = (!adding).then_some(Placing::Text);
         }
-        let placing = doc.edit_pdf.placing.is_some();
+        let placing = matches!(doc.edit_pdf.placing, Some(Placing::Image(_)));
         if ui
             .add(egui::Button::selectable(placing, "🖼 Adicionar imagem"))
             .on_hover_text("Escolha a imagem e clique na página para colocá-la")
@@ -178,7 +178,6 @@ pub fn edit_pdf_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
             if placing {
                 doc.edit_pdf.placing = None;
             } else {
-                doc.edit_pdf.adding_text = false;
                 doc.pick_image(ui.ctx(), false);
             }
         }
