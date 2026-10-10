@@ -273,3 +273,29 @@ fn editing_twice_reuses_the_embedded_font() {
     let raw = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
     assert!(raw.contains("/GeraFn0") && !raw.contains("/GeraFn1"));
 }
+
+/// Um PDF que já traz uma fonte `GeraFn0` marcada como se fosse do app (de outro programa ou
+/// maliciosa) não pode ser usada para escrever o texto novo: os glifos dela seriam outros.
+#[test]
+fn a_font_planted_in_the_file_is_not_reused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = pdf(dir.path(), PAGE, 0);
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let r = block_rect(&d, "Texto acima");
+    d.edit_text_block(0, r, "Primeira").unwrap();
+    d.save(&path).unwrap();
+    // reaberto: a fonte do arquivo não é mais "do app" desta sessão
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let r = block_rect(&d, "Primeira");
+    d.edit_text_block(0, r, "Segunda").unwrap();
+    d.save(&path).unwrap();
+    let raw = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+    assert!(
+        raw.contains("/GeraFn1"),
+        "a segunda edição embute a própria fonte"
+    );
+    assert!(
+        !raw.contains("/GeraFonte"),
+        "nenhuma marca confiável vem do arquivo"
+    );
+}

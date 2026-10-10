@@ -268,10 +268,6 @@ struct Style {
 
 /// Tamanho de fonte padrão do Adicionar texto, como no Acrobat.
 const NEW_TEXT_SIZE: f32 = 12.0;
-/// Chave própria no dicionário da fonte acrescentada: a impressão digital da fonte, para a próxima
-/// edição reaproveitar a mesma (o nome muda: a Helvetica não embutida, lida de volta, vira
-/// NimbusSans-Regular).
-const SOURCE_KEY: &str = "GeraFonte";
 /// Entrelinha quando o bloco tem uma linha só.
 const LINE_HEIGHT: f32 = 1.2;
 
@@ -620,28 +616,33 @@ impl PdfDoc {
         Ok(())
     }
 
-    /// A fonte nos recursos da página (como `GeraFnN`), reaproveitando a já posta por outra edição.
+    /// A fonte nos recursos da página (como `GeraFnN`): a que esta sessão já acrescentou, se for a
+    /// mesma (impressão digital), ou uma nova.
     fn font_resource(&mut self, page_obj: &mut PdfObject, font: &Font) -> Result<String> {
+        let print = fingerprint(font);
         let mut fonts = own_resource(&self.inner, page_obj, "Font")?;
-        let mut n = 0;
-        loop {
+        for n in 0.. {
             let name = format!("GeraFn{n}");
-            match fonts.get_dict(name.as_str())? {
-                Some(f) => {
-                    let source = f.get_dict(SOURCE_KEY)?.and_then(|b| b.as_string().ok());
-                    if source.as_deref() == Some(fingerprint(font).as_str()) {
-                        return Ok(name);
-                    }
-                }
-                None => {
-                    let mut obj = self.inner.add_font(font)?;
-                    obj.dict_put(SOURCE_KEY, PdfObject::new_string(&fingerprint(font))?)?;
-                    fonts.dict_put(name.as_str(), obj)?;
-                    return Ok(name);
-                }
+            let Some(f) = fonts.get_dict(name.as_str())? else {
+                let obj = self.inner.add_font(font)?;
+                let num = obj.as_indirect()?;
+                // um número de objeto reaproveitado (depois de desfazer) deixa de valer para a antiga
+                self.added_fonts.retain(|(_, n)| *n != num);
+                self.added_fonts.push((print, num));
+                fonts.dict_put(name.as_str(), obj)?;
+                return Ok(name);
+            };
+            let ours = f.is_indirect()? && {
+                let num = f.as_indirect()?;
+                self.added_fonts
+                    .iter()
+                    .any(|(p, n)| *n == num && *p == print)
+            };
+            if ours {
+                return Ok(name);
             }
-            n += 1;
         }
+        unreachable!("o laço só sai por return")
     }
 }
 
