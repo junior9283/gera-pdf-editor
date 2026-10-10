@@ -54,6 +54,11 @@ pub enum Request {
     SetAuthor(Option<String>),
     /// Organizar páginas (girar, excluir, mover, inserir, substituir, recortar).
     Pages(PageOp),
+    /// Divide o documento em arquivos na pasta `dir`; o documento não muda.
+    Split {
+        rule: crate::SplitRule,
+        dir: PathBuf,
+    },
     /// Grava as páginas em outro(s) arquivo(s); o documento não muda.
     Extract {
         pages: Vec<i32>,
@@ -142,6 +147,7 @@ pub enum Response {
     },
     PagesFailed(String),
     Extracted(Vec<PathBuf>),
+    Split(Vec<PathBuf>),
 }
 
 const NO_DOC: &str = "nenhum documento aberto";
@@ -266,6 +272,19 @@ impl State {
             Request::Pages(op) => {
                 self.edit(send, |d| d.apply_pages(op).map(|()| Changed::Document))
             }
+            Request::Split { rule, dir } => send(
+                match self.with_doc(|d| {
+                    let stem = d
+                        .path()
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "documento".into());
+                    d.split(rule, &dir, &stem)
+                }) {
+                    Ok(files) => Response::Split(files),
+                    Err(e) => Response::PagesFailed(e),
+                },
+            ),
             Request::Extract {
                 pages,
                 dest,

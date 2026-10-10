@@ -146,7 +146,12 @@ fn graft_page(
 
 /// Copia as páginas `pages` de `src` para antes de `at` em `dest`. **Muda `src`** (ver
 /// `copied_annots`): use um documento que pode ser alterado.
-fn copy_pages(dest: &mut PdfDocument, src: &PdfDocument, pages: &[i32], at: i32) -> Result<()> {
+pub(crate) fn copy_pages(
+    dest: &mut PdfDocument,
+    src: &PdfDocument,
+    pages: &[i32],
+    at: i32,
+) -> Result<()> {
     let mut map = dest.new_graft_map()?;
     for (k, &s) in pages.iter().enumerate() {
         let page = graft_page(dest, src, &mut map, s)?;
@@ -461,7 +466,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// `dir/stem.pdf`, ou `dir/stem (2).pdf`… se já existir.
-fn free_name(dest: &Path, stem: &str) -> PathBuf {
+pub(crate) fn free_name(dest: &Path, stem: &str) -> PathBuf {
     let first = dest.with_file_name(format!("{stem}.pdf"));
     if !first.exists() {
         return first;

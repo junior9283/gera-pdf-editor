@@ -491,6 +491,14 @@ impl DocTab {
                     self.delete_after_extract = None;
                     self.status = format!("Não foi possível organizar as páginas: {msg}");
                 }
+                Response::Split(files) => {
+                    self.status = match files.first().and_then(|f| f.parent()) {
+                        Some(dir) => {
+                            format!("{} arquivos criados em {}", files.len(), dir.display())
+                        }
+                        None => "Nenhum arquivo criado.".into(),
+                    };
+                }
                 Response::Extracted(files) => {
                     if let Some(pages) = self.delete_after_extract.take() {
                         self.worker
