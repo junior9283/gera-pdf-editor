@@ -418,3 +418,43 @@ fn alternate_text_in_nested_forms_and_the_structure_tree_goes_too() {
         assert!(!raw.contains(secret), "{secret} ficou no arquivo");
     }
 }
+
+/// Desenho (ex.: texto em curvas, assinatura) que só passa por baixo da marca: por padrão sai
+/// inteiro (seguro); com a opção de preservar, fica.
+#[test]
+fn drawings_touched_by_the_mark_go_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let line = "q 7.77 w 72 300 m 540 300 l S Q";
+    let doc = |dir: &std::path::Path| {
+        let content = format!("{line} BT /F1 12 Tf 72 700 Td (Texto) Tj ET");
+        let objs = [
+            "1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n".to_string(),
+            "2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n".into(),
+            "3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 5 0 R>>>>/Contents 4 0 R>>endobj\n".into(),
+            format!("4 0 obj<</Length {}>>stream\n{content}\nendstream endobj\n", content.len() + 1),
+            "5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>endobj\n".into(),
+        ];
+        let path = dir.join("linha.pdf");
+        std::fs::write(
+            &path,
+            format!("%PDF-1.4\n{}trailer<</Root 1 0 R>>\n", objs.concat()),
+        )
+        .unwrap();
+        path
+    };
+    // a marca cobre só o meio da linha (y da tela = 792 - 300 = 492)
+    let run = |keep: bool| -> bool {
+        let path = doc(dir.path());
+        let mut d = PdfDoc::open(&path, None).unwrap();
+        mark(&mut d, vec![PdfRect::new(250.0, 480.0, 350.0, 505.0)]);
+        d.apply_redactions(&RedactLook {
+            keep_touched_drawings: keep,
+            ..look()
+        })
+        .unwrap();
+        // a linha aparece fora da marca?
+        px(&d, 100, 492) != [255, 255, 255]
+    };
+    assert!(!run(false), "por padrão o desenho tocado sai inteiro");
+    assert!(run(true), "com a opção, desenho só tocado fica");
+}

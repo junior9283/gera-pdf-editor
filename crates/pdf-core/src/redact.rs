@@ -141,6 +141,10 @@ pub struct RedactLook {
     pub fill: [u8; 3],
     pub overlay: String,
     pub overlay_color: [u8; 3],
+    /// Desenhos que só tocam a marca ficam (bordas de tabela, por exemplo); por padrão saem
+    /// inteiros — o MuPDF não recorta o desenho, e um texto em curvas ou uma assinatura que passa
+    /// por baixo da caixa ficaria recuperável.
+    pub keep_touched_drawings: bool,
 }
 
 impl Default for RedactLook {
@@ -150,6 +154,7 @@ impl Default for RedactLook {
             fill: [0, 0, 0],
             overlay: String::new(),
             overlay_color: [255, 0, 0],
+            keep_touched_drawings: false,
         }
     }
 }
@@ -570,7 +575,11 @@ impl PdfDoc {
                 pdf_page.apply_redactions_with_options(PdfRedactOptions {
                     black_boxes: false,
                     image_method: PdfRedactImageMethod::Pixels,
-                    line_art: PdfRedactLineArtMethod::RemoveIfCovered,
+                    line_art: if look.keep_touched_drawings {
+                        PdfRedactLineArtMethod::RemoveIfCovered
+                    } else {
+                        PdfRedactLineArtMethod::RemoveIfTouched
+                    },
                     text: PdfRedactTextMethod::Remove,
                 })?;
                 drop(pdf_page);
