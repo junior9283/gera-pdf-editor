@@ -403,3 +403,18 @@ fn protection_and_unlock_through_the_worker() {
     });
     assert!(matches!(recv(&w), Response::SecurityChanged { security, .. } if security.unlocked));
 }
+
+#[test]
+fn compressing_through_the_worker_writes_a_new_file_next_to_the_original() {
+    let (dir, w, _) = opened(2);
+    w.send(Request::Compress {
+        level: pdf_core::CompressLevel::Low,
+    });
+    match recv(&w) {
+        Response::Compressed { dest, report } => {
+            assert_eq!(dest, dir.path().join("a (comprimido).pdf"));
+            assert!(dest.exists() && report.after > 0);
+        }
+        other => panic!("esperava Compressed, veio {other:?}"),
+    }
+}

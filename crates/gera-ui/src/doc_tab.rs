@@ -64,6 +64,8 @@ pub enum DocEvent {
     Author(String),
     /// Abrir este painel à esquerda (ex.: a barra azul pede o painel Assinaturas).
     ShowPanel(LeftPanel),
+    /// Abrir este arquivo numa aba (ex.: o resultado do Comprimir PDF).
+    OpenFile(PathBuf),
 }
 
 /// Impressão esperando a cópia temporária: opções, página atual no clique e o arquivo pedido.
@@ -123,6 +125,9 @@ pub struct DocTab {
     pub(crate) protect: Option<crate::shell::protect_dialog::ProtectDialog>,
     /// Pedido da senha de permissões (Desbloquear).
     pub(crate) unlock: Option<String>,
+    /// Janela Comprimir PDF aberta: nível escolhido (0 baixa, 1 média, 2 alta) e se está
+    /// comprimindo.
+    pub(crate) compress: Option<(usize, bool)>,
     /// Pedido de foco no campo de busca (Ctrl+F ou menu).
     pub(crate) focus_search: bool,
     /// Propriedades mostradas na janela (aberta enquanto houver).
@@ -213,6 +218,7 @@ impl DocTab {
             protect_tools: false,
             protect: None,
             unlock: None,
+            compress: None,
             focus_search: false,
             properties: None,
             print_dialog: None,
@@ -500,6 +506,23 @@ impl DocTab {
                     }
                 }
                 Response::SecurityFailed(e) => self.status = format!("Proteger PDF: {e}"),
+                Response::Compressed { dest, report } => {
+                    self.compress = None;
+                    let saved = report.before.saturating_sub(report.after) as f64;
+                    let pct = 100.0 * saved / report.before.max(1) as f64;
+                    self.status = format!(
+                        "Comprimido: de {} para {} (−{pct:.0}%), em {}.",
+                        crate::shell::combine::size_text(report.before),
+                        crate::shell::combine::size_text(report.after),
+                        dest.file_name()
+                            .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+                    );
+                    self.events.push(DocEvent::OpenFile(dest));
+                }
+                Response::CompressFailed(e) => {
+                    self.compress = None;
+                    self.status = format!("Não foi possível comprimir: {e}");
+                }
                 Response::Signatures(list) => self.cert.signatures = list,
                 Response::OpenFailed(
                     e @ (PdfError::PasswordRequired | PdfError::WrongPassword),
@@ -801,6 +824,72 @@ impl DocTab {
         }
     }
 
+    /// Comprimir PDF: abre a janela (como a ferramenta do Acrobat).
+    pub fn open_compress(&mut self) {
+        if self.view.is_some() {
+            self.compress = Some((1, false));
+        }
+    }
+
+    /// Janela Comprimir PDF: tamanho atual, nível e Comprimir.
+    fn compress_window(&mut self, ctx: &egui::Context) {
+        let Some((level, busy)) = self.compress.as_mut() else {
+            return;
+        };
+        const LEVELS: [(&str, &str); 3] = [
+            (
+                "Baixa compactação",
+                "Só a estrutura do arquivo, sem perder qualidade.",
+            ),
+            (
+                "Compactação média",
+                "Fotos reduzidas a 150 ppp (boa para tela e impressão comum).",
+            ),
+            (
+                "Alta compactação",
+                "Fotos reduzidas a 100 ppp (menor arquivo, para e-mail).",
+            ),
+        ];
+        let size = std::fs::metadata(&self.path).map_or(0, |m| m.len());
+        let mut go = false;
+        let mut open = true;
+        egui::Window::new("Comprimir PDF")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!("Tamanho atual: {}", crate::shell::combine::size_text(size)));
+                ui.separator();
+                for (i, (name, hint)) in LEVELS.iter().enumerate() {
+                    ui.radio_value(level, i, *name).on_hover_text(*hint);
+                }
+                ui.label(egui::RichText::new(LEVELS[*level].1).weak());
+                ui.label("O resultado é gravado como \"(comprimido)\" ao lado do original e aberto numa aba.");
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(!*busy, egui::Button::new("Comprimir")).clicked() {
+                        go = true;
+                    }
+                    if *busy {
+                        ui.spinner();
+                        ui.label("Comprimindo…");
+                    }
+                });
+            });
+        if !open {
+            self.compress = None;
+            return;
+        }
+        if go {
+            let lvl = match *level {
+                0 => pdf_core::CompressLevel::Low,
+                1 => pdf_core::CompressLevel::Medium,
+                _ => pdf_core::CompressLevel::High,
+            };
+            *busy = true;
+            self.worker.send(Request::Compress { level: lvl });
+        }
+    }
+
     /// Janelas do Proteger PDF: Proteger usando senha e Desbloquear.
     fn protect_windows(&mut self, ctx: &egui::Context) {
         if let Some(d) = self.protect.as_mut() {
@@ -1074,6 +1163,7 @@ impl DocTab {
         }
         self.field_props_window(ui.ctx());
         self.protect_windows(ui.ctx());
+        self.compress_window(ui.ctx());
         self.sign_window(ui.ctx());
         self.split_window(ui);
         self.poll_files();

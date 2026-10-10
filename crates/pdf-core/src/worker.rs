@@ -79,6 +79,10 @@ pub enum Request {
     },
     /// Situação de segurança (depois de Salvar).
     Security,
+    /// Comprimir PDF: grava "<nome> (comprimido).pdf" ao lado do original.
+    Compress {
+        level: crate::CompressLevel,
+    },
     /// Propriedades do campo, para a janela Propriedades.
     FieldProps {
         page: i32,
@@ -200,6 +204,11 @@ pub enum Response {
         history: HistoryState,
     },
     SecurityFailed(String),
+    Compressed {
+        dest: PathBuf,
+        report: crate::CompressReport,
+    },
+    CompressFailed(String),
     /// Propriedades de um campo (Preparar formulário).
     FieldProps {
         page: i32,
@@ -348,6 +357,20 @@ impl State {
             Request::SetProtection(p) => self.security(send, |d| d.set_protection(p)),
             Request::Unlock { password } => self.security(send, |d| d.unlock(&password)),
             Request::Security => self.security(send, |_| Ok(())),
+            Request::Compress { level } => send(
+                match self.with_doc(|d| {
+                    let stem = d
+                        .path()
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let dest = crate::pages::free_name(d.path(), &format!("{stem} (comprimido)"));
+                    d.compress_to(&dest, level).map(|r| (dest, r))
+                }) {
+                    Ok((dest, report)) => Response::Compressed { dest, report },
+                    Err(e) => Response::CompressFailed(e),
+                },
+            ),
             Request::Signatures => send(Response::Signatures(
                 self.with_doc(|d| d.signatures()).unwrap_or_default(),
             )),
