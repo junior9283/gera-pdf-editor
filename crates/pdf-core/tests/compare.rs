@@ -1,4 +1,7 @@
-use pdf_core::{compare, ChangeKind, CompareInput, CompareOptions, Comparison, PdfError};
+use pdf_core::{
+    compare, compare_files, AnnotKind, ChangeKind, CompareInput, CompareOptions, CompareStage,
+    Comparison, PdfDoc, PdfError,
+};
 use std::path::{Path, PathBuf};
 
 /// Uma página de teste: linhas de texto (começando com `*`: em negrito) e, opcionalmente, uma
@@ -91,7 +94,10 @@ fn kinds(c: &Comparison) -> Vec<ChangeKind> {
 #[test]
 fn identical_documents_have_no_changes() {
     let dir = tempfile::tempdir().unwrap();
-    let pages = [pg(&["um texto qualquer", "outra linha"]), pg(&["segunda pagina"])];
+    let pages = [
+        pg(&["um texto qualquer", "outra linha"]),
+        pg(&["segunda pagina"]),
+    ];
     let a = text_pdf(dir.path(), "a.pdf", &pages, 0);
     let b = text_pdf(dir.path(), "b.pdf", &pages, 0);
     let c = run(&opts(&a, &b));
@@ -103,7 +109,12 @@ fn identical_documents_have_no_changes() {
 #[test]
 fn replaced_inserted_deleted_words() {
     let dir = tempfile::tempdir().unwrap();
-    let a = text_pdf(dir.path(), "a.pdf", &[pg(&["o gato preto", "linha fixa aqui"])], 0);
+    let a = text_pdf(
+        dir.path(),
+        "a.pdf",
+        &[pg(&["o gato preto", "linha fixa aqui"])],
+        0,
+    );
     let b = text_pdf(
         dir.path(),
         "b.pdf",
@@ -138,8 +149,14 @@ fn deleted_word_is_on_the_old_side() {
 #[test]
 fn inserted_page_stands_alone() {
     let dir = tempfile::tempdir().unwrap();
-    let p1 = ["Capitulo um", "texto do primeiro capitulo com varias palavras"];
-    let p2 = ["Capitulo dois", "texto do segundo capitulo com outras palavras"];
+    let p1 = [
+        "Capitulo um",
+        "texto do primeiro capitulo com varias palavras",
+    ];
+    let p2 = [
+        "Capitulo dois",
+        "texto do segundo capitulo com outras palavras",
+    ];
     let novo = ["Pagina nova", "conteudo inteiramente diferente e inedito"];
     let a = text_pdf(dir.path(), "a.pdf", &[pg(&p1), pg(&p2)], 0);
     let b = text_pdf(dir.path(), "b.pdf", &[pg(&p1), pg(&novo), pg(&p2)], 0);
@@ -148,7 +165,10 @@ fn inserted_page_stands_alone() {
         c.pairs,
         vec![(Some(0), Some(0)), (None, Some(1)), (Some(1), Some(2))]
     );
-    assert!(c.changes.iter().all(|x| x.kind == ChangeKind::Inserted && x.pair == 1));
+    assert!(c
+        .changes
+        .iter()
+        .all(|x| x.kind == ChangeKind::Inserted && x.pair == 1));
 }
 
 #[test]
@@ -223,7 +243,10 @@ fn changed_image_is_reported() {
     assert_eq!((img.old_rects.len(), img.new_rects.len()), (1, 1));
     // 100×100 pt em x=300 do PDF (na tela, y = 792 - 400)
     let r = img.new_rects[0];
-    assert!((r.x0 - 300.0).abs() < 1.0 && (r.y0 - 392.0).abs() < 1.0, "{r:?}");
+    assert!(
+        (r.x0 - 300.0).abs() < 1.0 && (r.y0 - 392.0).abs() < 1.0,
+        "{r:?}"
+    );
     assert!(img.description.contains("substituída"));
 }
 
@@ -259,8 +282,18 @@ fn text_only_skips_images() {
 #[test]
 fn image_only_documents_compare_images() {
     let dir = tempfile::tempdir().unwrap();
-    let a = text_pdf(dir.path(), "a.pdf", &[with_image(&[], 40), with_image(&[], 90)], 0);
-    let b = text_pdf(dir.path(), "b.pdf", &[with_image(&[], 40), with_image(&[], 91)], 0);
+    let a = text_pdf(
+        dir.path(),
+        "a.pdf",
+        &[with_image(&[], 40), with_image(&[], 90)],
+        0,
+    );
+    let b = text_pdf(
+        dir.path(),
+        "b.pdf",
+        &[with_image(&[], 40), with_image(&[], 91)],
+        0,
+    );
     let c = run(&opts(&a, &b));
     assert_eq!(c.pairs, vec![(Some(0), Some(0)), (Some(1), Some(1))]);
     assert_eq!(kinds(&c), vec![ChangeKind::Image]);
@@ -271,7 +304,12 @@ fn image_only_documents_compare_images() {
 fn formatting_only_when_enabled() {
     let dir = tempfile::tempdir().unwrap();
     let a = text_pdf(dir.path(), "a.pdf", &[pg(&["titulo do texto", "corpo"])], 0);
-    let b = text_pdf(dir.path(), "b.pdf", &[pg(&["*titulo do texto", "corpo"])], 0);
+    let b = text_pdf(
+        dir.path(),
+        "b.pdf",
+        &[pg(&["*titulo do texto", "corpo"])],
+        0,
+    );
     assert!(run(&opts(&a, &b)).changes.is_empty());
     let mut o = opts(&a, &b);
     o.formatting = true;
@@ -309,4 +347,146 @@ fn decompression_bomb_is_not_decoded() {
     assert!(std::fs::metadata(&path).unwrap().len() < 200_000);
     let c = run(&opts(&path, &path));
     assert!(c.changes.is_empty());
+}
+
+/// Compara e grava o resultado em `dir/resultado.pdf`.
+fn report(dir: &Path, o: &CompareOptions) -> (Comparison, PathBuf) {
+    let dest = dir.join("resultado.pdf");
+    let c = compare_files(o, &dest, &mut |_| true).unwrap();
+    (c, dest)
+}
+
+#[test]
+fn report_has_summary_pairs_and_locked_annotations() {
+    let dir = tempfile::tempdir().unwrap();
+    let p1 = ["o gato preto", "linha fixa aqui"];
+    let p1b = ["o cao preto dormiu", "linha fixa aqui"];
+    let p2 = [
+        "Capitulo dois",
+        "texto do segundo capitulo com outras palavras",
+    ];
+    let novo = ["Pagina nova", "conteudo inteiramente diferente e inedito"];
+    let a = text_pdf(dir.path(), "a.pdf", &[pg(&p1), pg(&p2)], 0);
+    let b = text_pdf(dir.path(), "b.pdf", &[pg(&p1b), pg(&novo), pg(&p2)], 0);
+    let (c, dest) = report(dir.path(), &opts(&a, &b));
+    let doc = PdfDoc::open(&dest, None).unwrap();
+    assert_eq!(doc.page_count().unwrap(), 1 + c.pairs.len() as i32);
+    let summary = doc.page_text(0).unwrap();
+    assert!(summary.contains("Resultados da comparação"), "{summary}");
+    assert!(summary.contains("a.pdf") && summary.contains("b.pdf"));
+    let annots = doc.all_annotations().unwrap();
+    let marks: Vec<_> = annots
+        .iter()
+        .filter(|a| a.kind == AnnotKind::Highlight)
+        .collect();
+    assert_eq!(marks.len(), c.changes.len());
+    assert!(marks
+        .iter()
+        .all(|a| a.author == "Comparação" && a.page >= 1));
+    assert!(marks.iter().any(|a| a.contents.contains("dormiu")));
+    // travadas, com o assunto do tipo; o PDF diz que é um resultado de comparação
+    let raw = mupdf::pdf::PdfDocument::open(dest.to_str().unwrap()).unwrap();
+    let page = raw.load_pdf_page(1).unwrap();
+    for annot in page.annotations() {
+        if annot.r#type().unwrap() == mupdf::pdf::PdfAnnotationType::Highlight {
+            assert!(annot
+                .flags()
+                .unwrap()
+                .contains(mupdf::pdf::AnnotationFlags::IS_LOCKED));
+            let subj = annot.object().get_dict("Subj").unwrap().unwrap();
+            assert!(!subj.as_string().unwrap().is_empty());
+        }
+    }
+    let info = raw.trailer().unwrap().get_dict("Info").unwrap().unwrap();
+    assert!(info
+        .get_dict("GeraCompare")
+        .unwrap()
+        .unwrap()
+        .as_bool()
+        .unwrap());
+    assert_eq!(raw.outlines().unwrap().len(), 1 + c.pairs.len());
+    // a página sem par diz o que aconteceu
+    let t = doc.page_text(2).unwrap();
+    assert!(t.contains("Página inserida"), "{t:?}");
+}
+
+#[test]
+fn identical_documents_say_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = text_pdf(dir.path(), "a.pdf", &[pg(&["igual"])], 0);
+    let b = text_pdf(dir.path(), "b.pdf", &[pg(&["igual"])], 0);
+    let (_, dest) = report(dir.path(), &opts(&a, &b));
+    let doc = PdfDoc::open(&dest, None).unwrap();
+    assert!(doc
+        .page_text(0)
+        .unwrap()
+        .contains("Não foram encontradas diferenças"));
+    assert!(doc.all_annotations().unwrap().is_empty());
+}
+
+/// A palavra sob a anotação, no resultado, é a palavra nova (também com a página girada).
+fn marks_land_on_their_words(rotate: i32) {
+    let dir = tempfile::tempdir().unwrap();
+    let a = text_pdf(
+        dir.path(),
+        "a.pdf",
+        &[pg(&["o gato preto", "linha"])],
+        rotate,
+    );
+    let b = text_pdf(
+        dir.path(),
+        "b.pdf",
+        &[pg(&["o cao preto", "linha"])],
+        rotate,
+    );
+    let (_, dest) = report(dir.path(), &opts(&a, &b));
+    let doc = PdfDoc::open(&dest, None).unwrap();
+    let mark = doc
+        .all_annotations()
+        .unwrap()
+        .into_iter()
+        .find(|a| a.kind == AnnotKind::Highlight)
+        .unwrap();
+    let words: Vec<String> = doc
+        .words_in_rect(mark.page, mark.rect)
+        .unwrap()
+        .into_iter()
+        .map(|w| w.text)
+        .collect();
+    assert!(words.iter().any(|w| w == "cao"), "{words:?}");
+    assert!(!words.iter().any(|w| w == "gato"), "{words:?}");
+}
+
+#[test]
+fn marks_land_on_their_words_upright() {
+    marks_land_on_their_words(0);
+}
+
+#[test]
+fn rotated_pages_keep_marks_on_their_words() {
+    marks_land_on_their_words(90);
+}
+
+#[test]
+fn cancel_leaves_no_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = text_pdf(dir.path(), "a.pdf", &[pg(&["a b"])], 0);
+    let b = text_pdf(dir.path(), "b.pdf", &[pg(&["a c"])], 0);
+    let dest = dir.path().join("resultado.pdf");
+    let r = compare_files(&opts(&a, &b), &dest, &mut |s| {
+        !matches!(s, CompareStage::Writing(..))
+    });
+    assert!(r.is_err());
+    assert!(!dest.exists());
+}
+
+#[test]
+fn destination_cannot_be_an_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = text_pdf(dir.path(), "a.pdf", &[pg(&["a"])], 0);
+    let b = text_pdf(dir.path(), "b.pdf", &[pg(&["b"])], 0);
+    let before = std::fs::read(&a).unwrap();
+    let r = compare_files(&opts(&a, &b), &a, &mut |_| true);
+    assert!(matches!(r, Err(PdfError::Refused(_))), "{r:?}");
+    assert_eq!(std::fs::read(&a).unwrap(), before);
 }

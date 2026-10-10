@@ -81,6 +81,11 @@ impl ChangeKind {
         };
         [16, 8, 0].map(|s| ((hex >> s) & 0xFF) as f32 / 255.0)
     }
+
+    /// Tom claro da cor (metade branco), para o destaque não escurecer o texto embaixo.
+    pub fn tint(self) -> [f32; 3] {
+        self.color().map(|c| c + (1.0 - c) * 0.5)
+    }
 }
 
 /// Uma alteração, no par de páginas `pair`. Os retângulos estão nas coordenadas da página como
@@ -528,7 +533,10 @@ pub fn compare(
         flush(&mut run);
     }
 
-    for op in image_ops.iter().filter(|op| !matches!(op, DiffOp::Equal { .. })) {
+    for op in image_ops
+        .iter()
+        .filter(|op| !matches!(op, DiffOp::Equal { .. }))
+    {
         let (o, n) = (&old.images[op.old_range()], &new.images[op.new_range()]);
         // uma de cada lado no mesmo par: substituída; o resto entra ou sai
         let (mut oi, mut ni) = (o.iter().peekable(), n.iter().peekable());
@@ -639,7 +647,11 @@ mod tests {
     fn colors_come_from_the_legend() {
         assert_eq!(
             ChangeKind::Deleted.color(),
-            [0xE5 as f32 / 255.0, 0x48 as f32 / 255.0, 0x4D as f32 / 255.0]
+            [
+                0xE5 as f32 / 255.0,
+                0x48 as f32 / 255.0,
+                0x4D as f32 / 255.0
+            ]
         );
     }
 }

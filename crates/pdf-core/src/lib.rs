@@ -3,6 +3,7 @@ pub mod sample;
 
 mod annot_edit;
 mod compare;
+mod compare_report;
 mod compress;
 mod create_export;
 mod digital_id;
@@ -30,6 +31,7 @@ mod worker;
 pub use compare::{
     compare, Change, ChangeKind, CompareInput, CompareOptions, CompareStage, Comparison,
 };
+pub use compare_report::{compare_files, write_comparison, COMPARE_AUTHOR};
 pub use compress::{CompressLevel, CompressReport};
 pub use create_export::{create_pdf_from_images, ExportFormat};
 pub use digital_id::{fingerprint, DigitalId};
