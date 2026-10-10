@@ -349,3 +349,34 @@ fn sanitizing_metadata_also_clears_the_pages_private_data() {
     let raw = String::from_utf8_lossy(&std::fs::read(&out).unwrap()).into_owned();
     assert!(!raw.contains("PIECESECRET") && !raw.contains("THUMBSECRET"));
 }
+
+/// Texto alternativo por lista de propriedades nomeada (/Span /P0 BDC, com o /ActualText em
+/// /Resources/Properties) e dentro de um formulário (XObject) desenhado sob a marca.
+#[test]
+fn alternate_text_in_property_lists_and_forms_goes_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let content = "/Span /P0 BDC BT /F1 12 Tf 72 700 Td (visivel) Tj ET EMC \
+        q 1 0 0 1 72 650 cm /Fm0 Do Q \
+        BT /F1 12 Tf 72 600 Td (Texto que fica) Tj ET";
+    let form = "/Span <</ActualText (FORMSECRET)>> BDC BT /F1 12 Tf 0 0 Td (forma) Tj ET EMC";
+    let objs = [
+        "1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n".to_string(),
+        "2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n".into(),
+        "3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 5 0 R>>/XObject<</Fm0 6 0 R>>/Properties<</P0<</ActualText(PROPSECRET)>>>>>>/Contents 4 0 R>>endobj\n".into(),
+        format!("4 0 obj<</Length {}>>stream\n{content}\nendstream endobj\n", content.len() + 1),
+        "5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>endobj\n".into(),
+        format!("6 0 obj<</Type/XObject/Subtype/Form/BBox[0 0 300 50]/Resources<</Font<</F1 5 0 R>>>>/Length {}>>stream\n{form}\nendstream endobj\n", form.len() + 1),
+    ];
+    let path = dir.path().join("alt.pdf");
+    std::fs::write(
+        &path,
+        format!("%PDF-1.4\n{}trailer<</Root 1 0 R>>\n", objs.concat()),
+    )
+    .unwrap();
+    let raw = redact_top_and_save(&path);
+    assert!(!raw.contains("PROPSECRET"), "propriedade nomeada ficou");
+    assert!(
+        !raw.contains("FORMSECRET"),
+        "texto alternativo do formulário ficou"
+    );
+}

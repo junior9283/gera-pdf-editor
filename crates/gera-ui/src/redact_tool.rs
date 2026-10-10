@@ -143,10 +143,12 @@ pub struct RedactTool {
     pub sanitize: Option<SanitizeOptions>,
     /// Salvar com marcas não aplicadas: perguntando antes.
     pub pending_save: bool,
+    /// "Aplicar e salvar": a gravação espera a redação dar certo.
+    pub save_after_apply: bool,
 }
 
 /// Resposta à pergunta do Salvar com marcas não aplicadas.
-enum SaveChoice {
+pub(crate) enum SaveChoice {
     ApplyAndSave,
     SaveAnyway,
     Cancel,
@@ -277,19 +279,34 @@ impl DocTab {
         if !self.redact.pending_save {
             return;
         }
-        let Some(choice) = save_question(ctx) else {
-            return;
-        };
+        if let Some(choice) = save_question(ctx) {
+            self.answer_save(choice);
+        }
+    }
+
+    pub(crate) fn answer_save(&mut self, choice: SaveChoice) {
         self.redact.pending_save = false;
         match choice {
             SaveChoice::ApplyAndSave => {
-                // o worker atende em ordem: a redação entra antes da gravação
+                // falha fechado: grava só quando o worker confirmar que a redação foi aplicada
                 self.worker
                     .send(Request::ApplyRedactions(self.redact.look.clone()));
-                self.save_now();
+                self.redact.save_after_apply = true;
             }
             SaveChoice::SaveAnyway => self.save_now(),
             SaveChoice::Cancel => {}
+        }
+    }
+
+    /// Resultado da redação pedida pelo "Aplicar e salvar": grava só se deu certo.
+    pub(crate) fn on_redaction_outcome(&mut self, applied: bool) {
+        if !std::mem::take(&mut self.redact.save_after_apply) {
+            return;
+        }
+        if applied {
+            self.save_now();
+        } else {
+            self.status = "A redação não foi aplicada; o documento não foi salvo.".into();
         }
     }
 }

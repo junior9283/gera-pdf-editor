@@ -742,7 +742,8 @@ impl DocTab {
                     }
                 }
                 Response::PagesChanged { summary, history } => {
-                    self.on_pages_changed(summary, history)
+                    self.on_pages_changed(summary, history);
+                    self.on_redaction_outcome(true);
                 }
                 Response::PagesFailed(msg) => {
                     self.delete_after_extract = None;
@@ -798,6 +799,7 @@ impl DocTab {
                 }
                 Response::EditFailed(msg) => {
                     self.status = format!("Não foi possível fazer a alteração: {msg}");
+                    self.on_redaction_outcome(false);
                 }
                 Response::PageImages { page, images } => self.edit_pdf.on_images(page, images),
                 Response::RedactHits(hits) => {
@@ -2267,6 +2269,19 @@ mod tests {
         });
         tab.save();
         assert!(tab.redact.pending_save, "pergunta antes de salvar");
+    }
+
+    /// Aplicar e salvar falha fechado: grava só depois que a redação foi aplicada; se ela falhar,
+    /// nada é salvo (o arquivo sairia com o conteúdo sob as marcas).
+    #[test]
+    fn apply_and_save_waits_for_the_redaction_and_saves_nothing_if_it_fails() {
+        let ctx = egui::Context::default();
+        let mut tab = DocTab::new(&ctx, PathBuf::from("/a.pdf"), false);
+        tab.answer_save(crate::redact_tool::SaveChoice::ApplyAndSave);
+        assert!(tab.redact.save_after_apply, "espera o resultado da redação");
+        tab.on_redaction_outcome(false);
+        assert!(!tab.redact.save_after_apply);
+        assert!(tab.status.contains("não foi salvo"), "{}", tab.status);
     }
 
     #[test]

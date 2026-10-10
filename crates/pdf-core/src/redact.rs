@@ -7,10 +7,12 @@
 use crate::doc::PdfDoc;
 use crate::edit_text::{glyph_run, width};
 use crate::error::Result;
-use crate::page_content::{invert, matrix_ops, num, page_content, rgb_ops, Lexer, Tok};
+use crate::page_content::{
+    invert, matrix_ops, num, own_resource, page_content, rgb_ops, Lexer, Tok,
+};
 use crate::types::PdfRect;
 use mupdf::pdf::{
-    PdfAnnotationType, PdfRedactImageMethod, PdfRedactLineArtMethod, PdfRedactOptions,
+    PdfAnnotationType, PdfObject, PdfRedactImageMethod, PdfRedactLineArtMethod, PdfRedactOptions,
     PdfRedactTextMethod,
 };
 use mupdf::{Buffer, Font, Rect, TextPageFlags};
@@ -204,6 +206,28 @@ impl Overlay {
             font,
         }))
     }
+}
+
+/// Chaves de texto alternativo do marcado (o que leitores usam para copiar e extrair).
+const ALT_KEYS: [&str; 3] = ["ActualText", "Alt", "E"];
+
+fn has_alternate_text(dict: &PdfObject) -> bool {
+    ALT_KEYS
+        .iter()
+        .any(|k| dict.get_dict(*k).ok().flatten().is_some())
+}
+
+/// `content` sem as faixas `cuts` (ordenadas), cada uma trocada por um espaço.
+fn cut(content: &[u8], cuts: &[std::ops::Range<usize>]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(content.len());
+    let mut at = 0;
+    for r in cuts {
+        out.extend(&content[at..r.start]);
+        out.push(b' ');
+        at = r.end;
+    }
+    out.extend(&content[at..]);
+    out
 }
 
 fn intersects(a: &Rect, b: &Rect) -> bool {
@@ -466,21 +490,55 @@ impl PdfDoc {
         let mut page_obj = self.inner.find_page(page)?;
         let content = page_content(&page_obj)?;
         let cuts = alternate_text_marks(&content);
-        if cuts.is_empty() {
-            return Ok(());
+        if !cuts.is_empty() {
+            let stream =
+                self.inner
+                    .add_stream(&Buffer::from_bytes(&cut(&content, &cuts))?, None, false)?;
+            page_obj.dict_put("Contents", stream)?;
         }
-        let mut out = Vec::with_capacity(content.len());
-        let mut at = 0;
-        for r in cuts {
-            out.extend(&content[at..r.start]);
-            out.push(b' ');
-            at = r.end;
+        let resources = page_obj.get_dict_inheritable("Resources")?;
+        // listas de propriedades nomeadas (/Span /P0 BDC): cópia própria, sem o texto alternativo
+        let named = resources
+            .as_ref()
+            .and_then(|r| r.get_dict("Properties").ok().flatten());
+        if let Some(props) = named {
+            let entries: Vec<(String, PdfObject)> = props
+                .dict_iter()?
+                .filter_map(|e| e.ok())
+                .filter(|(_, v)| has_alternate_text(v))
+                .filter_map(|(k, v)| Some((String::from_utf8(k.as_name().ok()?).ok()?, v)))
+                .collect();
+            if !entries.is_empty() {
+                let mut own = own_resource(&self.inner, &mut page_obj, "Properties")?;
+                for (name, v) in entries {
+                    let mut clean = v.copy_dict()?;
+                    for key in ALT_KEYS {
+                        clean.dict_delete(key)?;
+                    }
+                    own.dict_put(name.as_str(), clean)?;
+                }
+            }
         }
-        out.extend(&content[at..]);
-        let stream = self
-            .inner
-            .add_stream(&Buffer::from_bytes(&out)?, None, false)?;
-        page_obj.dict_put("Contents", stream)?;
+        // formulários desenhados pela página (a redação apaga os glifos deles, não o marcado)
+        let forms = resources
+            .as_ref()
+            .and_then(|r| r.get_dict("XObject").ok().flatten());
+        if let Some(xobjects) = forms {
+            for (_, mut form) in xobjects.dict_iter()?.filter_map(|e| e.ok()) {
+                let is_form = form
+                    .get_dict("Subtype")?
+                    .and_then(|s| s.as_name().ok())
+                    .is_some_and(|s| s == b"Form");
+                if !is_form {
+                    continue;
+                }
+                let content = form.read_stream()?;
+                let cuts = alternate_text_marks(&content);
+                if !cuts.is_empty() {
+                    form.write_stream_buffer(&Buffer::from_bytes(&cut(&content, &cuts))?)?;
+                }
+            }
+        }
         Ok(())
     }
 
