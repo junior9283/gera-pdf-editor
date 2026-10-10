@@ -73,6 +73,8 @@ pub enum OrgAction {
         delete_after: bool,
     },
     PickFile(Purpose),
+    /// Abrir o diálogo Dividir documento.
+    Split,
     Undo,
     Redo,
     Close,
@@ -230,6 +232,13 @@ fn toolbar(
         }
         if ui.button("Recortar…").clicked() {
             st.dialog = Some(Dialog::Crop { mm: [0.0; 4] });
+        }
+        if ui
+            .button("Dividir…")
+            .on_hover_text("Separar em vários arquivos")
+            .clicked()
+        {
+            out.push(OrgAction::Split);
         }
         ui.separator();
         if ui

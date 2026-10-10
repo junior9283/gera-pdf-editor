@@ -10,6 +10,10 @@ pub enum Picked {
         doc: PathBuf,
         dest: PathBuf,
     },
+    /// Pasta escolhida (Dividir: onde gravar as partes).
+    Folder(PathBuf),
+    /// Arquivo novo a gravar (Combinar).
+    SaveTo(PathBuf),
     Cancelled,
     /// O seletor não pôde ser aberto.
     Failed,
@@ -53,6 +57,34 @@ impl FileDialogs {
                 Some(dest) => Picked::SaveAs { doc, dest },
                 None => Picked::Cancelled,
             }
+        });
+    }
+
+    pub fn pick_folder(&mut self, ctx: &egui::Context, start: Option<PathBuf>) {
+        self.spawn(ctx, move || {
+            let mut dialog = rfd::FileDialog::new().set_title("Escolher pasta");
+            if let Some(dir) = start {
+                dialog = dialog.set_directory(dir);
+            }
+            dialog
+                .pick_folder()
+                .map_or(Picked::Cancelled, Picked::Folder)
+        });
+    }
+
+    /// Onde gravar um PDF novo, sugerindo `suggested`.
+    pub fn save_to(&mut self, ctx: &egui::Context, suggested: PathBuf) {
+        self.spawn(ctx, move || {
+            let mut dialog = rfd::FileDialog::new()
+                .set_title("Salvar como")
+                .add_filter("PDF", &["pdf"]);
+            if let Some(dir) = suggested.parent() {
+                dialog = dialog.set_directory(dir);
+            }
+            if let Some(name) = suggested.file_name() {
+                dialog = dialog.set_file_name(name.to_string_lossy());
+            }
+            dialog.save_file().map_or(Picked::Cancelled, Picked::SaveTo)
         });
     }
 
