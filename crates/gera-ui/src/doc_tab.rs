@@ -319,6 +319,10 @@ enum PickFor {
     },
     /// Anexos → Salvar: onde gravar este anexo.
     SaveAttachment(pdf_core::AttachmentInfo),
+    /// Comentários → Exportar (todos, ou estes com as respostas).
+    ExportComments(Option<Vec<(i32, i32)>>),
+    /// Comentários → Importar arquivo de dados.
+    ImportComments,
 }
 
 /// Diálogo Dividir documento.
@@ -1354,6 +1358,9 @@ impl DocTab {
                         ),
                         [] => "Nada exportado.".into(),
                     };
+                }
+                Response::CommentsImported(r) => {
+                    self.status = crate::comments_panel::import_message(r);
                 }
                 Response::ExportToFailed(e) => {
                     self.export = None;
@@ -3251,6 +3258,16 @@ impl DocTab {
                     )));
                 }
             }
+            (Some(PickFor::ExportComments(only)), Picked::SaveTo(dest)) => {
+                let (path, format) = crate::comments_panel::export_target(dest);
+                self.worker
+                    .send(Request::ExportComments { path, format, only });
+            }
+            (Some(PickFor::ImportComments), Picked::Open(files)) => {
+                if let Some(path) = files.into_iter().next() {
+                    self.worker.send(Request::ImportComments { path });
+                }
+            }
             (Some(PickFor::Attachment), Picked::Open(files)) => {
                 if let Some(path) = files.into_iter().next() {
                     self.worker.send(Request::AddAttachment { path });
@@ -3288,6 +3305,20 @@ impl DocTab {
                 PanelAction::Op(op) => self.edit.push_op(op),
                 PanelAction::Properties { page, id } => {
                     self.edit.open_props(&self.annots, (page, id))
+                }
+                PanelAction::Export { selected } => {
+                    let only = selected.then(|| self.edit.selected.into_iter().collect());
+                    let suggested = self.path.with_extension("fdf");
+                    self.picking = Some(PickFor::ExportComments(only));
+                    self.files.save_comment_data(ui.ctx(), suggested);
+                }
+                PanelAction::Import => {
+                    if !self.security.permissions.annotate {
+                        self.deny("importar comentários");
+                    } else {
+                        self.picking = Some(PickFor::ImportComments);
+                        self.files.pick_comment_data(ui.ctx());
+                    }
                 }
             }
         }

@@ -2,6 +2,36 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
+/// Testes de interface (sem D-Bus, sem portal): com `GERA_E2E_PICK=<caminho>`, todo seletor
+/// devolve esse caminho em vez de abrir. Fora disso, o seletor do sistema.
+trait PickOrE2e: Sized {
+    fn pick_file_or_e2e(self) -> Option<PathBuf>;
+    fn pick_files_or_e2e(self) -> Option<Vec<PathBuf>>;
+    fn pick_folder_or_e2e(self) -> Option<PathBuf>;
+    fn save_file_or_e2e(self) -> Option<PathBuf>;
+}
+
+fn e2e_path() -> Option<PathBuf> {
+    std::env::var_os("GERA_E2E_PICK")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+impl PickOrE2e for rfd::FileDialog {
+    fn pick_file_or_e2e(self) -> Option<PathBuf> {
+        e2e_path().or_else(|| self.pick_file())
+    }
+    fn pick_files_or_e2e(self) -> Option<Vec<PathBuf>> {
+        e2e_path().map(|p| vec![p]).or_else(|| self.pick_files())
+    }
+    fn pick_folder_or_e2e(self) -> Option<PathBuf> {
+        e2e_path().or_else(|| self.pick_folder())
+    }
+    fn save_file_or_e2e(self) -> Option<PathBuf> {
+        e2e_path().or_else(|| self.save_file())
+    }
+}
+
 #[derive(Debug)]
 pub enum Picked {
     Open(Vec<PathBuf>),
@@ -27,7 +57,7 @@ fn save_dialog(suggested: &std::path::Path) -> Option<PathBuf> {
     let dialog = rfd::FileDialog::new()
         .set_title("Salvar como")
         .add_filter("PDF", &["pdf"]);
-    suggest(dialog, suggested).save_file().map(|p| {
+    suggest(dialog, suggested).save_file_or_e2e().map(|p| {
         if p.extension().is_some() {
             p
         } else {
@@ -62,7 +92,7 @@ impl FileDialogs {
             match rfd::FileDialog::new()
                 .set_title("Abrir PDF")
                 .add_filter("PDF", &["pdf", "PDF"])
-                .pick_files()
+                .pick_files_or_e2e()
             {
                 Some(files) if !files.is_empty() => Picked::Open(files),
                 _ => Picked::Cancelled,
@@ -84,7 +114,7 @@ impl FileDialogs {
             match rfd::FileDialog::new()
                 .set_title("Criar PDF a partir de imagens")
                 .add_filter("Imagens", IMAGE_EXTS)
-                .pick_files()
+                .pick_files_or_e2e()
             {
                 Some(p) if !p.is_empty() => Picked::Open(p),
                 _ => Picked::Cancelled,
@@ -98,7 +128,7 @@ impl FileDialogs {
             match rfd::FileDialog::new()
                 .set_title("Importar ID digital")
                 .add_filter("ID digital", &["pfx", "p12"])
-                .pick_file()
+                .pick_file_or_e2e()
             {
                 Some(p) => Picked::Open(vec![p]),
                 None => Picked::Cancelled,
@@ -117,7 +147,7 @@ impl FileDialogs {
             match rfd::FileDialog::new()
                 .set_title(title)
                 .add_filter("Imagem", exts)
-                .pick_file()
+                .pick_file_or_e2e()
             {
                 Some(p) => Picked::Open(vec![p]),
                 None => Picked::Cancelled,
@@ -132,7 +162,7 @@ impl FileDialogs {
                 dialog = dialog.set_directory(dir);
             }
             dialog
-                .pick_folder()
+                .pick_folder_or_e2e()
                 .map_or(Picked::Cancelled, Picked::Folder)
         });
     }
@@ -142,8 +172,32 @@ impl FileDialogs {
         self.spawn(ctx, move || {
             rfd::FileDialog::new()
                 .set_title(title)
-                .pick_file()
+                .pick_file_or_e2e()
                 .map_or(Picked::Cancelled, |p| Picked::Open(vec![p]))
+        });
+    }
+
+    /// Arquivo de dados de comentários (FDF, XFDF ou PDF) para importar.
+    pub fn pick_comment_data(&mut self, ctx: &egui::Context) {
+        self.spawn(ctx, move || {
+            rfd::FileDialog::new()
+                .set_title("Importar comentários")
+                .add_filter("Comentários (FDF, XFDF, PDF)", &["fdf", "xfdf", "pdf"])
+                .pick_file_or_e2e()
+                .map_or(Picked::Cancelled, |p| Picked::Open(vec![p]))
+        });
+    }
+
+    /// Onde gravar os comentários exportados (FDF ou XFDF), sugerindo `suggested`.
+    pub fn save_comment_data(&mut self, ctx: &egui::Context, suggested: PathBuf) {
+        self.spawn(ctx, move || {
+            let dialog = rfd::FileDialog::new()
+                .set_title("Exportar comentários")
+                .add_filter("FDF", &["fdf"])
+                .add_filter("XFDF", &["xfdf"]);
+            suggest(dialog, &suggested)
+                .save_file_or_e2e()
+                .map_or(Picked::Cancelled, Picked::SaveTo)
         });
     }
 
@@ -152,7 +206,7 @@ impl FileDialogs {
         self.spawn(ctx, move || {
             let dialog = rfd::FileDialog::new().set_title("Salvar anexo");
             suggest(dialog, &suggested)
-                .save_file()
+                .save_file_or_e2e()
                 .map_or(Picked::Cancelled, Picked::SaveTo)
         });
     }

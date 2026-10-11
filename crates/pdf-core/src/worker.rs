@@ -224,6 +224,17 @@ pub enum Request {
         dest: PathBuf,
         separate: bool,
     },
+    /// Comentários para um arquivo de dados (todos, ou só os de `only` com respostas e grupo).
+    /// Responde `ExportedTo` ou `ExportToFailed`.
+    ExportComments {
+        path: PathBuf,
+        format: crate::CommentFormat,
+        only: Option<Vec<(i32, i32)>>,
+    },
+    /// Comentários de um FDF, XFDF ou PDF: responde `CommentsImported` e `AnnotsChanged`.
+    ImportComments {
+        path: PathBuf,
+    },
     /// Grava as páginas (com as anotações) num arquivo, para copiá-las para outro documento.
     ExportPages {
         pages: Vec<i32>,
@@ -389,6 +400,8 @@ pub enum Response {
         history: HistoryState,
     },
     OcrFailed(String),
+    /// Quantos comentários entraram e quantos ficaram de fora.
+    CommentsImported(crate::ImportReport),
     /// Arquivos criados pelo Exportar PDF.
     ExportedTo(Vec<PathBuf>),
     ExportToFailed(String),
@@ -792,6 +805,22 @@ impl State {
                     Err(e) => Response::PagesFailed(e),
                 },
             ),
+            Request::ExportComments { path, format, only } => send(
+                match self.with_doc(|d| d.export_comments(&path, format, only.as_deref())) {
+                    Ok(_) => Response::ExportedTo(vec![path]),
+                    Err(e) => Response::ExportToFailed(e),
+                },
+            ),
+            Request::ImportComments { path } => {
+                let mut report = None;
+                self.edit(send, |d| {
+                    report = Some(d.import_comments(&path)?);
+                    Ok(Changed::Pages((0..d.page_count()?).collect()))
+                });
+                if let Some(r) = report {
+                    send(Response::CommentsImported(r));
+                }
+            }
             Request::ExportPages { pages, dest } => {
                 send(match self.with_doc(|d| d.extract(&pages, &dest, false)) {
                     Ok(_) => Response::PagesExported { dest },

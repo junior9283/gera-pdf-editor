@@ -29,6 +29,36 @@ pub enum PanelAction {
         page: i32,
         id: i32,
     },
+    /// Menu "···": exportar (todos, ou o selecionado) e importar arquivo de dados.
+    Export {
+        selected: bool,
+    },
+    Import,
+}
+
+/// Aviso do fim da importação.
+pub fn import_message(r: pdf_core::ImportReport) -> String {
+    let added = match r.added {
+        1 => "1 comentário importado".to_string(),
+        n => format!("{n} comentários importados"),
+    };
+    match r.skipped {
+        0 => format!("{added}."),
+        1 => format!("{added}; 1 ignorado (página inexistente ou tipo desconhecido)."),
+        n => format!("{added}; {n} ignorados (página inexistente ou tipo desconhecido)."),
+    }
+}
+
+/// Onde e em que formato exportar: pela extensão; sem `.fdf` ou `.xfdf`, vira FDF.
+pub fn export_target(path: std::path::PathBuf) -> (std::path::PathBuf, pdf_core::CommentFormat) {
+    match pdf_core::CommentFormat::from_path(&path) {
+        Some(format) => (path, format),
+        None => {
+            let mut name = path.into_os_string();
+            name.push(".fdf");
+            (name.into(), pdf_core::CommentFormat::Fdf)
+        }
+    }
 }
 
 pub fn page_header(page: i32, count: usize) -> String {
@@ -225,8 +255,14 @@ fn card(
     }
 }
 
-/// Barra do painel: busca, ordenação e filtros.
-fn toolbar(ui: &mut egui::Ui, st: &mut PanelState, all: &[Thread]) {
+/// Barra do painel: busca, ordenação, filtros e o menu "···".
+fn toolbar(
+    ui: &mut egui::Ui,
+    st: &mut PanelState,
+    all: &[Thread],
+    selected: bool,
+    out: &mut Vec<PanelAction>,
+) {
     ui.add(
         egui::TextEdit::singleline(&mut st.filter.text)
             .hint_text("Buscar comentários")
@@ -244,6 +280,29 @@ fn toolbar(ui: &mut egui::Ui, st: &mut PanelState, all: &[Thread]) {
             "Filtrar"
         };
         ui.menu_button(label, |ui| filter_menu(ui, &mut st.filter, all));
+        ui.menu_button("···", |ui| {
+            if ui
+                .add_enabled(
+                    !all.is_empty(),
+                    egui::Button::new("Exportar todos para arquivo de dados…"),
+                )
+                .clicked()
+            {
+                out.push(PanelAction::Export { selected: false });
+            }
+            if ui
+                .add_enabled(
+                    selected,
+                    egui::Button::new("Exportar selecionado para arquivo de dados…"),
+                )
+                .clicked()
+            {
+                out.push(PanelAction::Export { selected: true });
+            }
+            if ui.button("Importar arquivo de dados…").clicked() {
+                out.push(PanelAction::Import);
+            }
+        });
     });
 }
 
@@ -311,7 +370,7 @@ pub fn show(
     let mut out = Vec::new();
     ui.heading("Comentários");
     let all = threads(annots);
-    toolbar(ui, st, &all);
+    toolbar(ui, st, &all, selected.is_some(), &mut out);
     ui.separator();
     let total = all.len();
     let filtered: Vec<Thread> = all.into_iter().filter(|t| st.filter.matches(t)).collect();
@@ -388,6 +447,34 @@ mod tests {
         assert_eq!(thread_label(&t), "Inserir texto");
         t.grouped = true;
         assert_eq!(thread_label(&t), "Substituir texto");
+    }
+
+    #[test]
+    fn import_message_agrees_in_number() {
+        let r = |added, skipped| pdf_core::ImportReport { added, skipped };
+        assert_eq!(import_message(r(1, 0)), "1 comentário importado.");
+        assert_eq!(
+            import_message(r(3, 2)),
+            "3 comentários importados; 2 ignorados (página inexistente ou tipo desconhecido)."
+        );
+    }
+
+    #[test]
+    fn export_target_follows_the_extension() {
+        use pdf_core::CommentFormat::{Fdf, Xfdf};
+        use std::path::PathBuf;
+        assert_eq!(
+            export_target(PathBuf::from("/t/a.XFDF")),
+            (PathBuf::from("/t/a.XFDF"), Xfdf)
+        );
+        assert_eq!(
+            export_target(PathBuf::from("/t/a")),
+            (PathBuf::from("/t/a.fdf"), Fdf)
+        );
+        assert_eq!(
+            export_target(PathBuf::from("/t/a.txt")),
+            (PathBuf::from("/t/a.txt.fdf"), Fdf)
+        );
     }
 
     #[test]
