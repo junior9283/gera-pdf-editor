@@ -3,6 +3,8 @@ pub mod sample;
 
 mod annot_edit;
 mod attachments;
+mod comment_summary;
+mod comments_io;
 mod compare;
 mod compare_report;
 mod compress;
@@ -36,9 +38,14 @@ mod stamp;
 mod text_fit;
 mod types;
 mod worker;
+mod xfdf;
 
 pub use annot_edit::{callout_end, dist_to_segment, MAX_VERTICES};
 pub use attachments::MAX_ATTACHMENT_BYTES;
+pub use comment_summary::{
+    summarize_comments, SummaryFont, SummaryLayout, SummaryOptions, SummarySort,
+};
+pub use comments_io::{CommentFormat, ImportReport};
 pub use compare::{
     compare, Change, ChangeKind, CompareInput, CompareOptions, CompareStage, Comparison,
 };
@@ -65,6 +72,9 @@ pub use redact::{RedactHit, RedactLook, RedactPattern, RedactQuery, SanitizeOpti
 pub use security::{Permissions, Protection, SecurityInfo};
 pub use sign::{display_date, Integrity, SignPlace, SignatureInfo};
 pub use split::{combine, safe_file_name, SplitRule};
-pub use stamp::{HEIGHT as STAMP_HEIGHT, WIDTH as STAMP_WIDTH};
+pub use stamp::{
+    stamp_image_from_file, stamp_image_size, stamp_source_pages, HEIGHT as STAMP_HEIGHT,
+    WIDTH as STAMP_WIDTH,
+};
 pub use types::*;
 pub use worker::{CancelToken, Request, Response, Worker, TILE};

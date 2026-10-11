@@ -156,6 +156,30 @@ pub enum LineEnd {
 }
 
 impl AnnotKind {
+    /// Nome do tipo como o Acrobat o mostra (painel Comentários, resumo).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Highlight => "Destaque",
+            Self::Underline => "Sublinhado",
+            Self::Note => "Nota",
+            Self::Ink => "Desenho",
+            Self::StrikeOut => "Riscado",
+            Self::TextBox => "Caixa de texto",
+            Self::Rect => "Retângulo",
+            Self::Ellipse => "Elipse",
+            Self::Line => "Linha",
+            Self::Stamp => "Carimbo",
+            Self::Redact => "Marca de redação",
+            Self::Polygon => "Polígono",
+            Self::PolyLine => "Linhas conectadas",
+            Self::Cloud => "Nuvem",
+            Self::Caret => "Inserir texto",
+            Self::Callout => "Texto explicativo",
+            Self::FileAttachment => "Anexo",
+            Self::Other => "Anotação",
+        }
+    }
+
     /// Tem traço/borda com espessura editável.
     pub fn has_border(self) -> bool {
         matches!(
@@ -334,6 +358,13 @@ pub enum NewAnnot {
         subtitle: Option<String>,
         color: [f32; 3],
     },
+    /// Carimbo personalizado: a imagem guardada no catálogo do usuário.
+    CustomStamp {
+        page: i32,
+        rect: PdfRect,
+        image: std::path::PathBuf,
+        name: String,
+    },
     /// Inserir texto: cursor de inserção com a nota do texto a inserir.
     Caret {
         page: i32,
@@ -431,6 +462,7 @@ impl NewAnnot {
             | Self::Mark { page, .. }
             | Self::Redact { page, .. }
             | Self::Stamp { page, .. }
+            | Self::CustomStamp { page, .. }
             | Self::Polygon { page, .. }
             | Self::Caret { page, .. }
             | Self::ReplaceText { page, .. }
@@ -457,9 +489,10 @@ impl NewAnnot {
             Self::TextBox { text, .. } | Self::FillText { text, .. } => text.trim().is_empty(),
             Self::Mark { rect, .. } => rect.width() < 2.0 || rect.height() < 2.0,
             Self::Signature { art, .. } if art.is_empty() => true,
-            Self::Shape { rect, .. } | Self::Stamp { rect, .. } | Self::Signature { rect, .. } => {
-                rect.width() < 3.0 || rect.height() < 3.0
-            }
+            Self::Shape { rect, .. }
+            | Self::Stamp { rect, .. }
+            | Self::CustomStamp { rect, .. }
+            | Self::Signature { rect, .. } => rect.width() < 3.0 || rect.height() < 3.0,
             Self::Line { a, b, .. } => (b.0 - a.0).hypot(b.1 - a.1) < 3.0,
             // polígono e nuvem pedem 3 vértices; linhas conectadas, 2
             Self::Polygon {
@@ -467,7 +500,14 @@ impl NewAnnot {
                 closed,
                 cloud,
                 ..
-            } => vertices.len() < if *closed || *cloud { 3 } else { 2 },
+            } => {
+                // conta só os vértices de verdade (coordenadas não finitas saem ao gravar)
+                let finite = vertices
+                    .iter()
+                    .filter(|(x, y)| x.is_finite() && y.is_finite())
+                    .count();
+                finite < if *closed || *cloud { 3 } else { 2 }
+            }
         }
     }
 }
@@ -724,6 +764,21 @@ pub enum AnnotOp {
         text: String,
     },
     Delete {
+        page: i32,
+        id: i32,
+    },
+    /// Exclui vários (cada um com o grupo e os filhos), numa etapa.
+    DeleteMany {
+        page: i32,
+        ids: Vec<i32>,
+    },
+    /// Agrupa os comentários (o primeiro é o principal); grupos já existentes se juntam.
+    Group {
+        page: i32,
+        ids: Vec<i32>,
+    },
+    /// Desfaz o grupo de `id`.
+    Ungroup {
         page: i32,
         id: i32,
     },

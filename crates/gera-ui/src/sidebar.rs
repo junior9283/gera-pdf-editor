@@ -1,5 +1,5 @@
 use app_state::prefs::LeftPanel;
-use pdf_core::{AnnotInfo, AnnotKind};
+use pdf_core::AnnotInfo;
 
 pub enum SidebarAction {
     None,
@@ -16,30 +16,7 @@ pub(crate) fn label_of(a: &AnnotInfo) -> &'static str {
     if a.arrow {
         "Seta"
     } else {
-        kind_label(a.kind)
-    }
-}
-
-pub(crate) fn kind_label(kind: AnnotKind) -> &'static str {
-    match kind {
-        AnnotKind::Highlight => "Destaque",
-        AnnotKind::Underline => "Sublinhado",
-        AnnotKind::Note => "Nota",
-        AnnotKind::Ink => "Desenho",
-        AnnotKind::StrikeOut => "Riscado",
-        AnnotKind::TextBox => "Caixa de texto",
-        AnnotKind::Rect => "Retângulo",
-        AnnotKind::Ellipse => "Elipse",
-        AnnotKind::Line => "Linha",
-        AnnotKind::Stamp => "Carimbo",
-        AnnotKind::Redact => "Marca de redação",
-        AnnotKind::Polygon => "Polígono",
-        AnnotKind::PolyLine => "Linhas conectadas",
-        AnnotKind::Cloud => "Nuvem",
-        AnnotKind::Caret => "Inserir texto",
-        AnnotKind::Callout => "Texto explicativo",
-        AnnotKind::FileAttachment => "Anexo",
-        AnnotKind::Other => "Anotação",
+        a.kind.label()
     }
 }
 
@@ -93,6 +70,7 @@ fn annotation_list(ui: &mut egui::Ui, annots: &[AnnotInfo]) -> SidebarAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pdf_core::AnnotKind;
     use pdf_core::PdfRect;
 
     #[test]

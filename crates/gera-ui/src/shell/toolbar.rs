@@ -528,10 +528,10 @@ fn tool_menu(ui: &mut egui::Ui, doc: &mut DocTab, group: &str, tools: &[Tool]) {
 /// Ferramenta Carimbo com o menu dos carimbos, nos dois grupos do Acrobat.
 fn stamp_menu(ui: &mut egui::Ui, doc: &mut DocTab) {
     let active = doc.edit.tool == Tool::Stamp;
-    let label = if active {
-        format!("Carimbo: {}", doc.edit.stamp.title())
-    } else {
-        "Carimbo".to_owned()
+    let label = match (&doc.edit.custom_stamp, active) {
+        (Some(c), true) => format!("Carimbo: {}", crate::links::safe_display(&c.name)),
+        (None, true) => format!("Carimbo: {}", doc.edit.stamp.title()),
+        (_, false) => "Carimbo".to_owned(),
     };
     let button = egui::Button::selectable(active, label);
     egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
@@ -550,10 +550,37 @@ fn stamp_menu(ui: &mut egui::Ui, doc: &mut DocTab) {
                 let text = egui::RichText::new(kind.title()).color(color32(kind.color()));
                 if ui.button(text).clicked() {
                     doc.edit.stamp = kind;
+                    doc.edit.custom_stamp = None;
                     doc.edit.tool = Tool::Stamp;
                 }
             }
         }
+        // categorias do usuário, depois Criar e Gerenciar (como no Acrobat)
+        for c in &crate::stamp_dialogs::catalog().categories {
+            ui.separator();
+            ui.label(
+                egui::RichText::new(crate::links::safe_display(&c.name))
+                    .small()
+                    .strong(),
+            );
+            for s in &c.stamps {
+                if ui.button(crate::links::safe_display(&s.name)).clicked() {
+                    doc.edit.custom_stamp = Some(crate::stamp_dialogs::choice(&s.name, &s.path));
+                    doc.edit.tool = Tool::Stamp;
+                }
+            }
+        }
+        ui.separator();
+        ui.menu_button("Carimbos personalizados", |ui| {
+            if ui.button("Criar…").clicked() {
+                doc.stamp_create = Some(Default::default());
+                ui.close();
+            }
+            if ui.button("Gerenciar…").clicked() {
+                doc.stamp_manage = Some(Default::default());
+                ui.close();
+            }
+        });
     });
 }
 

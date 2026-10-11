@@ -224,6 +224,23 @@ pub enum Request {
         dest: PathBuf,
         separate: bool,
     },
+    /// Comentários para um arquivo de dados (todos, ou só os de `only` com respostas e grupo).
+    /// Responde `CommentsExported` ou `CommentsFailed`.
+    ExportComments {
+        path: PathBuf,
+        format: crate::CommentFormat,
+        only: Option<Vec<(i32, i32)>>,
+    },
+    /// Resumo dos comentários num PDF novo em `dest`: responde `SummaryReady` ou
+    /// `CommentsFailed`.
+    SummarizeComments {
+        options: crate::SummaryOptions,
+        dest: PathBuf,
+    },
+    /// Comentários de um FDF, XFDF ou PDF: responde `CommentsImported` e `AnnotsChanged`.
+    ImportComments {
+        path: PathBuf,
+    },
     /// Grava as páginas (com as anotações) num arquivo, para copiá-las para outro documento.
     ExportPages {
         pages: Vec<i32>,
@@ -389,6 +406,14 @@ pub enum Response {
         history: HistoryState,
     },
     OcrFailed(String),
+    /// Quantos comentários entraram e quantos ficaram de fora.
+    CommentsImported(crate::ImportReport),
+    /// Comentários gravados neste arquivo de dados.
+    CommentsExported(PathBuf),
+    /// Resumo dos comentários pronto (abrir numa aba, sem lugar escolhido).
+    SummaryReady(PathBuf),
+    /// Exportar comentários ou resumir não deu certo.
+    CommentsFailed(String),
     /// Arquivos criados pelo Exportar PDF.
     ExportedTo(Vec<PathBuf>),
     ExportToFailed(String),
@@ -792,6 +817,30 @@ impl State {
                     Err(e) => Response::PagesFailed(e),
                 },
             ),
+            Request::ExportComments { path, format, only } => send(
+                match self.with_doc(|d| d.export_comments(&path, format, only.as_deref())) {
+                    Ok(_) => Response::CommentsExported(path),
+                    Err(e) => Response::CommentsFailed(e),
+                },
+            ),
+            Request::SummarizeComments { options, dest } => send(
+                match self.with_doc(|d| crate::summarize_comments(d, &options, &dest)) {
+                    Ok(_) => Response::SummaryReady(dest),
+                    Err(e) => Response::CommentsFailed(e),
+                },
+            ),
+            Request::ImportComments { path } => {
+                let mut report = None;
+                self.edit(send, |d| {
+                    let r = d.import_comments(&path)?;
+                    let pages = r.pages.clone();
+                    report = Some(r);
+                    Ok(Changed::Pages(pages))
+                });
+                if let Some(r) = report {
+                    send(Response::CommentsImported(r));
+                }
+            }
             Request::ExportPages { pages, dest } => {
                 send(match self.with_doc(|d| d.extract(&pages, &dest, false)) {
                     Ok(_) => Response::PagesExported { dest },

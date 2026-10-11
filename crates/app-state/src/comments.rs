@@ -77,16 +77,13 @@ fn chrono_key(a: &AnnotInfo) -> (i64, i32) {
 /// Monta as conversas: só os comentários (sem `reply_to`) viram linhas; respostas e status ficam
 /// dentro do pai; os de pai inexistente (PDF de outro programa) são ignorados.
 pub fn threads(annots: &[AnnotInfo]) -> Vec<Thread> {
-    let ids: std::collections::HashSet<i32> = annots.iter().map(|a| a.id).collect();
-    let group_roots: std::collections::HashSet<i32> = annots
-        .iter()
-        .filter_map(|a| a.group)
-        .filter(|g| ids.contains(g))
-        .collect();
+    // `group` já vem conferido do pdf-core (só aponta para um principal da mesma página)
+    let group_roots: std::collections::HashSet<i32> =
+        annots.iter().filter_map(|a| a.group).collect();
     let mut out: Vec<Thread> = annots
         .iter()
         // o membro de um grupo (o riscado do Substituir texto) aparece no item da principal
-        .filter(|a| !a.is_reply() && !a.group.is_some_and(|g| ids.contains(&g)))
+        .filter(|a| !a.is_reply() && a.group.is_none())
         .map(|a| Thread {
             root: a.clone(),
             replies: Vec::new(),

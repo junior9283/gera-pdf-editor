@@ -2,9 +2,10 @@
 //! transparente. O MuPDF só desenha carimbos de uma linha e corta nomes longos; a imagem dá a
 //! moldura arredondada e as duas linhas do carimbo dinâmico, e o MuPDF a reajusta ao mover e
 //! redimensionar.
-use crate::error::Result;
+use crate::error::{refused, Result};
 use crate::text_fit::text_width;
-use mupdf::{Colorspace, Document, Font, Image, Matrix};
+use mupdf::{Colorspace, Document, Font, Image, ImageFormat, Matrix};
+use std::path::Path;
 
 /// Tamanho do desenho do carimbo, em pontos: também o tamanho padrão do carimbo na página
 /// (exportado como `STAMP_WIDTH`/`STAMP_HEIGHT`).
@@ -14,6 +15,132 @@ pub const HEIGHT: f32 = 60.0;
 const PAD: f32 = 14.0;
 /// Resolução da imagem (pontos → pixels).
 const DPI: f32 = 300.0;
+
+/// Carimbo personalizado: maior lado da imagem guardada (pixels), maior lado do carimbo na página
+/// (pontos) e maior arquivo aceito como fonte ou como imagem guardada.
+const CUSTOM_MAX_PX: f32 = 1500.0;
+const CUSTOM_MAX_PT: f32 = 300.0;
+const CUSTOM_MAX_BYTES: u64 = 100 * 1024 * 1024;
+
+/// Tamanho natural do carimbo na página: o do original, com o maior lado até 300 pt.
+pub fn natural_size(w: f32, h: f32) -> (f32, f32) {
+    let k = (CUSTOM_MAX_PT / w.max(h).max(0.01)).min(1.0);
+    (w * k, h * k)
+}
+
+/// Faz a imagem do carimbo personalizado (PNG com fundo transparente, 300 dpi, no máximo 1500
+/// pixels no lado maior) a partir da página `page` de um PDF ou de uma imagem. Devolve o tamanho
+/// natural do carimbo, em pontos.
+pub fn stamp_image_from_file(src: &Path, page: i32, dest: &Path) -> Result<(f32, f32)> {
+    if std::fs::metadata(src)?.len() > CUSTOM_MAX_BYTES {
+        return Err(refused("o arquivo é grande demais para virar carimbo"));
+    }
+    let doc = open_source(src)?;
+    if !(0..doc.page_count()?).contains(&page) {
+        return Err(refused("a página não existe no arquivo"));
+    }
+    let p = doc.load_page(page)?;
+    let b = p.bounds()?;
+    let (w, h) = (b.width(), b.height());
+    if !(w > 0.0 && h > 0.0) {
+        return Err(refused("a página está vazia"));
+    }
+    let scale = (DPI / 72.0).min(CUSTOM_MAX_PX / w.max(h));
+    let pix = p.to_pixmap(
+        &Matrix::new_scale(scale, scale),
+        &Colorspace::device_rgb(),
+        true,
+        false,
+    )?;
+    let mut png = Vec::new();
+    pix.write_to(&mut png, ImageFormat::PNG)?;
+    crate::doc::write_bytes_atomic(dest, &png)?;
+    Ok(natural_size(w, h))
+}
+
+/// A imagem numa página de um PDF em memória (o MuPDF daqui não abre imagens como documento).
+fn image_document(path: &Path) -> Result<Document> {
+    let mut doc = mupdf::pdf::PdfDocument::new();
+    crate::create_export::add_image_page(&mut doc, path)?;
+    let mut bytes = Vec::new();
+    doc.write_to(&mut bytes)?;
+    Ok(Document::from_bytes(&bytes, "pdf")?)
+}
+
+/// É PDF (cabeçalho `%PDF-` no começo)?
+fn is_pdf(src: &Path) -> bool {
+    std::fs::File::open(src)
+        .and_then(|f| {
+            use std::io::Read;
+            let mut head = Vec::new();
+            f.take(1024).read_to_end(&mut head)?;
+            Ok(head.windows(5).any(|w| w == b"%PDF-"))
+        })
+        .unwrap_or(false)
+}
+
+/// O PDF (sem senha), ou a imagem numa página.
+fn open_source(src: &Path) -> Result<Document> {
+    if !is_pdf(src) {
+        return image_document(src)
+            .map_err(|_| refused("o arquivo não é um PDF ou uma imagem que dê para abrir"));
+    }
+    let doc = Document::open(crate::doc::utf8_path(src)?)
+        .map_err(|_| refused("o arquivo não é um PDF ou uma imagem que dê para abrir"))?;
+    if doc.needs_password()? {
+        return Err(refused("o PDF está protegido por senha"));
+    }
+    Ok(doc)
+}
+
+/// Quantas páginas tem a fonte de um carimbo (imagem: 1, sem decodificar; a imagem é conferida
+/// ao criar).
+pub fn stamp_source_pages(src: &Path) -> Result<i32> {
+    if !is_pdf(src) {
+        return Ok(1);
+    }
+    Ok(open_source(src)?.page_count()?)
+}
+
+/// Largura e altura do PNG, lidas do cabeçalho (sem decodificar a imagem).
+fn png_size(png: &Path) -> Option<(u32, u32)> {
+    use std::io::Read;
+    let mut head = [0u8; 24];
+    std::fs::File::open(png).ok()?.read_exact(&mut head).ok()?;
+    if &head[..8] != b"\x89PNG\r\n\x1a\n" || &head[12..16] != b"IHDR" {
+        return None;
+    }
+    let be = |k: usize| u32::from_be_bytes([head[k], head[k + 1], head[k + 2], head[k + 3]]);
+    Some((be(16), be(20)))
+}
+
+/// Tamanho natural do carimbo guardado em `png` (a imagem tem 300 dpi).
+pub fn stamp_image_size(png: &Path) -> Option<(f32, f32)> {
+    let (w, h) = png_size(png)?;
+    let k = 72.0 / DPI;
+    Some(natural_size(w as f32 * k, h as f32 * k))
+}
+
+/// A página renderizada contra-girada (`page_rotation`), com fundo transparente: a imagem
+/// fica em pé numa página girada.
+fn upright_image(page: &mupdf::Page, scale: f32, page_rotation: i32) -> Result<Image> {
+    let mut ctm = Matrix::new_scale(scale, scale);
+    ctm.concat(Matrix::new_rotate(-(page_rotation as f32)));
+    let pix = page.to_pixmap(&ctm, &Colorspace::device_rgb(), true, false)?;
+    Ok(Image::from_pixmap(&pix)?)
+}
+
+/// A imagem guardada pronta para a página: direto, ou contra-girada numa página girada.
+pub(crate) fn custom_image(png: &Path, page_rotation: i32) -> Result<Image> {
+    let img = crate::create_export::open_image(png)?;
+    if page_rotation.rem_euclid(360) == 0 {
+        return Ok(img);
+    }
+    let doc = image_document(png).map_err(|_| refused("a imagem do carimbo não abre"))?;
+    let page = doc.load_page(0)?;
+    let scale = img.width() as f32 / page.bounds()?.width().max(0.01);
+    upright_image(&page, scale, page_rotation)
+}
 
 /// Texto num literal PDF em WinAnsi (os acentos do português cabem nele).
 pub(crate) fn literal(s: &str) -> String {
@@ -54,7 +181,7 @@ fn winansi_extra(c: char) -> Option<u8> {
 }
 
 /// Retângulo de cantos arredondados (raio `r`) como operadores de caminho PDF.
-fn rounded_rect(x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> String {
+pub(crate) fn rounded_rect(x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> String {
     let k = r * 0.5523; // aproximação do quarto de círculo por Bézier
     format!(
         "{a} {y0} m {b} {y0} l {b2} {y0} {x1} {c2} {x1} {c} c {x1} {d} l {x1} {d2} {b2} {y1} {b} {y1} c \
@@ -113,11 +240,7 @@ pub(crate) fn image(
         ops.len()
     );
     let page = Document::from_bytes(pdf.as_bytes(), "pdf")?.load_page(0)?;
-    let scale = DPI / 72.0;
-    let mut ctm = Matrix::new_scale(scale, scale);
-    ctm.concat(Matrix::new_rotate(-(page_rotation as f32)));
-    let pix = page.to_pixmap(&ctm, &Colorspace::device_rgb(), true, false)?;
-    Ok(Image::from_pixmap(&pix)?)
+    upright_image(&page, DPI / 72.0, page_rotation)
 }
 
 #[cfg(test)]

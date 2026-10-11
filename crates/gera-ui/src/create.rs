@@ -69,21 +69,33 @@ impl EditState {
         author: Option<&str>,
         now: (i32, u32, u32, u32, u32),
     ) -> bool {
+        let centered = |(w, h): (f32, f32)| {
+            PdfRect::new(
+                at.0 - w / 2.0,
+                at.1 - h / 2.0,
+                at.0 + w / 2.0,
+                at.1 + h / 2.0,
+            )
+        };
+        if let Some(c) = &self.custom_stamp {
+            let annot = NewAnnot::CustomStamp {
+                page,
+                rect: centered(c.size),
+                image: c.path.clone(),
+                name: c.name.clone(),
+            };
+            self.add(annot);
+            return true;
+        }
         let kind = self.stamp;
         let sub = match (kind.is_dynamic(), author) {
             (false, _) => None,
             (true, Some(name)) if !name.trim().is_empty() => Some(subtitle(name, now)),
             (true, _) => return false,
         };
-        let (w, h) = (STAMP_WIDTH, STAMP_HEIGHT);
         self.add(NewAnnot::Stamp {
             page,
-            rect: PdfRect::new(
-                at.0 - w / 2.0,
-                at.1 - h / 2.0,
-                at.0 + w / 2.0,
-                at.1 + h / 2.0,
-            ),
+            rect: centered((STAMP_WIDTH, STAMP_HEIGHT)),
             title: kind.title().into(),
             subtitle: sub,
             color: kind.color(),
@@ -317,6 +329,23 @@ mod tests {
             &e.take_ops()[..],
             [AnnotOp::Create(NewAnnot::Stamp { subtitle: Some(s), rect, .. })]
                 if s == "Maria, 09/10/2026 14:30" && rect.x0 == 105.0 && rect.y0 == 170.0
+        ));
+    }
+
+    #[test]
+    fn stamp_choice_for_custom_entry() {
+        let mut e = EditState::default();
+        e.custom_stamp = Some(crate::edit::CustomStamp {
+            name: "Logotipo".into(),
+            path: "/c/Logotipo.png".into(),
+            size: (100.0, 40.0),
+        });
+        assert!(e.place_stamp(1, (200.0, 100.0), None, (2026, 1, 1, 0, 0)));
+        assert!(matches!(
+            &e.take_ops()[..],
+            [AnnotOp::Create(NewAnnot::CustomStamp { page: 1, rect, name, image })]
+                if name == "Logotipo" && image.ends_with("Logotipo.png")
+                    && rect.x0 == 150.0 && rect.y0 == 80.0 && rect.x1 == 250.0
         ));
     }
 

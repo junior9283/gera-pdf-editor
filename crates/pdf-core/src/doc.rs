@@ -519,6 +519,12 @@ fn add_one(doc: &mut PdfDocument, page: &mut PdfPage, a: &NewAnnot) -> Result<Pd
             let img = stamp::image(title, subtitle.as_deref(), *color, page.rotation()?)?;
             add_stamp(doc, page, *rect, title, &img)?
         }
+        NewAnnot::CustomStamp {
+            rect, image, name, ..
+        } => {
+            let img = stamp::custom_image(image, page.rotation()?)?;
+            add_stamp(doc, page, *rect, name, &img)?
+        }
         NewAnnot::Caret { rect, text, .. } => {
             let mut a = page.add_caret_annotation(Rect::from(*rect))?;
             a.set_contents(text)?;
@@ -612,7 +618,7 @@ fn add_one(doc: &mut PdfDocument, page: &mut PdfPage, a: &NewAnnot) -> Result<Pd
     })
 }
 
-fn utf8_path(path: &Path) -> Result<&str> {
+pub(crate) fn utf8_path(path: &Path) -> Result<&str> {
     path.to_str()
         .ok_or_else(|| PdfError::Engine("caminho não é UTF-8 válido".into()))
 }
@@ -651,6 +657,107 @@ pub(crate) fn pdf_now() -> String {
         offset / 60,
         offset % 60
     )
+}
+
+/// O grupo só vale quando aponta para outra anotação da página que não está, ela mesma, num
+/// grupo: grupo para si mesmo, para fora da página ou em ciclo (de outros programas) vira `None`.
+/// Assim o painel, a seleção e o núcleo leem `group` sem conferir de novo.
+fn normalize_groups(annots: &mut [AnnotInfo]) {
+    let raw: std::collections::HashMap<i32, Option<i32>> =
+        annots.iter().map(|a| (a.id, a.group)).collect();
+    for a in annots.iter_mut() {
+        a.group = a
+            .group
+            .filter(|g| *g != a.id && raw.get(g).is_some_and(|pg| pg.is_none_or(|pg| pg == *g)));
+    }
+}
+
+/// Principal do grupo de `id` (ou o próprio `id`).
+fn group_root(annots: &[AnnotInfo], id: i32) -> i32 {
+    annots
+        .iter()
+        .find(|a| a.id == id)
+        .and_then(|a| a.group)
+        .unwrap_or(id)
+}
+
+/// O principal e os membros do grupo.
+fn group_members(annots: &[AnnotInfo], root: i32) -> Vec<i32> {
+    std::iter::once(root)
+        .chain(
+            annots
+                .iter()
+                .filter(|a| a.group == Some(root) && a.id != root)
+                .map(|a| a.id),
+        )
+        .collect()
+}
+
+/// Cada um de `ids` com o grupo e, como no Acrobat, as respostas e os status (o que sai ao
+/// excluir e o que vai junto ao exportar).
+pub(crate) fn with_group_and_replies(annots: &[AnnotInfo], ids: &[i32]) -> Vec<i32> {
+    let mut out: Vec<i32> = Vec::new();
+    for &id in ids {
+        for root in group_members(annots, group_root(annots, id)) {
+            for k in std::iter::once(root).chain(descendants(annots, root)) {
+                if !out.contains(&k) {
+                    out.push(k);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn hide_all(page: i32, ids: Vec<i32>) -> Edit {
+    let mut edits: Vec<Edit> = ids
+        .into_iter()
+        .map(|id| Edit::Visibility {
+            page,
+            id,
+            hidden: true,
+        })
+        .collect();
+    if edits.len() == 1 {
+        edits.remove(0)
+    } else {
+        Edit::Batch(edits)
+    }
+}
+
+/// Junta `ids` num grupo cujo principal é o (grupo do) primeiro. Respostas e status não entram.
+fn group_edit(page: i32, annots: &[AnnotInfo], ids: &[i32]) -> Result<Edit> {
+    let mut all = Vec::new();
+    for &id in ids {
+        let a = annots
+            .iter()
+            .find(|a| a.id == id)
+            .ok_or_else(|| PdfError::InvalidAnnotation("anotação não encontrada".into()))?;
+        if a.is_reply() {
+            return Err(refused("respostas e status não entram em grupos"));
+        }
+        for m in group_members(annots, group_root(annots, id)) {
+            if !all.contains(&m) {
+                all.push(m);
+            }
+        }
+    }
+    let Some((&root, rest)) = all.split_first().filter(|(_, rest)| !rest.is_empty()) else {
+        return Err(refused("escolha dois ou mais comentários para agrupar"));
+    };
+    let edits: Vec<Edit> = rest
+        .iter()
+        .filter(|&&m| annots.iter().any(|a| a.id == m && a.group != Some(root)))
+        .map(|&m| Edit::Group {
+            page,
+            id: m,
+            to: Some(root),
+        })
+        .collect();
+    if edits.is_empty() {
+        return Err(refused("os comentários já estão no mesmo grupo"));
+    }
+    Ok(Edit::Batch(edits))
 }
 
 /// Respostas e status de `root`, inclusive respostas de respostas (em qualquer profundidade).
@@ -953,6 +1060,7 @@ impl PdfDoc {
             }
             out.push(annot_info(&annot, page, &ctm)?);
         }
+        normalize_groups(&mut out);
         Ok(out)
     }
 
@@ -1202,7 +1310,24 @@ impl PdfDoc {
                 });
                 return Ok(vec![page]);
             }
-            AnnotOp::Move { page, id, dx, dy } => self.move_edit(page, id, dx, dy)?,
+            AnnotOp::Move { page, id, dx, dy } => {
+                // o grupo se move junto
+                let annots = self.annotations(page)?;
+                // marcações de texto do grupo ficam presas ao texto (como no Acrobat)
+                let members: Vec<i32> = group_members(&annots, group_root(&annots, id))
+                    .into_iter()
+                    .filter(|m| m == &id || annots.iter().any(|a| a.id == *m && a.movable()))
+                    .collect();
+                if members.len() > 1 {
+                    let moves = members
+                        .into_iter()
+                        .map(|m| self.move_edit(page, m, dx, dy))
+                        .collect::<Result<Vec<_>>>()?;
+                    Edit::Batch(moves)
+                } else {
+                    self.move_edit(page, id, dx, dy)?
+                }
+            }
             AnnotOp::Duplicate {
                 page,
                 id,
@@ -1395,34 +1520,38 @@ impl PdfDoc {
                 with_fit(contents, page, id, fit)
             }
             AnnotOp::Delete { page, id } => {
-                // como no Acrobat, as respostas e os status vão junto com o comentário
-                let hide = |id| Edit::Visibility {
-                    page,
-                    id,
-                    hidden: true,
-                };
                 let annots = self.annotations(page)?;
-                // anotação agrupada (Substituir texto): o grupo inteiro sai, a partir da principal
-                // (um /IRT de outro programa que não aponta para anotação desta página não conta)
-                let root = annots
-                    .iter()
-                    .find(|a| a.id == id)
-                    .and_then(|a| a.group)
-                    .filter(|g| annots.iter().any(|a| a.id == *g))
-                    .unwrap_or(id);
-                let members = annots
+                hide_all(page, with_group_and_replies(&annots, &[id]))
+            }
+            AnnotOp::DeleteMany { page, ids } => {
+                let annots = self.annotations(page)?;
+                if ids.iter().any(|id| !annots.iter().any(|a| a.id == *id)) {
+                    return Err(PdfError::InvalidAnnotation(
+                        "anotação não encontrada".into(),
+                    ));
+                }
+                hide_all(page, with_group_and_replies(&annots, &ids))
+            }
+            AnnotOp::Group { page, ids } => {
+                let annots = self.annotations(page)?;
+                group_edit(page, &annots, &ids)?
+            }
+            AnnotOp::Ungroup { page, id } => {
+                let annots = self.annotations(page)?;
+                let root = group_root(&annots, id);
+                let edits: Vec<Edit> = annots
                     .iter()
                     .filter(|a| a.group == Some(root))
-                    .map(|a| a.id);
-                let children: Vec<Edit> = members
-                    .chain(descendants(&annots, root))
-                    .map(hide)
+                    .map(|a| Edit::Group {
+                        page,
+                        id: a.id,
+                        to: None,
+                    })
                     .collect();
-                if children.is_empty() {
-                    hide(root)
-                } else {
-                    Edit::Batch(std::iter::once(hide(root)).chain(children).collect())
+                if edits.is_empty() {
+                    return Err(refused("o comentário não está num grupo"));
                 }
+                Edit::Batch(edits)
             }
             AnnotOp::Reply { page, parent, text } => {
                 if text.trim().is_empty() {
@@ -1621,6 +1750,7 @@ impl PdfDoc {
             last.x1 + h * 0.3,
             last.y1 + h * 0.1,
         );
+        let marks = quads(rects)?; // confere antes de criar qualquer coisa
         let mut caret = add_one(
             &mut self.inner,
             &mut page_ref,
@@ -1630,12 +1760,23 @@ impl PdfDoc {
                 text: text.to_owned(),
             },
         )?;
-        let mut strike = page_ref.add_strikeout_annotation(quads(rects)?)?;
-        strike.set_color(rgb(TEXT_EDIT_BLUE))?;
-        let mut obj = strike.object();
-        obj.dict_put("IRT", caret.object())?;
-        obj.dict_put("RT", PdfObject::new_name("Group")?)?;
-        obj.dict_put("IT", PdfObject::new_name("StrikeOutTextEdit")?)?;
+        let strike = (|| -> Result<PdfAnnotation> {
+            let mut strike = page_ref.add_strikeout_annotation(marks)?;
+            strike.set_color(rgb(TEXT_EDIT_BLUE))?;
+            let mut obj = strike.object();
+            obj.dict_put("IRT", caret.object())?;
+            obj.dict_put("RT", PdfObject::new_name("Group")?)?;
+            obj.dict_put("IT", PdfObject::new_name("StrikeOutTextEdit")?)?;
+            Ok(strike)
+        })();
+        // o riscado não saiu: o cursor sozinho também não fica
+        let mut strike = match strike {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = page_ref.delete_annotation(caret);
+                return Err(e);
+            }
+        };
         for a in [&mut caret, &mut strike] {
             self.sign(a)?;
             a.update()?;

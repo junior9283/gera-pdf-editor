@@ -231,6 +231,8 @@ pub struct EditState {
     note_draft: Option<NoteDraft>,
     /// Anotação selecionada: (página, id).
     pub selected: Option<(i32, i32)>,
+    /// Outras anotações da mesma página juntadas com `Ctrl`+clique.
+    pub(crate) extra: Vec<(i32, i32)>,
     annot_drag: Option<AnnotDrag>,
     /// O último clique direito caiu sobre uma anotação (o menu é o dela, não o do texto).
     menu_on_annot: bool,
@@ -238,6 +240,8 @@ pub struct EditState {
     props: Option<PropsDraft>,
     /// Carimbo escolhido no menu da ferramenta Carimbo.
     pub stamp: StampKind,
+    /// Carimbo personalizado escolhido (vale no lugar de `stamp`).
+    pub custom_stamp: Option<CustomStamp>,
     pub(crate) shape_drag: Option<ShapeDrag>,
     /// Caixa de texto sendo digitada sobre a página.
     pub(crate) text_draft: Option<TextDraft>,
@@ -263,6 +267,14 @@ pub struct EditState {
     note_focus: bool,
     /// Ferramenta dos gestos em andamento: trocar de ferramenta os descarta.
     gesture_tool: Tool,
+}
+
+/// Carimbo personalizado escolhido no menu: nome, imagem e tamanho natural (pontos).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CustomStamp {
+    pub name: String,
+    pub path: std::path::PathBuf,
+    pub size: (f32, f32),
 }
 
 /// O que a caixa de texto em digitação vai virar.
@@ -427,6 +439,7 @@ impl EditState {
         self.drop_tool_gestures();
         self.fill.tool = None;
         self.selected = None;
+        self.extra.clear();
         self.annot_drag = None;
         self.shape_drag = None;
     }
@@ -443,11 +456,66 @@ impl EditState {
         !on_annot && !on_text
     }
 
-    /// Apaga a anotação selecionada (tecla Delete ou menu).
+    /// Apaga as anotações selecionadas (tecla Delete ou menu), numa etapa.
     pub fn delete_selected(&mut self) {
-        if let Some((page, id)) = self.selected.take() {
-            self.ops.push(AnnotOp::Delete { page, id });
+        let Some((page, id)) = self.selected.take() else {
+            return;
+        };
+        let extra: Vec<(i32, i32)> = std::mem::take(&mut self.extra)
+            .into_iter()
+            .filter(|e| e.0 == page)
+            .collect();
+        self.ops.push(if extra.is_empty() {
+            AnnotOp::Delete { page, id }
+        } else {
+            AnnotOp::DeleteMany {
+                page,
+                ids: std::iter::once(id)
+                    .chain(extra.into_iter().map(|(_, i)| i))
+                    .collect(),
+            }
+        });
+    }
+
+    /// Clique de Selecionar sobre `hit`: com `Ctrl`, junta ou tira da seleção (na mesma página,
+    /// como no Acrobat); sem, seleciona só ele.
+    pub(crate) fn click_select(&mut self, hit: Option<(i32, i32)>, ctrl: bool) {
+        match (hit, self.selected) {
+            (Some(h), Some(sel)) if ctrl && h.0 == sel.0 => {
+                if h == sel {
+                    self.selected = (!self.extra.is_empty()).then(|| self.extra.remove(0));
+                } else if let Some(k) = self.extra.iter().position(|&e| e == h) {
+                    self.extra.remove(k);
+                } else {
+                    self.extra.push(h);
+                }
+            }
+            _ => {
+                self.selected = hit;
+                self.extra.clear();
+            }
         }
+    }
+
+    /// Tudo o que está selecionado, com os membros dos grupos (clicar num membro seleciona o
+    /// grupo, como no Acrobat).
+    pub(crate) fn selected_set(&self, annots: &[AnnotInfo]) -> Vec<(i32, i32)> {
+        let mut out: Vec<(i32, i32)> = Vec::new();
+        let page_of = self.selected.map(|s| s.0);
+        let extra = self.extra.iter().copied().filter(|e| Some(e.0) == page_of);
+        for (page, id) in self.selected.into_iter().chain(extra) {
+            let root = find(annots, (page, id)).and_then(|a| a.group).unwrap_or(id);
+            let members = annots
+                .iter()
+                .filter(|a| a.page == page && (a.id == root || a.group == Some(root)))
+                .map(|a| (page, a.id));
+            for s in std::iter::once((page, id)).chain(members) {
+                if !out.contains(&s) {
+                    out.push(s);
+                }
+            }
+        }
+        out
     }
 
     /// Lista nova do worker: a seleção só fica se a anotação ainda existe (a janela de
@@ -455,6 +523,10 @@ impl EditState {
     pub fn keep_valid_selection(&mut self, annots: &[AnnotInfo]) {
         if self.selected.is_some_and(|s| find(annots, s).is_none()) {
             self.selected = None;
+        }
+        self.extra.retain(|&s| find(annots, s).is_some());
+        if self.selected.is_none() {
+            self.extra.clear();
         }
     }
 
@@ -737,10 +809,12 @@ impl EditState {
                     .map(|a| (a, Grab::Move)),
             };
             let Some((a, grab)) = grab else {
-                self.selected = None; // marcação ou área vazia: o arrasto seleciona texto
+                self.click_select(None, false); // marcação ou área vazia: o arrasto seleciona texto
                 return false;
             };
-            self.selected = Some((page, a.id));
+            if !self.selected_set(annots).contains(&(page, a.id)) {
+                self.click_select(Some((page, a.id)), false);
+            }
             self.selection = None;
             self.annot_drag = Some(AnnotDrag {
                 page,
@@ -781,7 +855,8 @@ impl EditState {
             return true;
         }
         if response.clicked() {
-            self.selected = pointer.and_then(hit);
+            let ctrl = response.ctx.input(|i| i.modifiers.command);
+            self.click_select(pointer.and_then(hit), ctrl);
             if self.selected.is_some() {
                 self.selection = None;
                 return true;
@@ -803,8 +878,9 @@ impl EditState {
         if response.secondary_clicked() {
             let hit = pointer.and_then(|p| hit_at(annots, page, p, map));
             self.menu_on_annot = hit.is_some();
-            if hit.is_some() {
-                self.selected = hit;
+            // clique direito fora da seleção seleciona só aquele
+            if hit.is_some_and(|h| !self.selected_set(annots).contains(&h)) {
+                self.click_select(hit, false);
             }
         }
         let on_annot = self.menu_on_annot && self.selected.is_some_and(|(p, _)| p == page);
@@ -825,6 +901,17 @@ impl EditState {
                         .selected
                         .and_then(|s| find(annots, s))
                         .map(PropsDraft::new);
+                }
+                if let Some(op) = self.group_op(annots, true) {
+                    if ui.button("Agrupar").clicked() {
+                        self.ops.push(op);
+                        self.extra.clear();
+                    }
+                }
+                if let Some(op) = self.group_op(annots, false) {
+                    if ui.button("Desagrupar").clicked() {
+                        self.ops.push(op);
+                    }
                 }
                 if ui.button("Excluir").clicked() {
                     self.delete_selected();
@@ -851,6 +938,22 @@ impl EditState {
                 }
             }
         });
+    }
+
+    /// Agrupar (com outros selecionados) ou Desagrupar (a seleção está num grupo).
+    fn group_op(&self, annots: &[AnnotInfo], group: bool) -> Option<AnnotOp> {
+        let (page, id) = self.selected?;
+        if group {
+            let ids: Vec<i32> = std::iter::once(id)
+                .chain(self.extra.iter().filter(|e| e.0 == page).map(|&(_, i)| i))
+                .collect();
+            return (ids.len() > 1).then_some(AnnotOp::Group { page, ids });
+        }
+        // está num grupo: é membro (tem principal) ou é o principal de alguém
+        let grouped = annots
+            .iter()
+            .any(|a| a.page == page && ((a.id == id && a.group.is_some()) || a.group == Some(id)));
+        (grouped && self.extra.is_empty()).then_some(AnnotOp::Ungroup { page, id })
     }
 
     /// Contorno da anotação selecionada (com as alças, se der para redimensionar) ou, durante o
@@ -897,6 +1000,20 @@ impl EditState {
                 4.0,
             ));
             return;
+        }
+        // os outros selecionados e os membros do grupo: só o contorno
+        for other in self
+            .selected_set(annots)
+            .into_iter()
+            .filter(|s| s.0 == page && Some(*s) != self.selected)
+            .filter_map(|s| find(annots, s))
+        {
+            painter.rect_stroke(
+                screen_rect(&other.rect, map).expand(2.0),
+                0.0,
+                egui::Stroke::new(1.0, SELECTED),
+                egui::StrokeKind::Outside,
+            );
         }
         let Some(a) = self
             .selected
@@ -1290,6 +1407,57 @@ mod tests {
         assert_eq!(
             (r.min, r.max),
             (egui::pos2(120.0, 90.0), egui::pos2(160.0, 130.0))
+        );
+    }
+
+    fn note(id: i32, group: Option<i32>) -> AnnotInfo {
+        AnnotInfo {
+            id,
+            kind: AnnotKind::Note,
+            page: 0,
+            rect: PdfRect::new(0.0, 0.0, 10.0, 10.0),
+            group,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ctrl_click_toggles_extra_selection_on_the_same_page() {
+        let mut edit = EditState::default();
+        edit.click_select(Some((0, 1)), false);
+        edit.click_select(Some((0, 2)), true);
+        edit.click_select(Some((0, 3)), true);
+        assert_eq!(edit.selected, Some((0, 1)));
+        assert_eq!(edit.extra, [(0, 2), (0, 3)]);
+        edit.click_select(Some((0, 2)), true);
+        assert_eq!(edit.extra, [(0, 3)], "Ctrl+clique de novo tira");
+        edit.click_select(Some((1, 9)), true);
+        assert_eq!(
+            (edit.selected, edit.extra.clone()),
+            (Some((1, 9)), vec![]),
+            "outra página recomeça"
+        );
+        edit.click_select(Some((1, 8)), false);
+        assert!(edit.extra.is_empty(), "clique simples tira os outros");
+        edit.click_select(None, false);
+        assert_eq!(edit.selected, None);
+    }
+
+    #[test]
+    fn group_members_select_together() {
+        let annots = [note(1, None), note(2, Some(1)), note(3, None)];
+        let mut edit = EditState::default();
+        edit.click_select(Some((0, 2)), false);
+        assert_eq!(edit.selected_set(&annots), [(0, 2), (0, 1)]);
+        edit.click_select(Some((0, 3)), true);
+        assert_eq!(edit.selected_set(&annots), [(0, 2), (0, 1), (0, 3)]);
+        edit.delete_selected();
+        assert_eq!(
+            edit.take_ops(),
+            [AnnotOp::DeleteMany {
+                page: 0,
+                ids: vec![2, 3]
+            }]
         );
     }
 

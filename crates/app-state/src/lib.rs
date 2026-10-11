@@ -5,6 +5,7 @@ pub mod certificates;
 pub mod close;
 pub mod comments;
 pub mod compare_nav;
+pub mod custom_stamps;
 pub mod fill_sign;
 pub mod layout;
 pub mod link_policy;

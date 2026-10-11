@@ -52,7 +52,7 @@ fn refuse_inputs_as_dest(opts: &CompareOptions, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-fn file_name(path: &Path) -> String {
+pub(crate) fn file_name(path: &Path) -> String {
     let name = path
         .file_name()
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
@@ -67,7 +67,19 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 }
 
 /// Texto numa posição (Helvetica `/F1` ou negrito `/F2`), na cor `gray`.
-fn text_at(font: &str, size: f32, gray: f32, x: f32, y: f32, s: &str) -> String {
+/// Helvetica e Helvetica-Bold em WinAnsi (os acentos do português cabem): `/F1` e `/F2` dos
+/// relatórios.
+pub(crate) fn report_fonts(out: &mut PdfDocument) -> Result<(PdfObject, PdfObject)> {
+    let mut font = |base: &str| -> Result<PdfObject> {
+        let dict = out.new_object_from_str(&format!(
+            "<</Type/Font/Subtype/Type1/BaseFont/{base}/Encoding/WinAnsiEncoding>>"
+        ))?;
+        Ok(out.add_object(&dict)?)
+    };
+    Ok((font("Helvetica")?, font("Helvetica-Bold")?))
+}
+
+pub(crate) fn text_at(font: &str, size: f32, gray: f32, x: f32, y: f32, s: &str) -> String {
     format!(
         "q BT /{font} {} Tf {} g {} {} Td ({}) Tj ET Q\n",
         num(size),
@@ -103,7 +115,7 @@ fn stroke_rect(color: [f32; 3], width: f32, x: f32, y: f32, w: f32, h: f32) -> S
 }
 
 /// Página nova com os recursos e o conteúdo.
-fn content_page(
+pub(crate) fn content_page(
     out: &mut PdfDocument,
     size: Size,
     resources: PdfObject,
@@ -162,12 +174,7 @@ pub(crate) fn write_comparison(
     let mut content_left = limits.content_bytes;
     let (old_name, new_name) = (file_name(&opts.old.path), file_name(&opts.new.path));
     let mut out = PdfDocument::new();
-    let helv = out.add_object(&out.new_object_from_str(
-        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>",
-    )?)?;
-    let bold = out.add_object(&out.new_object_from_str(
-        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica-Bold/Encoding/WinAnsiEncoding>>",
-    )?)?;
+    let (helv, bold) = report_fonts(&mut out)?;
     let multiply = out.add_object(&out.new_object_from_str("<</Type/ExtGState/BM/Multiply>>")?)?;
     let metrics = Font::new("Helvetica")?;
     let mut old_map = out.new_graft_map()?;

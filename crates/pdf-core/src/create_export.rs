@@ -14,7 +14,7 @@ const MAX_PIXELS: u64 = 100_000_000;
 /// Maior lado de página que o PDF aceita (200 polegadas).
 const MAX_PAGE_PT: f32 = 14_400.0;
 
-fn open_image(path: &Path) -> Result<Image> {
+pub(crate) fn open_image(path: &Path) -> Result<Image> {
     let meta = std::fs::metadata(path)?;
     let name = path
         .file_name()
@@ -145,6 +145,35 @@ pub(crate) fn oriented(o: u16, w: f32, h: f32) -> [f32; 6] {
     }
 }
 
+/// Acrescenta uma página com a imagem, em pé (orientação EXIF), do tamanho dela pela resolução.
+pub(crate) fn add_image_page(doc: &mut PdfDocument, path: &Path) -> Result<()> {
+    let UprightImage {
+        img,
+        orientation,
+        width,
+        height,
+    } = UprightImage::open(path)?;
+    // o PDF não aceita páginas maiores que 200 pol: reduz mantendo a proporção
+    let fit = (MAX_PAGE_PT / width.max(height)).min(1.0);
+    let (w, h) = (width * fit, height * fit);
+    let image = doc.add_image(&img)?;
+    let page = doc.new_page(Size {
+        width: w,
+        height: h,
+    })?;
+    let mut obj = page.object();
+    let mut xobjects = doc.new_dict()?;
+    xobjects.dict_put("Im0", image)?;
+    let mut resources = doc.new_dict()?;
+    resources.dict_put("XObject", xobjects)?;
+    obj.dict_put("Resources", resources)?;
+    let [a, b, c, d, e, f] = oriented(orientation, w, h);
+    let ops = format!("q {a} {b} {c} {d} {e} {f} cm /Im0 Do Q");
+    let contents = doc.add_stream(&Buffer::from_bytes(ops.as_bytes())?, None, false)?;
+    obj.dict_put("Contents", contents)?;
+    Ok(())
+}
+
 /// Cria um PDF com uma página por imagem, do tamanho da imagem pela resolução dela (sem
 /// resolução: 72 ppp, como o Acrobat); JPEG entra sem recompressão.
 pub fn create_pdf_from_images(images: &[PathBuf], dest: &Path) -> Result<()> {
@@ -153,30 +182,7 @@ pub fn create_pdf_from_images(images: &[PathBuf], dest: &Path) -> Result<()> {
     }
     let mut doc = PdfDocument::new();
     for path in images {
-        let UprightImage {
-            img,
-            orientation,
-            width,
-            height,
-        } = UprightImage::open(path)?;
-        // o PDF não aceita páginas maiores que 200 pol: reduz mantendo a proporção
-        let fit = (MAX_PAGE_PT / width.max(height)).min(1.0);
-        let (w, h) = (width * fit, height * fit);
-        let image = doc.add_image(&img)?;
-        let page = doc.new_page(Size {
-            width: w,
-            height: h,
-        })?;
-        let mut obj = page.object();
-        let mut xobjects = doc.new_dict()?;
-        xobjects.dict_put("Im0", image)?;
-        let mut resources = doc.new_dict()?;
-        resources.dict_put("XObject", xobjects)?;
-        obj.dict_put("Resources", resources)?;
-        let [a, b, c, d, e, f] = oriented(orientation, w, h);
-        let ops = format!("q {a} {b} {c} {d} {e} {f} cm /Im0 Do Q");
-        let contents = doc.add_stream(&Buffer::from_bytes(ops.as_bytes())?, None, false)?;
-        obj.dict_put("Contents", contents)?;
+        add_image_page(&mut doc, path)?;
     }
     let mut opts = PdfWriteOptions::default();
     opts.set_encryption(Encryption::None).set_compress(true);

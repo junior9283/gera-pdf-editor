@@ -283,6 +283,11 @@ pub struct DocTab {
     identity_name: String,
     /// Painel Comentários (busca, filtros, ordenação e resposta em digitação).
     comments: crate::comments_panel::PanelState,
+    /// Diálogos dos carimbos personalizados (menu do Carimbo).
+    pub(crate) stamp_create: Option<crate::stamp_dialogs::CreateStamp>,
+    pub(crate) stamp_manage: Option<crate::stamp_dialogs::ManageStamps>,
+    /// Diálogo Resumir comentários, se aberto.
+    summary: Option<crate::summary_dialog::SummaryDialog>,
     /// Preencher formulários: realce, campo em edição, lista aberta.
     form: crate::fields::FormState,
     /// Diálogo Dividir documento aberto.
@@ -319,6 +324,12 @@ enum PickFor {
     },
     /// Anexos → Salvar: onde gravar este anexo.
     SaveAttachment(pdf_core::AttachmentInfo),
+    /// Comentários → Exportar (todos, ou estes com as respostas).
+    ExportComments(Option<Vec<(i32, i32)>>),
+    /// Comentários → Importar arquivo de dados.
+    ImportComments,
+    /// Carimbo personalizado: o PDF ou a imagem de origem.
+    StampSource,
 }
 
 /// Diálogo Dividir documento.
@@ -424,6 +435,9 @@ impl DocTab {
             turned_at: f64::NEG_INFINITY,
             identity_name: String::new(),
             comments: Default::default(),
+            summary: None,
+            stamp_create: None,
+            stamp_manage: None,
             form: Default::default(),
             organize: None,
             split: None,
@@ -1046,7 +1060,9 @@ impl DocTab {
         if !self.security.permissions.annotate {
             return self.deny("alterar comentários");
         }
-        if !self.files.busy() {
+        if self.files.busy() {
+            self.status = "Feche o seletor de arquivos aberto antes de anexar.".into();
+        } else {
             self.picking = Some(PickFor::AttachComment { page, at });
             self.files.pick_any_file(ctx, "Anexar arquivo");
         }
@@ -1354,6 +1370,17 @@ impl DocTab {
                         ),
                         [] => "Nada exportado.".into(),
                     };
+                }
+                Response::CommentsExported(path) => {
+                    self.status = format!("Comentários exportados para {}", path.display());
+                }
+                Response::SummaryReady(dest) => {
+                    self.status.clear();
+                    self.events.push(DocEvent::OpenAttachment(dest));
+                }
+                Response::CommentsFailed(e) => self.status = format!("Não foi possível: {e}"),
+                Response::CommentsImported(r) => {
+                    self.status = crate::comments_panel::import_message(r);
                 }
                 Response::ExportToFailed(e) => {
                     self.export = None;
@@ -2421,6 +2448,7 @@ impl DocTab {
         self.ocr_window(ui.ctx());
         self.sign_window(ui.ctx());
         self.split_window(ui);
+        self.stamp_windows(ui.ctx());
         self.poll_files();
         self.identity_window(ui);
         self.pick_attachment_for_comment(ui.ctx());
@@ -3251,6 +3279,23 @@ impl DocTab {
                     )));
                 }
             }
+            (Some(PickFor::ExportComments(only)), Picked::SaveTo(dest)) => {
+                let (path, format) = crate::comments_panel::export_target(dest);
+                self.worker
+                    .send(Request::ExportComments { path, format, only });
+            }
+            (Some(PickFor::StampSource), Picked::Open(files)) => {
+                if let (Some(d), Some(path)) =
+                    (self.stamp_create.as_mut(), files.into_iter().next())
+                {
+                    d.set_source(path);
+                }
+            }
+            (Some(PickFor::ImportComments), Picked::Open(files)) => {
+                if let Some(path) = files.into_iter().next() {
+                    self.worker.send(Request::ImportComments { path });
+                }
+            }
             (Some(PickFor::Attachment), Picked::Open(files)) => {
                 if let Some(path) = files.into_iter().next() {
                     self.worker.send(Request::AddAttachment { path });
@@ -3289,9 +3334,90 @@ impl DocTab {
                 PanelAction::Properties { page, id } => {
                     self.edit.open_props(&self.annots, (page, id))
                 }
+                PanelAction::Export { selected } => {
+                    let only = selected.then(|| self.edit.selected.into_iter().collect());
+                    let suggested = self.path.with_extension("fdf");
+                    self.picking = Some(PickFor::ExportComments(only));
+                    self.files.save_comment_data(ui.ctx(), suggested);
+                }
+                PanelAction::Summarize => {
+                    let pages = self
+                        .view
+                        .as_ref()
+                        .map_or(1, |v| v.layout.page_count() as i32);
+                    self.summary = Some(crate::summary_dialog::SummaryDialog::new(pages));
+                }
+                PanelAction::Import => {
+                    if !self.security.permissions.annotate {
+                        self.deny("importar comentários");
+                    } else {
+                        self.picking = Some(PickFor::ImportComments);
+                        self.files.pick_comment_data(ui.ctx());
+                    }
+                }
             }
         }
+        self.summary_window(ui.ctx());
         self.send_edits();
+    }
+
+    /// Diálogos Criar e Gerenciar carimbos personalizados.
+    fn stamp_windows(&mut self, ctx: &egui::Context) {
+        use crate::stamp_dialogs::CreateAction;
+        match self.stamp_create.as_mut().and_then(|d| d.window(ctx)) {
+            Some(CreateAction::PickFile) => {
+                self.picking = Some(PickFor::StampSource);
+                self.files.pick_stamp_source(ctx);
+            }
+            Some(CreateAction::Done(stamp)) => {
+                self.stamp_create = None;
+                self.status = format!(
+                    "Carimbo \"{}\" criado: clique na página para colocá-lo.",
+                    crate::links::safe_display(&stamp.name)
+                );
+                self.edit.custom_stamp = Some(stamp);
+                self.edit.tool = app_state::tools::Tool::Stamp;
+            }
+            Some(CreateAction::Cancel) => self.stamp_create = None,
+            None => {}
+        }
+        if self.stamp_manage.as_mut().is_some_and(|m| !m.window(ctx)) {
+            self.stamp_manage = None;
+        }
+    }
+
+    /// Janela Resumir comentários: o resumo vai para a pasta privada e abre numa aba nova, sem
+    /// lugar escolhido (Salvar pergunta onde gravar), como o PDF novo do Acrobat.
+    fn summary_window(&mut self, ctx: &egui::Context) {
+        use crate::summary_dialog::SummaryChoice;
+        let Some(choice) = self.summary.as_mut().and_then(|d| d.window(ctx)) else {
+            return;
+        };
+        let Some(dialog) = self.summary.take() else {
+            return;
+        };
+        if let SummaryChoice::Cancel = choice {
+            return;
+        }
+        let shown = crate::comments_panel::shown(&self.comments, &self.annots);
+        let options = dialog.options(Some(shown));
+        match crate::print_job::spool_dir() {
+            Ok(dir) => {
+                use crate::print_job::{spool_file_name, ATTACHMENT_PREFIX};
+                let stem = self
+                    .path
+                    .file_stem()
+                    .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+                let name = crate::attachments_panel::save_name(&format!(
+                    "Resumo de comentários em {stem}.pdf"
+                ));
+                let dest = dir.join(spool_file_name(ATTACHMENT_PREFIX, &format!("-{name}")));
+                self.status = "Criando o resumo dos comentários…".into();
+                self.worker
+                    .send(Request::SummarizeComments { options, dest });
+            }
+            Err(e) => self.status = format!("Não foi possível criar o resumo: {e}"),
+        }
     }
 
     /// Nome do usuário: vai para os carimbos dinâmicos e, no worker, como autor das anotações.
