@@ -254,11 +254,15 @@ impl GeraApp {
     fn close_tab(&mut self, tab: usize) {
         if let Some(i) = self.tabs.close(tab) {
             let doc = self.docs.remove(i); // o Worker cai junto e a thread termina
-            if let (true, Some(view)) = (self.prefs.restore_views, doc.current_view()) {
-                // Restaurar a última vista ao reabrir (Preferências → Documentos)
-                self.prefs.remember_view(&doc.path.to_string_lossy(), view);
-                self.prefs_dirty = true;
-            }
+            self.remember_view_of(&doc);
+        }
+    }
+
+    /// Restaurar a última vista ao reabrir (Preferências → Documentos): guarda a do documento.
+    fn remember_view_of(&mut self, doc: &DocTab) {
+        if let (true, Some(view)) = (self.prefs.restore_views, doc.current_view()) {
+            self.prefs.remember_view(&doc.path.to_string_lossy(), view);
+            self.prefs_dirty = true;
         }
     }
 
@@ -875,6 +879,11 @@ impl GeraApp {
 impl Drop for GeraApp {
     /// O app fechando: grava o que ainda estava pendente (o `saver` espera terminar).
     fn drop(&mut self) {
+        // saída sem perguntas (nada a salvar): as abas abertas não passaram por `close_tab`
+        let docs = std::mem::take(&mut self.docs);
+        for doc in &docs {
+            self.remember_view_of(doc);
+        }
         self.persist();
     }
 }
