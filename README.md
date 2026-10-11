@@ -91,7 +91,8 @@ interface) e revisão de código independente antes de entrar na `main`.
 | v6a | Navegar e exibir: links, histórico, tela cheia, modo leitura, zoom até 6400 % | ✅ 0.13.0 |
 | v6b | Mão, Zoom com marca, Preferências, Recortar/Colar, busca com opções, menu de contexto | ✅ 0.14.0 |
 | v6c | Propriedades editáveis, painéis Marcadores e Anexos | ✅ 0.15.2 |
-| v6c2–v6n | Avaliação para a 1.0.0: as lacunas restantes em relação ao Acrobat Pro | 🚧 próxima |
+| v6c2 | Miniaturas, Camadas, Destinos, rótulos de página, copiar páginas entre PDFs | ✅ 0.16.0 |
+| v6d–v6n | Avaliação para a 1.0.0: as lacunas restantes em relação ao Acrobat Pro | 🚧 próxima |
 
 O histórico de cada versão está no [CHANGELOG](CHANGELOG.md) e o plano detalhado no [ROADMAP](ROADMAP.md).
 As especificações e os planos de cada etapa ficam em [`docs/superpowers`](docs/superpowers).

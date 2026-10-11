@@ -6,7 +6,46 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 ## [Não lançado]
 
-- v6c2 — miniaturas com menu e arraste, Camadas, Destinos, rótulos de página.
+- v6d — comentários completos: inserir e substituir texto, nuvem, polígono, texto explicativo,
+  FDF/XFDF.
+
+## [0.16.0] — 2026-10-11 · Miniaturas, Camadas, Destinos e rótulos de página (v6c2)
+
+### Adicionado
+- **Painel Miniaturas:**
+  - seleção com `Ctrl` e `Shift`, arrastar para reordenar e `Delete` com confirmação;
+  - menu com as ações de página (girar, excluir, extrair, inserir, substituir, recortar),
+    Rótulos de página…, Copiar para ▸, Imprimir páginas… e Ampliar/Reduzir miniaturas.
+- **Copiar páginas entre PDFs:** arraste a miniatura até a aba de outro documento, ou use
+  Copiar para ▸. As anotações vão junto.
+- **Rótulos de página** (numeração lógica, como "i, ii, iii" no prefácio):
+  - diálogo Rótulos de página;
+  - a caixa de página mostra "iii (3 de 10)", e digitar um rótulo leva até a página;
+  - preferência "Usar números lógicos de página".
+- **Painel Destinos:** ordenar por nome (ordem natural) ou página, novo destino da vista atual,
+  ir até, definir destino, renomear no lugar e excluir.
+- **Painel Camadas:**
+  - árvore como no arquivo, com grupos e camadas travadas;
+  - o olho mostra ou esconde a camada só na tela (nunca vai para o arquivo);
+  - Redefinir para visibilidade inicial e Propriedades da camada (nome e estado padrão).
+
+### Corrigido
+- Edições num PDF com senha de abertura (marcadores, destinos, rótulos, camadas, propriedades)
+  saíam com os textos novos ilegíveis no arquivo salvo.
+- Mover, inserir ou excluir páginas não cria mais rótulos de página errados ("1, 2, 1, 2…").
+- O `Delete` agora funciona nos painéis Miniaturas e Marcadores.
+- Ajustes da v6c:
+  - soltar um marcador sobre o próprio pai;
+  - renomear sem mudar o nome não cria etapa do desfazer;
+  - a seleção de anexo segue o anexo;
+  - XMP sem caracteres de controle;
+  - a cópia de um anexo aberto é apagada ao fechar a aba.
+
+### Segurança
+- Leitura com tetos de rótulos, destinos e camadas: prefixo enorme, árvores que apontam para si
+  mesmas e milhares de nomes não travam o app.
+- Em documento assinado, o olho das camadas fica bloqueado, para não criar revisões depois da
+  assinatura.
 
 ## [0.15.2] — 2026-10-11 · Ícone do app no sistema
 

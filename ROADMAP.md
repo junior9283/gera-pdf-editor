@@ -20,6 +20,7 @@ A meta da versão **1.0.0**: todas as ferramentas do Adobe Acrobat Pro, com qual
 - [x] v6a — navegar e exibir: links, histórico de vistas, tela cheia, modo leitura, zoom até 6400 % (0.13.0)
 - [x] v6b — Mão, Zoom com marca, Preferências, Recortar/Colar, busca com opções (0.14.0)
 - [x] v6c — Propriedades editáveis, painéis Marcadores e Anexos (0.15.1)
+- [x] v6c2 — Miniaturas, Camadas, Destinos, rótulos de página, copiar páginas entre PDFs (0.16.0)
 
 ## Em andamento
 
@@ -28,11 +29,13 @@ A meta da versão **1.0.0**: todas as ferramentas do Adobe Acrobat Pro, com qual
 - [x] v6a — navegar e exibir (0.13.0)
 - [x] v6b — ferramentas de tela, preferências, menus e busca (0.14.0)
 - [x] v6c — Propriedades editáveis, painéis Marcadores e Anexos (0.15.0)
-- [ ] v6c2 — próxima: miniaturas com menu e arraste, Camadas, Destinos, rótulos de página, mover páginas entre PDFs
+- [x] v6c2 — Miniaturas, Camadas, Destinos, rótulos de página (0.16.0)
+- [ ] v6d — próxima: comentários completos
 
 ## Planejado
 
-- [ ] v6c2 — miniaturas com menu e arraste, Camadas, Destinos, rótulos de página, mover páginas entre PDFs
+- [ ] v6c3 — pendências dos painéis: visibilidade de camadas pela API do MuPDF (olho em PDF
+  assinado), /PageMode /UseOC abre Camadas, grupos exclusivos de camadas, Delete no painel Destinos
 - [ ] v6d — comentários completos: inserir/substituir texto, nuvem, polígono, texto explicativo, FDF/XFDF
 - [ ] v6e — formulários avançados: detecção de campos, Botão e Data, Formatar/Validar/Calcular
 - [ ] v6f — editar PDF: painel Formatar, ferramenta Link, plano de fundo
