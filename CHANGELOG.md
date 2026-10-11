@@ -6,7 +6,32 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 ## [Não lançado]
 
-- v6e — formulários avançados: detecção de campos, Botão e Data, Formatar/Validar/Calcular.
+- v6e2 — formulários: detecção de campos, Imagem e Código de barras, ações, alinhar e duplicar.
+
+## [0.19.0] — 2026-10-11 · Formatar, Validar e Calcular; Botão e Data; ordem de tabulação (v6e)
+
+### Adicionado
+- **Formatar, Validar e Calcular ao preencher**, como no Acrobat (sem executar JavaScript: o app
+  reconhece as chamadas que o próprio Acrobat grava):
+  - número, moeda, porcentagem, data, hora e máscaras (CEP, telefone, CPF, CNPJ…);
+  - o campo guarda o valor cru e mostra o formatado (ex.: "R$ 1.234,50");
+  - a digitação é filtrada (letras não entram num campo Número);
+  - um valor fora do intervalo é recusado, com o aviso do Acrobat;
+  - totais se calculam sozinhos: soma, média, produto, mínimo, máximo e notação simplificada
+    (`Preco * Quantidade`), na ordem de cálculo do documento;
+  - desfazer volta o preenchimento e os totais numa etapa.
+- **Preparar formulário:**
+  - novos campos **Botão** (rótulo e ação Redefinir formulário) e **Campo de data**;
+  - abas **Formatar**, **Validar** e **Calcular** nas propriedades, com exemplo ao vivo;
+  - menu **Ordem**: ordem de tabulação por linha, coluna ou estrutura, mover um campo na ordem,
+    números sobre os campos (`Shift+N`) e **Ordem de cálculo**.
+- **Preencher:** seletor de calendário ao lado do campo de data, botão Redefinir que limpa os
+  campos da ação e `Shift+L` para realçar os campos.
+
+### Corrigido
+- **Tema escuro:** as páginas ficam sempre brancas; só a interface escurece. A barra do
+  formulário ganhou cores próprias para o tema escuro.
+- O `Tab` depois de editar um campo de texto não reabre o campo anterior.
 
 ## [0.18.0] — 2026-10-11 · Carimbos personalizados, FDF/XFDF, Resumir comentários e agrupar (v6d2)
 
