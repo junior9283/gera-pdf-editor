@@ -61,11 +61,13 @@ fn add_rename_remove_and_undo() {
     assert_eq!(name.as_deref(), Some("intro"));
     d.edit_destination(DestOp::Rename {
         name: "intro".into(),
+        occurrence: 0,
         to: "inicio".into(),
     })
     .unwrap();
     d.edit_destination(DestOp::Set {
         name: "inicio".into(),
+        occurrence: 0,
         page: 2,
         at: None,
     })
@@ -76,6 +78,7 @@ fn add_rename_remove_and_undo() {
     assert!(names(&back).contains(&("inicio".to_string(), Some(2))));
     back.edit_destination(DestOp::Remove {
         name: "inicio".into(),
+        occurrence: 0,
     })
     .unwrap();
     assert!(!names(&back).iter().any(|(n, _)| n == "inicio"));
@@ -108,6 +111,7 @@ fn editing_an_old_dests_entry_moves_it_to_the_name_tree() {
     let mut d = mixed(&dir);
     d.edit_destination(DestOp::Rename {
         name: "antigo".into(),
+        occurrence: 0,
         to: "novo".into(),
     })
     .unwrap();
@@ -126,6 +130,7 @@ fn removing_a_missing_name_is_refused() {
     let mut d = mixed(&dir);
     let missing = d.edit_destination(DestOp::Remove {
         name: "nao-existe".into(),
+        occurrence: 0,
     });
     assert!(missing.is_err());
     assert!(!d.is_dirty());
@@ -151,4 +156,60 @@ fn many_names_in_both_places_are_read_quickly() {
     let list = d.destinations();
     assert!(list.len() >= 40_000);
     assert!(t.elapsed().as_secs() < 5, "{:?}", t.elapsed());
+}
+
+/// `cap1` na árvore (pág. 1) e também no `/Dests` antigo (pág. 2); `dup` duas vezes na árvore.
+fn shadowed(dir: &tempfile::TempDir) -> PdfDoc {
+    let objs = vec![
+        "<</Type/Catalog/Pages 2 0 R/Names<</Dests 5 0 R>>/Dests 6 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R 4 0 R]/Count 2>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>".to_string(),
+        "<</Names[(cap1)[3 0 R/Fit](dup)[3 0 R/Fit](dup)[4 0 R/Fit]]>>".to_string(),
+        "<</cap1[4 0 R/Fit]>>".to_string(),
+    ];
+    let path = dir.path().join("sombra.pdf");
+    std::fs::write(&path, pdf_from_objects(&objs)).unwrap();
+    PdfDoc::open(&path, None).unwrap()
+}
+
+#[test]
+fn removing_a_name_also_in_the_old_dict_does_not_bring_the_old_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut d = shadowed(&dir);
+    d.edit_destination(DestOp::Remove {
+        name: "cap1".into(),
+        occurrence: 0,
+    })
+    .unwrap();
+    assert!(
+        !names(&d).iter().any(|(n, _)| n == "cap1"),
+        "{:?}",
+        names(&d)
+    );
+}
+
+#[test]
+fn renaming_one_of_two_equal_names_keeps_the_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut d = shadowed(&dir);
+    let dups: Vec<_> = d
+        .destinations()
+        .into_iter()
+        .filter(|x| x.name == "dup")
+        .collect();
+    assert_eq!(dups.len(), 2);
+    let second = dups.iter().find(|x| x.page == Some(1)).unwrap().occurrence;
+    d.edit_destination(DestOp::Rename {
+        name: "dup".into(),
+        occurrence: second,
+        to: "x".into(),
+    })
+    .unwrap();
+    let n = names(&d);
+    assert!(n.contains(&("x".to_string(), Some(1))), "{n:?}");
+    assert!(
+        n.contains(&("dup".to_string(), Some(0))),
+        "o outro dup continua: {n:?}"
+    );
 }

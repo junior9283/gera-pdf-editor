@@ -74,22 +74,29 @@ pub enum DestAction {
     /// Novo destino na vista atual.
     New,
     /// Definir destino: a vista atual.
-    SetHere(String),
+    SetHere(DestKey),
     Rename {
-        name: String,
+        key: DestKey,
         to: String,
     },
-    Remove(String),
+    Remove(DestKey),
+}
+
+/// Um destino: o nome e qual dos destinos com esse nome (arquivos podem repetir nomes).
+pub type DestKey = (String, usize);
+
+fn key_of(d: &DestInfo) -> DestKey {
+    (d.name.clone(), d.occurrence)
 }
 
 #[derive(Default)]
 pub struct DestinationsPanel {
     pub sort: Sort,
-    selected: Option<String>,
+    selected: Option<DestKey>,
     /// Ordem calculada (ordem, índices), refeita só quando a lista ou a ordem mudam.
     order: Option<(Sort, Vec<usize>)>,
-    /// Renomeando: (nome, texto).
-    renaming: Option<(String, String)>,
+    /// Renomeando: (destino, texto).
+    renaming: Option<(DestKey, String)>,
 }
 
 impl DestinationsPanel {
@@ -99,9 +106,9 @@ impl DestinationsPanel {
     }
 
     /// Renomear o destino recém-criado (como no Acrobat, o nome vem selecionado para editar).
-    pub fn rename(&mut self, name: String) {
-        self.selected = Some(name.clone());
-        self.renaming = Some((name.clone(), name));
+    pub fn rename(&mut self, key: DestKey) {
+        self.selected = Some(key.clone());
+        self.renaming = Some((key.clone(), key.0));
     }
 
     pub fn show(
@@ -156,8 +163,8 @@ impl DestinationsPanel {
             |ui, rows| {
                 for d in &shown[rows] {
                     ui.horizontal(|ui| {
-                        if let Some((name, text)) =
-                            self.renaming.as_mut().filter(|(n, _)| *n == d.name)
+                        if let Some((key, text)) =
+                            self.renaming.as_mut().filter(|(k, _)| *k == key_of(d))
                         {
                             let edit = ui.text_edit_singleline(text);
                             edit.request_focus();
@@ -166,10 +173,10 @@ impl DestinationsPanel {
                             if esc {
                                 self.renaming = None;
                             } else if edit.lost_focus() || enter {
-                                if let Some(to) = crate::bookmarks::renamed(name, text) {
-                                    self.selected = Some(to.clone());
+                                if let Some(to) = crate::bookmarks::renamed(&key.0, text) {
+                                    self.selected = Some((to.clone(), 0));
                                     out.push(DestAction::Rename {
-                                        name: name.clone(),
+                                        key: key.clone(),
                                         to,
                                     });
                                 }
@@ -177,14 +184,14 @@ impl DestinationsPanel {
                             }
                             return;
                         }
-                        let selected = self.selected.as_deref() == Some(d.name.as_str());
+                        let selected = self.selected.as_ref() == Some(&key_of(d));
                         let page = d.page.map_or("—".into(), |p| (p + 1).to_string());
                         let row = ui.add(egui::Button::selectable(
                             selected,
                             format!("{}  ·  {page}", safe_display(&d.name)),
                         ));
                         if row.clicked() {
-                            self.selected = Some(d.name.clone());
+                            self.selected = Some(key_of(d));
                         }
                         let go = |out: &mut Vec<DestAction>| {
                             if let Some(page) = d.page {
@@ -195,7 +202,7 @@ impl DestinationsPanel {
                             go(&mut out);
                         }
                         row.context_menu(|ui| {
-                            self.selected = Some(d.name.clone());
+                            self.selected = Some(key_of(d));
                             if ui.button("Ir para o destino").clicked() {
                                 go(&mut out);
                                 ui.close();
@@ -204,15 +211,15 @@ impl DestinationsPanel {
                                 return;
                             }
                             if ui.button("Definir destino").clicked() {
-                                out.push(DestAction::SetHere(d.name.clone()));
+                                out.push(DestAction::SetHere(key_of(d)));
                                 ui.close();
                             }
                             if ui.button("Renomear").clicked() {
-                                self.rename(d.name.clone());
+                                self.rename(key_of(d));
                                 ui.close();
                             }
                             if ui.button("Excluir").clicked() {
-                                out.push(DestAction::Remove(d.name.clone()));
+                                out.push(DestAction::Remove(key_of(d)));
                                 ui.close();
                             }
                         });
@@ -231,6 +238,7 @@ mod tests {
     fn d(name: &str, page: Option<i32>) -> DestInfo {
         DestInfo {
             name: name.into(),
+            occurrence: 0,
             page,
             at: None,
         }

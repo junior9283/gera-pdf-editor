@@ -18,6 +18,8 @@ const MAX_NAME_CHARS: usize = 256;
 #[derive(Debug, Clone, PartialEq)]
 pub struct DestInfo {
     pub name: String,
+    /// Qual dos destinos com este nome (arquivos podem repetir nomes): 0, 1, 2…
+    pub occurrence: usize,
     pub page: Option<i32>,
     pub at: Option<(f32, f32)>,
 }
@@ -33,17 +35,32 @@ pub enum DestOp {
     },
     Rename {
         name: String,
+        occurrence: usize,
         to: String,
     },
     /// Aponta o destino para outra página/ponto ("Definir destino").
     Set {
         name: String,
+        occurrence: usize,
         page: i32,
         at: Option<(f32, f32)>,
     },
     Remove {
         name: String,
+        occurrence: usize,
     },
+}
+
+/// Qual ocorrência de cada nome é cada entrada (na ordem da lista).
+fn occurrences<'a>(names: impl Iterator<Item = &'a str>) -> Vec<usize> {
+    let mut count: std::collections::HashMap<&str, usize> = Default::default();
+    names
+        .map(|n| {
+            let c = count.entry(n).or_default();
+            *c += 1;
+            *c - 1
+        })
+        .collect()
 }
 
 /// De onde veio o destino.
@@ -110,14 +127,21 @@ impl PdfDoc {
     /// Destinos nomeados em ordem de nome, com página e ponto.
     pub fn destinations(&self) -> Vec<DestInfo> {
         let mut pages = PageCache::new();
-        let mut out: Vec<DestInfo> = self
-            .named_dests()
+        let all = self.named_dests();
+        let occ = occurrences(all.iter().map(|(n, _, _)| n.as_str()));
+        let mut out: Vec<DestInfo> = all
             .into_iter()
-            .map(|(name, value, _)| {
+            .zip(occ)
+            .map(|((name, value, _), occurrence)| {
                 let (page, at) = self
                     .dest_target(&dest_of(&value), &mut pages)
                     .unwrap_or((None, None));
-                DestInfo { name, page, at }
+                DestInfo {
+                    name,
+                    occurrence,
+                    page,
+                    at,
+                }
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -127,15 +151,27 @@ impl PdfDoc {
     /// Aplica a edição (uma etapa do desfazer). `Add` devolve o nome que o destino recebeu.
     pub fn edit_destination(&mut self, op: DestOp) -> Result<Option<String>> {
         let existing = self.named_dests();
-        let exists = |name: &str| existing.iter().any(|(n, _, _)| n == name);
+        let occ = occurrences(existing.iter().map(|(n, _, _)| n.as_str()));
+        let exists = |name: &str, k: usize| {
+            existing
+                .iter()
+                .zip(&occ)
+                .any(|((n, _, _), &o)| n == name && o == k)
+        };
         // confere antes de mexer: nada muda num pedido inválido
         match &op {
             DestOp::Add { page, .. } | DestOp::Set { page, .. } => self.check_page(*page)?,
             _ => {}
         }
         match &op {
-            DestOp::Rename { name, .. } | DestOp::Set { name, .. } | DestOp::Remove { name }
-                if !exists(name) =>
+            DestOp::Rename {
+                name, occurrence, ..
+            }
+            | DestOp::Set {
+                name, occurrence, ..
+            }
+            | DestOp::Remove { name, occurrence }
+                if !exists(name, *occurrence) =>
             {
                 return Err(refused("destino não encontrado"));
             }
@@ -156,15 +192,22 @@ impl PdfDoc {
             .map(|(n, v, _)| (n.clone(), v.clone()))
             .collect();
         let taken: Vec<String> = existing.iter().map(|(n, _, _)| n.clone()).collect();
-        // o destino editado sai de onde estava (do dicionário antigo, passa para a árvore)
-        let mut drop_old = None;
-        let mut take_out = |tree: &mut Vec<(String, PdfObject)>, name: &str| {
-            tree.retain(|(n, _)| n != name);
-            let old = existing
+        // tira só aquela ocorrência (da árvore, ou a do dicionário antigo) e devolve o valor
+        let mut removed = Vec::new();
+        let mut take_out = |tree: &mut Vec<(String, PdfObject)>, name: &str, k: usize| {
+            removed.push(name.to_owned());
+            let at = tree
                 .iter()
-                .any(|(n, _, s)| n == name && *s == Source::OldDict);
-            if old {
-                drop_old = Some(name.to_owned());
+                .enumerate()
+                .filter(|(_, (n, _))| n == name)
+                .nth(k)
+                .map(|(i, _)| i);
+            match at {
+                Some(i) => Some(tree.remove(i).1),
+                None => existing
+                    .iter()
+                    .find(|(n, _, s)| n == name && *s == Source::OldDict)
+                    .map(|(_, v, _)| v.clone()),
             }
         };
         let mut created = None;
@@ -175,30 +218,40 @@ impl PdfDoc {
                 tree.push((name.clone(), self.dest_array(page, at)?));
                 created = Some(name);
             }
-            DestOp::Rename { name, to } => {
+            DestOp::Rename {
+                name,
+                occurrence,
+                to,
+            } => {
                 let to = valid_name(&to)?;
                 if to != name && taken.contains(&to) {
                     return Err(refused("já existe um destino com esse nome"));
                 }
-                // edit_destination já conferiu que o nome existe
-                let value = existing
-                    .iter()
-                    .find(|(n, _, _)| *n == name)
-                    .map(|(_, v, _)| v.clone());
-                take_out(&mut tree, &name);
+                let value = take_out(&mut tree, &name, occurrence);
                 tree.extend(value.map(|v| (to, v)));
             }
-            DestOp::Set { name, page, at } => {
+            DestOp::Set {
+                name,
+                occurrence,
+                page,
+                at,
+            } => {
                 let dest = self.dest_array(page, at)?;
-                take_out(&mut tree, &name);
+                take_out(&mut tree, &name, occurrence);
                 tree.push((name, dest));
             }
-            DestOp::Remove { name } => take_out(&mut tree, &name),
+            DestOp::Remove { name, occurrence } => {
+                take_out(&mut tree, &name, occurrence);
+            }
         }
         let mut catalog = self.inner.catalog()?;
-        if let Some(name) = drop_old {
-            if let Some(mut old) = get(&catalog, "Dests") {
-                old.dict_delete(name.as_str())?;
+        // nome que não ficou mais na árvore sai também do dicionário antigo (senão a entrada
+        // antiga, que a árvore escondia, voltaria a valer)
+        if let Some(mut old) = get(&catalog, "Dests").filter(|d| d.is_dict().unwrap_or(false)) {
+            for name in removed {
+                if !tree.iter().any(|(n, _)| *n == name) {
+                    old.dict_delete(name.as_str())?;
+                }
             }
         }
         tree.sort_by(|a, b| a.0.cmp(&b.0));

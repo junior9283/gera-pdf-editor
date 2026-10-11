@@ -1403,7 +1403,7 @@ impl DocTab {
                     self.history = history;
                     // destino novo: o nome vem pronto para editar (como no Acrobat)
                     if let Some(name) = created {
-                        self.destinations_panel.rename(name);
+                        self.destinations_panel.rename((name, 0));
                     }
                 }
                 Response::AttachmentWritten { dest, open: true } => {
@@ -2599,12 +2599,24 @@ impl DocTab {
                     at,
                 }
             }
-            DestAction::SetHere(name) => {
+            DestAction::SetHere((name, occurrence)) => {
                 let (page, at) = self.view_target();
-                DestOp::Set { name, page, at }
+                DestOp::Set {
+                    name,
+                    occurrence,
+                    page,
+                    at,
+                }
             }
-            DestAction::Rename { name, to } => DestOp::Rename { name, to },
-            DestAction::Remove(name) => DestOp::Remove { name },
+            DestAction::Rename {
+                key: (name, occurrence),
+                to,
+            } => DestOp::Rename {
+                name,
+                occurrence,
+                to,
+            },
+            DestAction::Remove((name, occurrence)) => DestOp::Remove { name, occurrence },
         };
         if self.can_modify_file() {
             self.worker.send(Request::Destination(op));
