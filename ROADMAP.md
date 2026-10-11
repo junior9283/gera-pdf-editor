@@ -23,6 +23,7 @@ A meta da versão **1.0.0**: todas as ferramentas do Adobe Acrobat Pro, com qual
 - [x] v6c2 — Miniaturas, Camadas, Destinos, rótulos de página, copiar páginas entre PDFs (0.16.0)
 - [x] v6d — ferramentas de comentário: inserir e substituir texto, nuvem, polígono, texto explicativo,
   borracha, anexar arquivo (0.17.0)
+- [x] v6d2 — carimbos personalizados, FDF/XFDF, Resumir comentários, agrupar (0.18.0)
 
 ## Em andamento
 
@@ -33,13 +34,13 @@ A meta da versão **1.0.0**: todas as ferramentas do Adobe Acrobat Pro, com qual
 - [x] v6c — Propriedades editáveis, painéis Marcadores e Anexos (0.15.0)
 - [x] v6c2 — Miniaturas, Camadas, Destinos, rótulos de página (0.16.0)
 - [x] v6d — ferramentas de comentário (0.17.0)
-- [ ] v6d2 — próxima: carimbos personalizados, FDF/XFDF, Resumir comentários, agrupar
+- [x] v6d2 — carimbos personalizados, FDF/XFDF, Resumir comentários, agrupar (0.18.0)
+- [ ] v6e — próxima: formulários avançados
 
 ## Planejado
 
 - [ ] v6c3 — pendências dos painéis: visibilidade de camadas pela API do MuPDF (olho em PDF
   assinado), /PageMode /UseOC abre Camadas, grupos exclusivos de camadas, Delete no painel Destinos
-- [ ] v6d2 — carimbos personalizados, exportar e importar FDF/XFDF, Resumir comentários, agrupar
 - [ ] v6e — formulários avançados: detecção de campos, Botão e Data, Formatar/Validar/Calcular
 - [ ] v6f — editar PDF: painel Formatar, ferramenta Link, plano de fundo
 - [ ] v6g — converter: criar de Office, exportar Excel/PowerPoint/HTML

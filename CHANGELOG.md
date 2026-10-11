@@ -6,7 +6,37 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 ## [Não lançado]
 
-- v6d2 — carimbos personalizados, exportar e importar FDF/XFDF, Resumir comentários e agrupar.
+- v6e — formulários avançados: detecção de campos, Botão e Data, Formatar/Validar/Calcular.
+
+## [0.18.0] — 2026-10-11 · Carimbos personalizados, FDF/XFDF, Resumir comentários e agrupar (v6d2)
+
+### Adicionado
+- **Carimbos personalizados.** No menu do Carimbo, use **Carimbos personalizados ▸ Criar…**:
+  - escolha um PDF (e a página) ou uma imagem, a categoria e o nome;
+  - as suas categorias aparecem no menu, ao lado de Dinâmicos e Padrão comercial;
+  - **Gerenciar…** renomeia, muda de categoria e exclui.
+- **Exportar e importar comentários** (menu "···" do painel Comentários):
+  - exportar todos, ou o selecionado com as respostas, para **FDF** ou **XFDF**;
+  - importar de FDF, de XFDF ou de outro PDF, numa etapa do desfazer, com aviso dos ignorados
+    (página inexistente ou tipo desconhecido).
+- **Resumir comentários** num PDF novo, que abre numa aba:
+  - os 4 layouts do Acrobat: linhas de conexão em páginas separadas ou únicas, números de
+    sequência, ou somente comentários;
+  - ordem por página, autor, data ou tipo;
+  - só os do filtro do painel, intervalo de páginas, tamanho da fonte e páginas sem comentários.
+- **Agrupar e desagrupar:**
+  - `Ctrl`+clique junta comentários à seleção e o menu de contexto oferece **Agrupar**;
+  - o grupo se move e se exclui junto e aparece como um item no painel;
+  - excluir vários selecionados é uma etapa só.
+
+### Corrigido
+- Ajustes da v6d:
+  - polígono só com vértices inválidos é recusado;
+  - Substituir texto não deixa cursor solto;
+  - a borracha preserva traços que não tocou;
+  - anexar um arquivo especial (FIFO) não trava;
+  - grupos em ciclo de outros programas aparecem no painel.
+- Comentários importados nunca trazem ações (JavaScript, abrir programa) nem conteúdo multimídia.
 
 ## [0.17.0] — 2026-10-11 · Ferramentas de comentário (v6d)
 
