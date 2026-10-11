@@ -210,6 +210,12 @@ impl GeraApp {
         if let Some(doc) = self.doc_at(old) {
             doc.suspend();
         }
+        // na tela cheia, a aba que vem para a frente também fica em apresentação
+        if self.fullscreen {
+            if let Some(doc) = self.doc_at(new) {
+                doc.enter_presentation();
+            }
+        }
         if let Some(p) = self.tabs.doc_path(new) {
             self.last_doc = Some(p.to_path_buf());
         } else if new == HOME {
@@ -303,7 +309,7 @@ impl GeraApp {
         let active = self.tabs.active();
         // arquivos a abrir em abas novas (depois do laço: abrir mexe na lista de abas)
         let mut to_open = Vec::new();
-        let mut full_screen = false;
+        let mut full_screen = None;
         let mut to_run = Vec::new();
         for tab in (FIXED..self.tabs.len()).rev() {
             let Some(i) = self.tabs.doc_index(tab) else {
@@ -339,7 +345,10 @@ impl GeraApp {
                     }
                     DocEvent::OpenFile(path) => to_open.push(path),
                     DocEvent::NeedSaveAs => self.dialogs.save_as(ctx, self.docs[i].path.clone()),
-                    DocEvent::FullScreen => full_screen |= tab == active && !self.fullscreen,
+                    DocEvent::FullScreen if tab == active && !self.fullscreen => {
+                        full_screen = Some(tab)
+                    }
+                    DocEvent::FullScreen => {}
                     DocEvent::Run(cmd) => to_run.push(cmd),
                     DocEvent::OpenLink(target) => {
                         use crate::links::Outcome;
@@ -361,9 +370,9 @@ impl GeraApp {
         for cmd in to_run {
             self.run(ctx, cmd);
         }
-        if full_screen {
+        if let Some(tab) = full_screen {
             // o arquivo pediu (/PageMode /FullScreen): pergunta antes, como o Acrobat
-            self.full_screen_request = Some(Default::default());
+            self.full_screen_request = Some(crate::shell::reading::FullScreenRequest::for_tab(tab));
         }
         self.poll_creating(ctx);
         if let Some(picked) = self.dialogs.poll() {
@@ -899,17 +908,30 @@ impl eframe::App for GeraApp {
             for cmd in commands::from_keyboard(ctx, self.prefs.single_key) {
                 self.run(ctx, cmd);
             }
-            // Esc sai da tela cheia, depois do modo leitura
-            if (self.fullscreen || self.reading)
+            // Esc: primeiro as janelas abertas, depois sair da tela cheia e do modo leitura
+            use crate::shell::reading::{escape_target, Escape};
+            let app_window = self.link_warning.is_some()
+                || self.full_screen_request.is_some()
+                || self.preferences.is_some();
+            let doc_window = self.active_doc().is_some_and(|d| d.has_modal());
+            let target = escape_target(app_window || doc_window, self.fullscreen, self.reading);
+            // as janelas da aba tratam o próprio Esc
+            let ours = target != Escape::Pass && !(target == Escape::CloseWindow && !app_window);
+            if ours
                 && !ctx.egui_wants_keyboard_input()
                 && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
             {
-                let exit = if self.fullscreen {
-                    Command::FullScreen
-                } else {
-                    Command::ReadMode
-                };
-                self.run(ctx, exit);
+                match target {
+                    Escape::CloseWindow => {
+                        // como Bloquear, Não e Cancelar
+                        self.link_warning = None;
+                        self.full_screen_request = None;
+                        self.preferences = None;
+                    }
+                    Escape::LeaveFullScreen => self.run(ctx, Command::FullScreen),
+                    Escape::LeaveReading => self.run(ctx, Command::ReadMode),
+                    Escape::Pass => {}
+                }
             }
             if let Some(doc) = self.active_doc() {
                 doc.handle_input(ctx);
@@ -1005,6 +1027,12 @@ impl eframe::App for GeraApp {
         }
         self.link_warning_window(ui.ctx());
         self.preferences_window(ui.ctx());
+        // a pergunta é da aba que pediu: se outra veio para a frente, some
+        let active = self.tabs.active();
+        self.full_screen_request = self
+            .full_screen_request
+            .take()
+            .filter(|r| r.belongs_to(active));
         let full = self
             .full_screen_request
             .as_mut()

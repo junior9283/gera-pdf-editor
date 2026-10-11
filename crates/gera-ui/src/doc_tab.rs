@@ -803,6 +803,34 @@ impl DocTab {
         self.jump_to = view.go_to(page as i32, None);
     }
 
+    /// Campo da página (número começando em 1): digitar é um salto; arrastar o número só entra no
+    /// histórico uma vez, de onde o arraste começou.
+    pub(crate) fn page_field(&mut self, page: usize, how: PageField) {
+        let target = page as i32 - 1;
+        match how {
+            PageField::DragStart => {
+                if let Some(view) = self.view.as_ref() {
+                    let here = view.view_entry(self.last.scroll_y, self.last.current_page);
+                    self.history_views.push(here);
+                }
+            }
+            PageField::Dragging => self.go(target, None, false),
+            PageField::Typed => self.jump(target, None),
+        }
+    }
+
+    /// Pedidos de foco (Ir para página, Zoom para) que nenhum campo atendeu neste quadro (barra
+    /// escondida na tela cheia ou no modo leitura) não ficam esperando.
+    pub(crate) fn drop_unused_focus(&mut self) {
+        self.focus_page = false;
+        self.focus_zoom = false;
+    }
+
+    /// Alguma janela da aba que usa o Esc está aberta.
+    pub(crate) fn has_modal(&self) -> bool {
+        self.revert_ask || self.edit.fill.dialog.is_some() || self.prepare.props.is_some()
+    }
+
     /// Vai à página `page` agora, ou assim que o documento abrir.
     pub(crate) fn show_page(&mut self, page: i32) {
         if self.view.is_some() {
@@ -2118,6 +2146,7 @@ impl DocTab {
         if let Some(view) = self.view.as_mut() {
             view.end_frame();
         }
+        self.drop_unused_focus();
     }
 
     /// Conteúdo do painel esquerdo; clicar leva à página.
@@ -2188,8 +2217,15 @@ impl DocTab {
             } else {
                 DocCommand::PrevPage
             });
+        } else if go.drag_started() {
+            self.page_field(page, PageField::DragStart);
         } else if go.changed() {
-            self.jump(page as i32 - 1, None);
+            let how = if go.dragged() {
+                PageField::Dragging
+            } else {
+                PageField::Typed
+            };
+            self.page_field(page, how);
         }
     }
 
@@ -2896,6 +2932,14 @@ fn page_menu(ui: &mut egui::Ui, tool: app_state::tools::Tool) -> Option<Command>
     picked
 }
 
+/// Como o campo da página mudou.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PageField {
+    DragStart,
+    Dragging,
+    Typed,
+}
+
 /// Vista de abertura vinda das Preferências.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OpenView {
@@ -3211,6 +3255,32 @@ mod tests {
         assert_eq!(tab.edit.tool, Tool::Underline);
         tab.run(&ctx, DocCommand::Tool(Tool::Hand));
         assert_eq!(tab.edit.tool, Tool::Hand);
+    }
+
+    #[test]
+    fn dragging_the_page_number_records_one_view() {
+        let mut tab = tab_with_pages(60);
+        tab.page_field(1, PageField::DragStart);
+        for p in 2..50 {
+            tab.page_field(p, PageField::Dragging);
+        }
+        tab.page_field(50, PageField::Dragging);
+        // uma vista para trás (de onde o arraste começou), não 50
+        let e = tab.view.as_ref().unwrap().view_entry(0.0, 0);
+        assert!(tab.history_views.back(e).is_some());
+        assert!(
+            tab.history_views.back(e).is_none(),
+            "só uma vista no histórico"
+        );
+    }
+
+    #[test]
+    fn unused_focus_requests_do_not_linger() {
+        let mut tab = tab_with_pages(1);
+        tab.focus_zoom = true;
+        tab.focus_page = true;
+        tab.drop_unused_focus();
+        assert!(!tab.focus_zoom && !tab.focus_page);
     }
 
     #[test]
