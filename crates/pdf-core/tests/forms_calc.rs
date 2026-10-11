@@ -1,12 +1,12 @@
 use pdf_core::{FieldCalc, FieldFormat, FieldInfo, FieldValidate, PdfDoc};
 
-/// Formulário como o Acrobat grava: Preço (moeda), Quantidade (1 a 10), Total = Preço × Qtd
-/// (somente leitura, na ordem de cálculo) e Desconto = Total × 0,1.
 /// O valor como o Formatar do campo o mostra.
 fn shown(f: &pdf_core::FieldInfo) -> String {
     pdf_core::format_value(&f.format, &f.value).map_or_else(|_| f.value.clone(), |f| f.text)
 }
 
+/// Formulário como o Acrobat grava: Preço (moeda, padrão 1500), Quantidade (1 a 10), Total =
+/// Preço × Qtd (somente leitura, na ordem de cálculo) e Desconto = Total × 0,1.
 fn order_form(dir: &tempfile::TempDir, total: &str) -> std::path::PathBuf {
     let field = |n: usize, name: &str, y: i32, aa: &str, more: &str| {
         format!(
@@ -29,7 +29,7 @@ fn order_form(dir: &tempfile::TempDir, total: &str) -> std::path::PathBuf {
         "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
         "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[4 0 R 5 0 R 6 0 R 7 0 R]>>"
             .to_string(),
-        field(4, "Preco", 700, &money, "/V(1500)"),
+        field(4, "Preco", 700, &money, "/V(1500)/DV(1500)"),
         field(
             5,
             "Qtd",
@@ -317,4 +317,153 @@ fn a_huge_calculation_cycle_finishes_quickly() {
     let t = std::time::Instant::now();
     d.set_field(0, id, "x").unwrap();
     assert!(t.elapsed().as_secs() < 10, "{:?}", t.elapsed());
+}
+
+/// PDF com estes objetos a partir do 4 (1 a 3: catálogo com /Fields, árvore e página com
+/// /Annots); a fonte Helv é o último objeto.
+fn form_with(
+    dir: &tempfile::TempDir,
+    fields: &str,
+    annots: &str,
+    objs: &[&str],
+) -> std::path::PathBuf {
+    let font = 4 + objs.len();
+    let mut all = vec![
+        format!(
+            "<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[{fields}]/DA(/Helv 0 Tf 0 g)\
+             /DR<</Font<</Helv {font} 0 R>>>>>>>>"
+        ),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        format!("<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[{annots}]>>"),
+    ];
+    all.extend(objs.iter().map(|o| o.to_string()));
+    all.push("<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>".into());
+    let path = dir.path().join("form.pdf");
+    std::fs::write(&path, pdf_core::sample::pdf_from_objects(&all)).unwrap();
+    path
+}
+
+const W: &str = "/Type/Annot/Subtype/Widget/P 3 0 R/DA(/Helv 10 Tf 0 g)/F 4";
+
+#[test]
+fn reset_keeps_formatting_and_recalculates() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = order_form(&dir, "Preco * Qtd");
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    d.set_field(0, field(&d, "Qtd").id, "3").unwrap();
+    assert_eq!(field(&d, "Total").value, "4500");
+    d.reset_form().unwrap();
+    assert_eq!(field(&d, "Preco").value, "1500", "volta ao padrão");
+    assert_eq!(
+        field(&d, "Total").value,
+        "0",
+        "o Acrobat recalcula depois de limpar"
+    );
+    d.save(&path).unwrap();
+    assert!(appearance(&path, "Preco").contains("(R$ 1.500,00)"));
+    assert!(appearance(&path, "Total").contains("(R$ 0,00)"));
+}
+
+#[test]
+fn moving_or_reformatting_keeps_the_page_right() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = order_form(&dir, "Preco * Qtd");
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let preco = field(&d, "Preco");
+    let mut rect = preco.rect;
+    rect.x1 += 40.0;
+    d.move_field(0, preco.id, rect).unwrap();
+    d.save(&path).unwrap();
+    assert!(
+        appearance(&path, "Preco").contains("(R$ 1.500,00)"),
+        "depois de redimensionar"
+    );
+    let mut props = d.field_props(0, preco.id).unwrap();
+    props.format = FieldFormat::None;
+    d.set_field_props(0, preco.id, &props).unwrap();
+    d.save(&path).unwrap();
+    let ap = appearance(&path, "Preco");
+    assert!(
+        ap.contains("(1500)") && !ap.contains("R$"),
+        "sem Formatar: {ap}"
+    );
+}
+
+#[test]
+fn sum_of_a_group_name_adds_its_children() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = W;
+    let path = form_with(
+        &dir,
+        "4 0 R 7 0 R",
+        "5 0 R 6 0 R 7 0 R",
+        &[
+            "<</FT/Tx/T(Item)/Kids[5 0 R 6 0 R]>>",
+            &format!("<<{w}/Parent 4 0 R/T(0)/Rect[100 700 300 720]/V(2)>>"),
+            &format!("<<{w}/Parent 4 0 R/T(1)/Rect[100 650 300 670]/V(3)>>"),
+            &format!(
+                "<<{w}/FT/Tx/T(Total)/Rect[100 600 300 620]\
+                 /AA<</C<</S/JavaScript/JS(AFSimple_Calculate(\"SUM\", new Array (\"Item\"));)>>>>>>"
+            ),
+        ],
+    );
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    d.set_field(0, field(&d, "Item.0").id, "4").unwrap();
+    assert_eq!(
+        field(&d, "Total").value,
+        "7",
+        "Item soma Item.0 e Item.1, como no Acrobat"
+    );
+}
+
+#[test]
+fn reset_button_clears_only_its_fields() {
+    for (flags, a, b) in [("", "", "y"), ("/Flags 1", "x", "")] {
+        let dir = tempfile::tempdir().unwrap();
+        let w = W;
+        let path = form_with(
+            &dir,
+            "4 0 R 5 0 R 6 0 R",
+            "4 0 R 5 0 R 6 0 R",
+            &[
+                &format!("<<{w}/FT/Tx/T(A)/Rect[100 700 300 720]/V(x)>>"),
+                &format!("<<{w}/FT/Tx/T(B)/Rect[100 650 300 670]/V(y)>>"),
+                &format!(
+                    "<<{w}/FT/Btn/Ff 65536/T(Limpar)/Rect[100 600 200 620]\
+                     /A<</S/ResetForm/Fields[(A)]{flags}>>>>"
+                ),
+            ],
+        );
+        let mut d = PdfDoc::open(&path, None).unwrap();
+        d.press_reset(0, field(&d, "Limpar").id).unwrap();
+        assert_eq!(
+            (field(&d, "A").value.as_str(), field(&d, "B").value.as_str()),
+            (a, b),
+            "{flags}"
+        );
+    }
+}
+
+#[test]
+fn a_huge_result_is_still_a_number() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut d = PdfDoc::open(&order_form(&dir, "Preco * Qtd"), None).unwrap();
+    d.set_field(0, field(&d, "Preco").id, &format!("1{}", "0".repeat(300)))
+        .unwrap();
+    d.set_field(0, field(&d, "Qtd").id, "10").unwrap();
+    let total = field(&d, "Total").value;
+    assert!(total.parse::<f64>().is_ok_and(f64::is_finite), "{total}");
+}
+
+#[test]
+fn an_invalid_expression_is_not_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut d = PdfDoc::open(&order_form(&dir, "Preco * Qtd"), None).unwrap();
+    let id = field(&d, "Desconto").id;
+    let mut props = d.field_props(0, id).unwrap();
+    props.calc = FieldCalc::Sfn("Preco *".into());
+    assert!(
+        d.set_field_props(0, id, &props).is_err(),
+        "o Acrobat recusa a expressão"
+    );
 }

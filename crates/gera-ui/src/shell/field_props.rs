@@ -685,6 +685,13 @@ impl CalcDraft {
                 .hint_text("Preco * Quantidade")
                 .desired_width(260.0),
         );
+        let expr = self.sfn.trim();
+        if self.mode == CalcMode::Sfn && !expr.is_empty() && !pdf_core::sfn_ok(expr) {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                "A expressão não é válida: use nomes de campos, números, + - * / e parênteses.",
+            );
+        }
     }
 }
 

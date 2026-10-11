@@ -295,7 +295,7 @@ pub(crate) fn tab_order_of(page: &PdfObject) -> Result<TabOrder> {
 }
 
 /// Nome completo do campo (os /T do nó e dos pais, com ponto).
-fn full_name(head: &PdfObject) -> Result<String> {
+pub(crate) fn full_name(head: &PdfObject) -> Result<String> {
     let mut parts = Vec::new();
     let mut node = Some(head.try_clone()?);
     for _ in 0..32 {
@@ -439,12 +439,14 @@ impl PdfDoc {
     }
 
     /// Redesenha os campos da página (aparências geradas pelo MuPDF).
-    fn refresh_widgets(&self, page: i32) -> Result<()> {
+    /// `plain`: o widget cujo Formatar acabou de mudar (redesenhado mesmo sem Formatar).
+    fn refresh_widgets(&mut self, page: i32, plain: Option<i32>) -> Result<()> {
         for mut w in self.inner.load_pdf_page(page)?.widgets() {
             // um campo defeituoso de outro programa fica como está; os nossos são redesenhados
             let _ = w.update();
         }
-        Ok(())
+        // o MuPDF redesenha com o /V cru: os campos com Formatar voltam a mostrar o formatado
+        self.redraw_values(Some(page), plain)
     }
 
     /// Cria um campo `kind` chamado `name` no retângulo; devolve o id. Botões de opção com o nome
@@ -562,7 +564,7 @@ impl PdfDoc {
         }
         annot.update()?;
         page_ref.update()?;
-        self.refresh_widgets(page)?;
+        self.refresh_widgets(page, None)?;
         Ok(id)
     }
 
@@ -710,6 +712,13 @@ impl PdfDoc {
         }
         if p.validate != before.validate && p.validate != FieldValidate::Custom {
             set_aa(&mut self.inner, head, "V", &validate_script(&p.validate))?;
+        }
+        if let FieldCalc::Sfn(expr) = &p.calc {
+            if p.calc != before.calc && !crate::form_scripts::sfn_ok(expr) {
+                return Err(crate::error::refused(
+                    "A expressão de cálculo não é válida.",
+                ));
+            }
         }
         if p.calc != before.calc && p.calc != FieldCalc::Custom {
             set_aa(&mut self.inner, head, "C", &calc_script(&p.calc))?;
@@ -895,7 +904,7 @@ impl PdfDoc {
             _ => {}
         }
         head.dict_put("Ff", int(flags)?)?;
-        self.refresh_widgets(page)
+        self.refresh_widgets(page, Some(id))
     }
 
     /// Botão de opção `id` sai do grupo atual (que some se ficar vazio; o valor dele deixa de
@@ -1040,7 +1049,7 @@ impl PdfDoc {
             let mut a = d.widget(page, id)?.into_annotation();
             a.set_rect(Rect::from(rect))?;
             a.update()?;
-            d.refresh_widgets(page)
+            d.refresh_widgets(page, None)
         })
     }
 

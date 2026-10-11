@@ -126,6 +126,11 @@ pub enum Request {
     },
     /// Limpar formulário (valores padrão).
     ResetForm,
+    /// Clique num botão com a ação Redefinir formulário (só os campos da ação).
+    PressReset {
+        page: i32,
+        id: i32,
+    },
     /// Preparar formulário: criar, editar, mover ou excluir um campo.
     Prepare(crate::PrepareOp),
     /// Assina digitalmente e grava o arquivo (Certificados).
@@ -686,6 +691,9 @@ impl State {
                 },
             ),
             Request::ResetForm => self.edit(send, |d| d.reset_form().map(|()| Changed::Document)),
+            Request::PressReset { page, id } => self.edit(send, |d| {
+                d.press_reset(page, id).map(|()| Changed::Document)
+            }),
             Request::SignDigitally {
                 place,
                 id,

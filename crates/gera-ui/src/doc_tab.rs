@@ -3757,7 +3757,9 @@ impl DocTab {
                     self.worker.send(Request::SetField { page, id, value })
                 }
                 // botão Redefinir formulário: limpa na hora (como o Acrobat; o desfazer volta)
-                crate::fields::FieldAction::Reset => self.worker.send(Request::ResetForm),
+                crate::fields::FieldAction::Reset { page, id } => {
+                    self.worker.send(Request::PressReset { page, id })
+                }
                 // como no Acrobat: com Preencher e assinar ativo, o campo recebe a assinatura
                 // manuscrita; senão, o campo vazio abre a assinatura com ID digital
                 crate::fields::FieldAction::Sign { page, rect, .. }

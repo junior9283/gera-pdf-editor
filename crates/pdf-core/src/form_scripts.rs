@@ -248,12 +248,31 @@ impl<'a> Cursor<'a> {
         }
         (!out.is_empty()).then_some(out)
     }
+    /// O caractere depois de `\` numa string JavaScript.
+    fn escape(&mut self) -> Option<char> {
+        fn hex(c: &mut Cursor, n: usize) -> Option<char> {
+            let digits: String = (0..n).map(|_| c.next()).collect::<Option<_>>()?;
+            char::from_u32(u32::from_str_radix(&digits, 16).ok()?)
+        }
+        Some(match self.next()? {
+            'n' => '\n',
+            't' => '\t',
+            'r' => '\r',
+            'b' => '\u{8}',
+            'f' => '\u{c}',
+            'v' => '\u{b}',
+            '0' => '\0',
+            'u' => hex(self, 4)?,
+            'x' => hex(self, 2)?,
+            c => c,
+        })
+    }
     fn string(&mut self) -> Option<String> {
         let quote = self.next()?;
         let mut out = String::new();
         loop {
             match self.next()? {
-                '\\' => out.push(self.next()?),
+                '\\' => out.push(self.escape()?),
                 c if c == quote => return Some(out),
                 c => out.push(c),
             }
@@ -371,10 +390,17 @@ pub fn parse_format(js: &str) -> FieldFormat {
 fn js_str(s: &str) -> String {
     let mut out = String::from("\"");
     for c in s.chars() {
-        if matches!(c, '"' | '\\') {
-            out.push('\\');
+        match c {
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
         }
-        out.push(c);
     }
     out.push('"');
     out
@@ -427,26 +453,48 @@ fn separators(sep: u8) -> (Option<char>, char) {
     }
 }
 
-/// Número digitado no estilo `sep` (ou já no formato cru, `1234.5`).
-fn parse_number(raw: &str, sep: u8) -> Option<f64> {
-    let raw = raw.trim();
-    if let Ok(v) = raw.parse::<f64>() {
-        return v.is_finite().then_some(v);
-    }
-    let negative = raw.contains('-') || raw.contains('(');
-    let (_, decimal) = separators(sep);
+/// O valor cru gravado em /V (`1234.5`).
+fn raw_number(raw: &str) -> Option<f64> {
+    raw.trim().parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// Número digitado no estilo `sep`, com `extra` (moeda ou `%`) opcional. O separador de milhar só
+/// vale entre grupos de 3 dígitos: "1.234" no estilo 2 é 1234, "1,5" no estilo 0 é recusado (como
+/// no Acrobat). Letras não viram número.
+fn typed_number(text: &str, sep: u8, extra: &str) -> Option<f64> {
+    let (thousands, decimal) = separators(sep);
+    let extra = extra.trim();
+    let text = if extra.is_empty() {
+        text.trim().to_string()
+    } else {
+        text.replace(extra, "").trim().to_string()
+    };
+    let chars: Vec<char> = text.chars().collect();
     let mut s = String::new();
-    for c in raw.chars() {
+    let mut negative = false;
+    let mut seen_decimal = false;
+    for (k, &c) in chars.iter().enumerate() {
         if c.is_ascii_digit() {
             s.push(c);
-        } else if c == decimal || (decimal == '.' && c == ',' && sep == 1) {
+        } else if c == '-' && s.is_empty() && !negative {
+            negative = true;
+        } else if (c == decimal || (sep == 1 && c == ',')) && !seen_decimal {
+            seen_decimal = true;
             s.push('.');
+        } else if Some(c) == thousands && !seen_decimal && !s.is_empty() {
+            // grupo de milhar: exatamente 3 dígitos depois, e então o fim ou outro separador
+            let group = chars[k + 1..]
+                .iter()
+                .take_while(|c| c.is_ascii_digit())
+                .count();
+            if group != 3 {
+                return None;
+            }
+        } else if !c.is_whitespace() {
+            return None;
         }
     }
-    if s.is_empty() || s.matches('.').count() > 1 {
-        return None;
-    }
-    let v: f64 = s.parse().ok()?;
+    let v: f64 = s.parse().ok().filter(|v: &f64| v.is_finite())?;
     Some(if negative { -v } else { v })
 }
 
@@ -487,7 +535,9 @@ pub fn format_value(fmt: &FieldFormat, raw: &str) -> Result<Formatted, String> {
             currency,
             prepend,
         } => {
-            let v = parse_number(raw, *sep).ok_or_else(mismatch)?;
+            let v = raw_number(raw)
+                .or_else(|| typed_number(raw, *sep, currency))
+                .ok_or_else(mismatch)?;
             let body = number_text(v, *dec, *sep);
             let body = if *prepend {
                 format!("{currency}{body}")
@@ -510,7 +560,10 @@ pub fn format_value(fmt: &FieldFormat, raw: &str) -> Result<Formatted, String> {
             })
         }
         FieldFormat::Percent { dec, sep } => {
-            let v = parse_number(raw.trim_end_matches('%'), *sep).ok_or_else(mismatch)? * 100.0;
+            let v = raw_number(raw)
+                .or_else(|| typed_number(raw, *sep, "%"))
+                .ok_or_else(mismatch)?
+                * 100.0;
             let sign = if v < 0.0 { "-" } else { "" };
             Ok(plain(format!("{sign}{}%", number_text(v, *dec, *sep))))
         }
@@ -533,12 +586,28 @@ pub fn commit_value(fmt: &FieldFormat, typed: &str) -> Result<String, String> {
         return Ok(String::new());
     }
     match fmt {
-        FieldFormat::Number { sep, .. } | FieldFormat::Percent { sep, .. } => {
-            let v = parse_number(typed.trim_end_matches('%'), *sep).ok_or_else(mismatch)?;
+        FieldFormat::Number { sep, currency, .. } => {
+            let v = typed_number(typed, *sep, currency).ok_or_else(mismatch)?;
+            Ok(format!("{v}"))
+        }
+        FieldFormat::Percent { sep, .. } => {
+            let v = typed_number(typed, *sep, "%").ok_or_else(mismatch)?;
             Ok(format!("{v}"))
         }
         FieldFormat::None | FieldFormat::Custom => Ok(typed.to_string()),
         _ => format_value(fmt, typed).map(|f| f.text),
+    }
+}
+
+/// O valor cru como aparece ao editar o campo: número com o separador decimal do estilo.
+pub fn edit_text(fmt: &FieldFormat, raw: &str) -> String {
+    match fmt {
+        FieldFormat::Number { sep, .. } | FieldFormat::Percent { sep, .. }
+            if raw_number(raw).is_some() =>
+        {
+            raw.trim().replace('.', &separators(*sep).1.to_string())
+        }
+        _ => raw.to_string(),
     }
 }
 
@@ -948,19 +1017,10 @@ pub fn parse_calc(js: &str) -> FieldCalc {
     }
     if let (Some(a), Some(b)) = (js_t.find("BVCALC"), js_t.find("EVCALC")) {
         let expr = js_t.get(a + 6..b).unwrap_or("").trim();
-        let ok = tokens(expr)
-            .is_some_and(|t| !t.is_empty() && eval_tokens(&t, &|_: &str| 1.0).is_some());
         // só vale se o código depois do comentário é a tradução que o Acrobat grava para a
         // expressão: senão o comentário poderia dizer uma conta e o código fazer outra
-        let squash = |s: &str| -> String {
-            s.chars()
-                .filter(|c| !c.is_whitespace())
-                .collect::<String>()
-                .trim_end_matches(';')
-                .to_string()
-        };
         let sfn = FieldCalc::Sfn(expr.to_string());
-        return if ok && squash(js_t) == squash(&calc_script(&sfn)) {
+        return if sfn_ok(expr) && js_chunks(js_t) == js_chunks(&calc_script(&sfn)) {
             sfn
         } else {
             FieldCalc::Custom
@@ -1032,6 +1092,59 @@ pub fn calc_fields(c: &FieldCalc) -> Vec<String> {
     }
 }
 
+/// A expressão da notação simplificada é válida (o Acrobat recusa as outras)?
+pub fn sfn_ok(expr: &str) -> bool {
+    tokens(expr).is_some_and(|t| !t.is_empty() && eval_tokens(&t, &|_: &str| 1.0).is_some())
+}
+
+/// Pedaço de código JavaScript para comparar dois scripts: número pelo valor ("0.10" = "0.1"),
+/// o resto (strings inclusive) ao pé da letra, sem espaços.
+#[derive(Debug, PartialEq)]
+enum Chunk {
+    Text(String),
+    Num(f64),
+}
+
+fn js_chunks(js: &str) -> Vec<Chunk> {
+    let chars: Vec<char> = js.trim().trim_end_matches(';').chars().collect();
+    let mut out: Vec<Chunk> = Vec::new();
+    let text = |out: &mut Vec<Chunk>, piece: &str| match out.last_mut() {
+        Some(Chunk::Text(t)) => t.push_str(piece),
+        _ => out.push(Chunk::Text(piece.to_string())),
+    };
+    let mut k = 0;
+    while k < chars.len() {
+        let c = chars[k];
+        let after_word = k > 0 && (chars[k - 1].is_alphanumeric() || chars[k - 1] == '_');
+        if c.is_whitespace() {
+            k += 1;
+        } else if c == '"' || c == '\'' {
+            // string: até a aspa que fecha (com escapes)
+            let start = k;
+            k += 1;
+            while k < chars.len() && chars[k] != c {
+                k += if chars[k] == '\\' { 2 } else { 1 };
+            }
+            k = (k + 1).min(chars.len());
+            text(&mut out, &chars[start..k].iter().collect::<String>());
+        } else if (c.is_ascii_digit() || c == '.') && !after_word {
+            let start = k;
+            while k < chars.len() && (chars[k].is_ascii_digit() || chars[k] == '.') {
+                k += 1;
+            }
+            let lit: String = chars[start..k].iter().collect();
+            match lit.parse::<f64>() {
+                Ok(v) => out.push(Chunk::Num(v)),
+                Err(_) => text(&mut out, &lit),
+            }
+        } else {
+            text(&mut out, &c.to_string());
+            k += 1;
+        }
+    }
+    out
+}
+
 /// O valor da expressão inteira (`None` se sobrar símbolo ou a conta não fechar).
 fn eval_tokens(toks: &[Tok], lookup: &impl Fn(&str) -> f64) -> Option<f64> {
     let mut e = Expr {
@@ -1043,11 +1156,23 @@ fn eval_tokens(toks: &[Tok], lookup: &impl Fn(&str) -> f64) -> Option<f64> {
     (e.at == toks.len()).then_some(v)
 }
 
-/// Calcula com os valores dos campos (`lookup`: o número de cada campo, 0 se vazio).
-pub fn evaluate(c: &FieldCalc, lookup: &impl Fn(&str) -> f64) -> Option<f64> {
+/// Calcula com os valores dos campos. `lookup`: os números do campo (um; os de baixo, para um
+/// nome de grupo; nenhum, se não existe).
+pub fn evaluate(c: &FieldCalc, lookup: &impl Fn(&str) -> Vec<f64>) -> Option<f64> {
     let v = match c {
         FieldCalc::Simple { op, fields } => {
-            let vals: Vec<f64> = fields.iter().map(|f| lookup(f)).collect();
+            // campo que não existe vale 0; um grupo entra com cada um dos seus campos
+            let vals: Vec<f64> = fields
+                .iter()
+                .flat_map(|f| {
+                    let v = lookup(f);
+                    if v.is_empty() {
+                        vec![0.0]
+                    } else {
+                        v
+                    }
+                })
+                .collect();
             if vals.is_empty() {
                 return None;
             }
@@ -1059,15 +1184,23 @@ pub fn evaluate(c: &FieldCalc, lookup: &impl Fn(&str) -> f64) -> Option<f64> {
                 CalcOp::Max => vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
             }
         }
-        FieldCalc::Sfn(expr) => eval_tokens(&tokens(expr)?, lookup)?,
+        FieldCalc::Sfn(expr) => {
+            // na notação simplificada, um grupo não tem valor próprio (vale 0)
+            let one = |n: &str| match lookup(n)[..] {
+                [v] => v,
+                _ => 0.0,
+            };
+            eval_tokens(&tokens(expr)?, &one)?
+        }
         _ => return None,
     };
     v.is_finite().then_some(v)
 }
 
-/// O número de um valor digitado, com ponto ou vírgula decimal (`None` se não for número).
+/// O número de um valor (`None` se não for número), com ponto ou vírgula decimal.
 pub fn loose_number(raw: &str) -> Option<f64> {
-    parse_number(raw, 0).or_else(|| parse_number(raw, 2))
+    // como o AFMakeNumber do Acrobat: vírgula decimal vale como ponto
+    raw_number(raw).or_else(|| raw_number(&raw.replace(',', ".")))
 }
 
 /// O número de um valor cru (para Calcular): vazio ou não numérico vale 0.
@@ -1222,11 +1355,11 @@ mod tests {
     #[test]
     fn sfn_expressions() {
         let vals = |name: &str| match name {
-            "Preco" => 10.0,
-            "Quantidade" => 3.0,
-            "Taxa.1" => 0.5,
-            "Nome com espaço" => 2.0,
-            _ => 0.0,
+            "Preco" => vec![10.0],
+            "Quantidade" => vec![3.0],
+            "Taxa.1" => vec![0.5],
+            "Nome com espaço" => vec![2.0],
+            _ => vec![],
         };
         let ev = |e: &str| evaluate(&FieldCalc::Sfn(e.into()), &vals);
         assert_eq!(ev("Preco * Quantidade"), Some(30.0));
@@ -1298,5 +1431,85 @@ mod tests {
             parse_calc(&sfn.replace(" = ", "=")),
             FieldCalc::Sfn("a + b".into())
         );
+    }
+
+    #[test]
+    fn typed_numbers_follow_the_style() {
+        let br = num(2, 2, 0, "R$ ", true);
+        let us = num(2, 0, 0, "", true);
+        assert_eq!(commit_value(&br, "1,5").unwrap(), "1.5");
+        assert_eq!(
+            commit_value(&br, "1.234").unwrap(),
+            "1234",
+            "ponto de milhar"
+        );
+        assert_eq!(commit_value(&br, "1.234,56").unwrap(), "1234.56");
+        assert_eq!(commit_value(&br, "R$ 12,50").unwrap(), "12.5");
+        assert_eq!(commit_value(&br, "-3").unwrap(), "-3");
+        assert!(
+            commit_value(&br, "1.5").is_err(),
+            "ponto fora de milhar no estilo 2"
+        );
+        assert!(
+            commit_value(&br, "12abc").is_err(),
+            "letras não viram número"
+        );
+        assert!(commit_value(&br, "1a2b3").is_err());
+        assert!(
+            commit_value(&us, "1,5").is_err(),
+            "vírgula fora de milhar no estilo 0"
+        );
+        assert_eq!(commit_value(&us, "1,234.5").unwrap(), "1234.5");
+        assert!(!keystroke_ok(&us, "1a"));
+        // o valor cru gravado pelo app continua sendo mostrado no estilo do campo
+        assert_eq!(format_value(&br, "1234.5").unwrap().text, "R$ 1.234,50");
+    }
+
+    #[test]
+    fn make_number_reads_a_decimal_comma() {
+        assert_eq!(loose_number("1,5"), Some(1.5));
+        assert_eq!(number_of("2,5"), 2.5);
+        assert_eq!(number_of("abc"), 0.0);
+        let range = FieldValidate::Range {
+            min: Some(0.0),
+            max: Some(10.0),
+        };
+        assert!(validate(&range, "1,5").is_ok());
+    }
+
+    #[test]
+    fn js_string_escapes_are_decoded() {
+        let f = parse_format(r#"AFNumber_Format(2, 0, 0, 0, "\u20AC ", true);"#);
+        assert_eq!(f, num(2, 0, 0, "€ ", true));
+        let f = parse_format(r#"AFNumber_Format(2, 0, 0, 0, "\xA3", true);"#);
+        assert_eq!(f, num(2, 0, 0, "£", true));
+        // e a escrita volta a ser lida igual
+        let odd = num(2, 0, 0, "a\nb\"c", true);
+        assert_eq!(parse_format(&format_scripts(&odd).0), odd);
+    }
+
+    #[test]
+    fn editing_shows_the_raw_value_in_the_field_style() {
+        let br = num(2, 2, 0, "R$ ", true);
+        assert_eq!(edit_text(&br, "1234.5"), "1234,5");
+        assert_eq!(
+            commit_value(&br, &edit_text(&br, "1234.5")).unwrap(),
+            "1234.5"
+        );
+        assert_eq!(edit_text(&num(2, 0, 0, "", true), "1234.5"), "1234.5");
+        assert_eq!(edit_text(&FieldFormat::None, "1.5"), "1.5");
+    }
+
+    #[test]
+    fn acrobat_number_literals_are_compared_by_value() {
+        let js = r#"/** BVCALC Total * 0.10 EVCALC **/ event.value = AFMakeNumber(getField("Total").value) * 0.10;"#;
+        assert_eq!(parse_calc(js), FieldCalc::Sfn("Total * 0.10".into()));
+        // o nome entre aspas continua comparado ao pé da letra
+        let js =
+            r#"/** BVCALC a0.1 EVCALC **/ event.value = AFMakeNumber(getField("a0.10").value);"#;
+        assert_eq!(parse_calc(js), FieldCalc::Custom);
+        assert!(sfn_ok("Preco * Qtd"));
+        assert!(!sfn_ok("Preco *"));
+        assert!(!sfn_ok(""));
     }
 }

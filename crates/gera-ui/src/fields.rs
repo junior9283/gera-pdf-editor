@@ -22,8 +22,11 @@ pub enum FieldAction {
         id: i32,
         value: String,
     },
-    /// Botão com a ação Redefinir formulário.
-    Reset,
+    /// Botão com a ação Redefinir formulário (página e id do botão).
+    Reset {
+        page: i32,
+        id: i32,
+    },
     /// Campo de assinatura clicado (página e retângulo do campo).
     Sign {
         page: i32,
@@ -334,13 +337,16 @@ fn open(st: &mut FormState, f: &FieldInfo, out: &mut Vec<FieldAction>) {
             st.draft = Some(TextDraft {
                 page: f.page,
                 id: f.id,
-                text: f.value.clone(),
-                original: f.value.clone(),
+                text: pdf_core::edit_text(&f.format, &f.value),
+                original: pdf_core::edit_text(&f.format, &f.value),
                 focused: false,
                 calendar: None,
             })
         }
-        FieldKind::Button { reset: true } => out.push(FieldAction::Reset),
+        FieldKind::Button { reset: true } => out.push(FieldAction::Reset {
+            page: f.page,
+            id: f.id,
+        }),
         FieldKind::Combo { .. } | FieldKind::List { .. } => {
             st.choices = Some((f.page, f.id));
             st.combo_text = f.value.clone();
@@ -697,7 +703,7 @@ mod tests {
         let mut out = Vec::new();
         let b = f(1, 0, 0.0, 0.0, "Limpar", FieldKind::Button { reset: true });
         open(&mut st, &b, &mut out);
-        assert!(matches!(out[..], [FieldAction::Reset]));
+        assert!(matches!(out[..], [FieldAction::Reset { .. }]));
     }
 
     fn f(id: i32, page: i32, y: f32, x: f32, name: &str, kind: FieldKind) -> FieldInfo {

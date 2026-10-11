@@ -120,7 +120,12 @@ pub(crate) fn aa_script(head: &PdfObject, key: &str) -> Result<String> {
 
 /// O número de um cálculo como valor cru do campo (sem ruído de ponto flutuante).
 fn calc_raw(v: f64) -> String {
-    let rounded = (v * 1e10).round() / 1e10;
+    // número enorme: arredondar estouraria (inf)
+    let rounded = if (v * 1e10).is_finite() {
+        (v * 1e10).round() / 1e10
+    } else {
+        v
+    };
     format!("{}", if rounded == 0.0 { 0.0 } else { rounded })
 }
 
@@ -310,6 +315,38 @@ fn info(w: &PdfWidget, page: i32) -> Result<FieldInfo> {
     })
 }
 
+/// Grava `value` no widget de texto. Com Formatar, a aparência mostra o formatado e /V fica cru,
+/// como no Acrobat. `false` se o MuPDF recusou o valor.
+fn show_value(
+    doc: &mut mupdf::pdf::PdfDocument,
+    w: &mut PdfWidget,
+    value: &str,
+    format: &FieldFormat,
+) -> Result<bool> {
+    if !w.set_value(doc, value, true)? {
+        return Ok(false);
+    }
+    let shown = format_value(format, value).ok().map(|f| f.text);
+    if let Some(shown) = shown.filter(|s| s != value) {
+        // a aparência é desenhada com o formatado; o /V volta ao cru
+        if w.set_value(doc, &shown, true)? {
+            w.update()?;
+            field_head(&w.annotation().object())?.dict_put("V", PdfObject::new_string(value)?)?;
+        }
+    }
+    Ok(true)
+}
+
+/// O nome de campo `name` está na lista (ele ou um grupo acima dele)?
+fn named_in(name: &str, list: &[String]) -> bool {
+    list.iter().any(|l| {
+        name == l
+            || name
+                .strip_prefix(l.as_str())
+                .is_some_and(|r| r.starts_with('.'))
+    })
+}
+
 impl PdfDoc {
     /// Campos de formulário da página (cada botão de opção aparece separado, com o seu estado), na
     /// ordem de tabulação da página: por linha, por coluna ou pela estrutura (/Annots).
@@ -403,27 +440,19 @@ impl PdfDoc {
             set_buttons(&mut field_head(&widget.annotation().object())?, value)?;
             self.update_widgets()?;
         } else {
-            if !widget.set_value(&mut self.inner, value, true)? {
-                return Err(PdfError::InvalidAnnotation(
-                    "valor recusado pelo campo".into(),
-                ));
-            }
-            let mut head = field_head(&widget.annotation().object())?;
             let parsed;
             let format = match format {
                 Some(f) => f,
                 None => {
+                    let head = field_head(&widget.annotation().object())?;
                     parsed = parse_format(&aa_script(&head, "F")?);
                     &parsed
                 }
             };
-            let shown = format_value(format, value).ok().map(|f| f.text);
-            if let Some(shown) = shown.filter(|s| s != value) {
-                // a aparência é desenhada com o formatado; o /V volta ao cru
-                if widget.set_value(&mut self.inner, &shown, true)? {
-                    widget.update()?;
-                    head.dict_put("V", PdfObject::new_string(value)?)?;
-                }
+            if !show_value(&mut self.inner, &mut widget, value, format)? {
+                return Err(PdfError::InvalidAnnotation(
+                    "valor recusado pelo campo".into(),
+                ));
             }
         }
         widget.update()?;
@@ -458,12 +487,14 @@ impl PdfDoc {
     }
 
     /// Refaz os cálculos até nada mudar (com tetos); devolve os valores anteriores do que mudou.
-    fn recalculate(&mut self) -> Result<Vec<(i32, i32, String)>> {
+    /// Os valores anteriores vão para `changes` à medida que mudam (um erro no meio não perde o
+    /// que já foi gravado).
+    fn recalculate(&mut self, changes: &mut Vec<(i32, i32, String)>) -> Result<()> {
         let fields = self.all_fields()?;
         let order = self.calc_order(&fields)?;
-        let mut changes = Vec::new();
+        let start = changes.len();
         if order.is_empty() {
-            return Ok(changes);
+            return Ok(());
         }
         let mut raws: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         for f in &fields {
@@ -473,14 +504,19 @@ impl PdfDoc {
         for _ in 0..MAX_CALC_PASSES {
             let mut changed = false;
             for f in &order {
-                if changes.len() >= MAX_CALC_WRITES {
-                    return Ok(changes);
+                if changes.len() - start >= MAX_CALC_WRITES {
+                    return Ok(());
                 }
-                let raw = evaluate(&f.calc, &|n: &str| {
-                    raws.get(n).map_or(0.0, |v| number_of(v))
-                })
-                .map(calc_raw)
-                .unwrap_or_default();
+                // nome de grupo ("Item") vale os campos de baixo (Item.0, Item.1), como no Acrobat
+                let lookup = |n: &str| match raws.get(n) {
+                    Some(v) => vec![number_of(v)],
+                    None => raws
+                        .iter()
+                        .filter(|(k, _)| named_in(k, &[n.to_string()]))
+                        .map(|(_, v)| number_of(v))
+                        .collect(),
+                };
+                let raw = evaluate(&f.calc, &lookup).map(calc_raw).unwrap_or_default();
                 if raws.get(&f.name) != Some(&raw) {
                     let old = self.write_field(f.page, f.id, &raw, true, Some(&f.format))?;
                     changes.push((f.page, f.id, old));
@@ -492,7 +528,38 @@ impl PdfDoc {
                 break;
             }
         }
-        Ok(changes)
+        Ok(())
+    }
+
+    /// Redesenha os valores dos campos de texto com Formatar (da página `page`, ou de todas): a
+    /// aparência mostra o formatado. `plain`: este widget também, mesmo sem Formatar (o Formatar
+    /// dele acabou de mudar).
+    pub(crate) fn redraw_values(&mut self, page: Option<i32>, plain: Option<i32>) -> Result<()> {
+        let pages = match page {
+            Some(p) => p..p + 1,
+            None => 0..self.page_count()?,
+        };
+        for p in pages {
+            for mut w in self.inner.load_pdf_page(p)?.widgets() {
+                if w.r#type()? != WidgetType::Text {
+                    continue;
+                }
+                let head = field_head(&w.annotation().object())?;
+                let format = parse_format(&aa_script(&head, "F")?);
+                let mine = plain.is_some_and(|id| annot_id(w.annotation()).ok() == Some(id));
+                if format == FieldFormat::Custom || (format == FieldFormat::None && !mine) {
+                    continue;
+                }
+                let value = w.value()?.unwrap_or_default();
+                if mine {
+                    // o MuPDF não redesenha o mesmo valor: passa pelo vazio para refazer a aparência
+                    w.set_value(&mut self.inner, "", true)?;
+                }
+                show_value(&mut self.inner, &mut w, &value, &format)?;
+                w.update()?;
+            }
+        }
+        Ok(())
     }
 
     /// Redesenha os widgets (um grupo pode ter botões em várias páginas).
@@ -525,17 +592,65 @@ impl PdfDoc {
             id,
             self.write_field(page, id, &raw, false, Some(&field.format))?,
         )];
-        steps.extend(self.recalculate()?);
+        // o que já mudou entra no desfazer mesmo se um cálculo falhar no meio
+        let result = self.recalculate(&mut steps);
         self.history.record_step(Step::Fields(steps));
-        Ok(())
+        result
+    }
+
+    /// Botão com a ação Redefinir formulário: limpa os campos de /Fields (ou todos menos eles,
+    /// com o bit 1 de /Flags), como no Acrobat.
+    pub fn press_reset(&mut self, page: i32, id: i32) -> Result<()> {
+        let obj = self.widget(page, id)?.annotation().object();
+        let action = match obj.get_dict("A")? {
+            Some(a) => Some(a),
+            None => field_head(&obj)?.get_dict("A")?,
+        };
+        let mut filter = None;
+        if let Some(a) = action {
+            if let Some(list) = a
+                .get_dict("Fields")?
+                .filter(|l| l.is_array().unwrap_or(false))
+            {
+                let mut names = Vec::new();
+                for k in 0..list.len()?.min(10_000) as i32 {
+                    let Some(item) = list.get_array(k)? else {
+                        continue;
+                    };
+                    names.push(if item.is_string()? {
+                        item.as_string()?
+                    } else {
+                        crate::prepare::full_name(&item)?
+                    });
+                }
+                let exclude = a
+                    .get_dict("Flags")?
+                    .and_then(|f| f.as_int().ok())
+                    .is_some_and(|f| f & 1 != 0);
+                filter = Some((names, exclude));
+            }
+        }
+        self.reset_fields(filter.as_ref())
     }
 
     /// Limpar formulário: todos os campos voltam ao valor padrão (desfazer por instantâneo).
     pub fn reset_form(&mut self) -> Result<()> {
+        self.reset_fields(None)
+    }
+
+    /// Volta ao padrão os campos de `filter` (nomes; com `true`, todos menos eles) ou todos, e
+    /// recalcula (desfazer por instantâneo).
+    fn reset_fields(&mut self, filter: Option<&(Vec<String>, bool)>) -> Result<()> {
         let before = self.snapshot()?;
         for p in 0..self.page_count()? {
             let page_ref = self.inner.load_pdf_page(p)?;
             for mut w in page_ref.widgets() {
+                if let Some((names, exclude)) = filter {
+                    let name = w.name().ok().flatten().unwrap_or_default();
+                    if named_in(&name, names) == *exclude {
+                        continue;
+                    }
+                }
                 if is_button(&w)? {
                     // o reset do MuPDF não volta o grupo de botões: padrão (/DV) ou "Off"
                     let mut head = field_head(&w.annotation().object())?;
@@ -554,6 +669,9 @@ impl PdfDoc {
             }
         }
         self.update_widgets()?;
+        // o padrão aparece formatado, e os totais refeitos (como no Acrobat)
+        self.redraw_values(None, None)?;
+        self.recalculate(&mut Vec::new())?;
         if self.history.record_snapshot(before, SNAPSHOT_BUDGET) {
             self.mark_unsaved();
         }
