@@ -90,12 +90,14 @@ pub(crate) fn spool_dir() -> std::io::Result<PathBuf> {
     }
 }
 
-/// Prefixos das cópias na pasta privada: impressão, imagem colada e anexo aberto. Todas levam o
+/// Prefixos das cópias na pasta privada: impressão, imagem colada, anexo aberto e páginas copiadas. Todas levam o
 /// pid logo depois do prefixo, e a varredura apaga as de execuções que já terminaram.
 pub(crate) const PRINT_PREFIX: &str = "imprimir-";
 pub(crate) const PASTE_PREFIX: &str = "gera-colar-";
 pub(crate) const ATTACHMENT_PREFIX: &str = "gera-anexo-";
-const SPOOL_PREFIXES: [&str; 3] = [PRINT_PREFIX, PASTE_PREFIX, ATTACHMENT_PREFIX];
+/// Páginas a caminho de outra aba (Copiar para, arrastar até a aba).
+pub(crate) const COPY_PREFIX: &str = "gera-copia-";
+const SPOOL_PREFIXES: [&str; 4] = [PRINT_PREFIX, PASTE_PREFIX, ATTACHMENT_PREFIX, COPY_PREFIX];
 
 /// Nome único de uma cópia na pasta privada: "<prefixo><pid>-<n><fim>".
 pub(crate) fn spool_file_name(prefix: &str, end: &str) -> String {

@@ -216,6 +216,11 @@ pub enum Request {
         dest: PathBuf,
         separate: bool,
     },
+    /// Grava as páginas (com as anotações) num arquivo, para copiá-las para outro documento.
+    ExportPages {
+        pages: Vec<i32>,
+        dest: PathBuf,
+    },
     /// Seleção pelo fluxo do texto entre `a` e `b` (pontos da página).
     SelectText {
         tag: u64,
@@ -336,6 +341,10 @@ pub enum Response {
     },
     PagesFailed(String),
     Extracted(Vec<PathBuf>),
+    /// As páginas pedidas por `ExportPages` estão em `dest`.
+    PagesExported {
+        dest: PathBuf,
+    },
     Split(Vec<PathBuf>),
     /// Campos mudaram (preencher, desfazer/refazer de um valor): todos, de todas as páginas.
     FieldsChanged {
@@ -766,6 +775,12 @@ impl State {
                     Err(e) => Response::PagesFailed(e),
                 },
             ),
+            Request::ExportPages { pages, dest } => {
+                send(match self.with_doc(|d| d.extract(&pages, &dest, false)) {
+                    Ok(_) => Response::PagesExported { dest },
+                    Err(e) => Response::PagesFailed(e),
+                })
+            }
             Request::Undo => self.edit(send, PdfDoc::undo),
             Request::SetAuthor(author) => {
                 if let Some(d) = self.doc.as_mut() {

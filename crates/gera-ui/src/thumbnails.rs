@@ -118,6 +118,13 @@ pub enum ThumbAction {
     Print(Vec<i32>),
     /// Nova largura das miniaturas (vai para as preferências).
     Zoom(f32),
+    /// Copiar para ▸ outro documento aberto (o caminho identifica a aba).
+    CopyTo {
+        pages: Vec<i32>,
+        target: std::path::PathBuf,
+    },
+    /// Arrastadas e soltas fora do painel: talvez sobre outra aba.
+    DragOut(Vec<i32>),
 }
 
 pub struct ThumbnailsPanel {
@@ -193,6 +200,7 @@ impl ThumbnailsPanel {
         worker: &Worker,
         labels: &[String],
         can_edit: bool,
+        targets: &[(std::path::PathBuf, String)],
     ) -> Vec<ThumbAction> {
         let mut out = Vec::new();
         let total = view.sizes.len();
@@ -278,7 +286,8 @@ impl ThumbnailsPanel {
                             self.select(page, &mut out);
                         }
                     }
-                    if resp.drag_started() && can_edit {
+                    // arrastar também copia para outra aba, mesmo sem poder alterar este
+                    if resp.drag_started() {
                         if !self.org.sel.contains(page) {
                             self.org.sel.click(page);
                         }
@@ -307,7 +316,7 @@ impl ThumbnailsPanel {
                             self.current = Some(page);
                         }
                         menu_pages = Some(self.org.sel.to_vec());
-                        self.menu(ui, total, can_edit, &mut out);
+                        self.menu(ui, total, can_edit, targets, &mut out);
                     });
                 }
             });
@@ -316,7 +325,11 @@ impl ThumbnailsPanel {
         if self.drag.is_some() && ui.input(|i| !i.pointer.any_down()) {
             if let Some((pages, target)) = self.drag.take() {
                 let inside = pointer.is_some_and(|p| panel.contains(p));
-                if let (true, Some(op)) = (inside, target.and_then(|to| move_op(&pages, to))) {
+                if !inside {
+                    out.push(ThumbAction::DragOut(pages));
+                } else if let (true, Some(op)) =
+                    (can_edit, target.and_then(|to| move_op(&pages, to)))
+                {
                     // as páginas movidas continuam selecionadas, no lugar novo
                     if let Some(to) = target {
                         self.org.sel.after_move(to);
@@ -339,6 +352,7 @@ impl ThumbnailsPanel {
         ui: &mut egui::Ui,
         total: usize,
         can_edit: bool,
+        targets: &[(std::path::PathBuf, String)],
         out: &mut Vec<ThumbAction>,
     ) {
         if can_edit {
@@ -347,6 +361,19 @@ impl ThumbnailsPanel {
             out.extend(orgs.into_iter().map(ThumbAction::Org));
             ui.separator();
         }
+        ui.add_enabled_ui(!targets.is_empty(), |ui| {
+            ui.menu_button("Copiar para", |ui| {
+                for (path, title) in targets {
+                    if ui.button(title).clicked() {
+                        out.push(ThumbAction::CopyTo {
+                            pages: self.org.sel.to_vec(),
+                            target: path.clone(),
+                        });
+                        ui.close();
+                    }
+                }
+            });
+        });
         if ui.button("Imprimir páginas…").clicked() {
             out.push(ThumbAction::Print(self.org.sel.to_vec()));
             ui.close();

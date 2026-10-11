@@ -105,6 +105,13 @@ pub enum DocEvent {
     OpenAttachment(PathBuf),
     /// Nova largura das miniaturas (preferências e todas as abas).
     ThumbWidth(f32),
+    /// Páginas exportadas em `file`, para inserir no fim do documento `target`.
+    CopyPages {
+        target: PathBuf,
+        file: PathBuf,
+    },
+    /// Miniaturas soltas fora do painel: o app vê se caíram sobre outra aba.
+    DragPagesOut(Vec<i32>),
     /// Um comando da casca escolhido na página (menu de contexto: Imprimir, Propriedades).
     Run(Command),
 }
@@ -154,6 +161,12 @@ pub struct DocTab {
     pub(crate) bookmarks: crate::bookmarks::BookmarksPanel,
     /// Painel Miniaturas (seleção, arraste, menu e diálogos de páginas).
     pub(crate) thumbs: crate::thumbnails::ThumbnailsPanel,
+    /// Cópia de páginas para outra aba em andamento: (arquivo temporário, aba de destino).
+    pub(crate) copy_pending: Option<(PathBuf, PathBuf)>,
+    /// Outras abas abertas (caminho, título), para Copiar para ▸ (o app atualiza).
+    pub(crate) copy_targets: Vec<(PathBuf, String)>,
+    /// Temporários de páginas recebidas: apagados quando a inserção termina.
+    received_copies: Vec<PathBuf>,
     /// Painel Anexos (seleção e descrição em edição).
     attachments_panel: crate::attachments_panel::AttachmentsPanel,
     /// Aviso antes de abrir um anexo (o anexo e quando o aviso apareceu).
@@ -336,6 +349,9 @@ impl DocTab {
             attachments: Vec::new(),
             destinations: Vec::new(),
             thumbs: Default::default(),
+            copy_pending: None,
+            copy_targets: Vec::new(),
+            received_copies: Vec::new(),
             layers: Vec::new(),
             labels: Vec::new(),
             display_title: None,
@@ -1488,7 +1504,17 @@ impl DocTab {
                     }
                 }
                 Response::PagesChanged { summary, history } => {
+                    self.forget_received_copies();
                     self.on_pages_changed(summary, history)
+                }
+                Response::PagesExported { dest } => {
+                    if let Some((file, target)) = self.copy_pending.take() {
+                        if file == dest {
+                            self.events.push(DocEvent::CopyPages { target, file });
+                        } else {
+                            let _ = std::fs::remove_file(file);
+                        }
+                    }
                 }
                 Response::RedactionsApplied { result } => match result {
                     Ok((summary, history)) => {
@@ -1501,6 +1527,10 @@ impl DocTab {
                     }
                 },
                 Response::PagesFailed(msg) => {
+                    self.forget_received_copies();
+                    if let Some((file, _)) = self.copy_pending.take() {
+                        let _ = std::fs::remove_file(file);
+                    }
                     self.delete_after_extract = None;
                     self.status = format!("Não foi possível organizar as páginas: {msg}");
                 }
@@ -2388,8 +2418,14 @@ impl DocTab {
             let actions = ui
                 .push_id(self.id, |ui| {
                     ui.strong(panel.label());
-                    self.thumbs
-                        .show(ui, view, &self.worker, &self.labels, can_edit)
+                    self.thumbs.show(
+                        ui,
+                        view,
+                        &self.worker,
+                        &self.labels,
+                        can_edit,
+                        &self.copy_targets,
+                    )
                 })
                 .inner;
             self.thumb_actions(ui.ctx(), actions);
@@ -2429,6 +2465,49 @@ impl DocTab {
         false
     }
 
+    /// Copiar páginas para outra aba: grava-as numa cópia na pasta privada; a aba de destino
+    /// insere quando ficar pronta (`DocEvent::CopyPages`).
+    pub(crate) fn copy_pages(&mut self, _ctx: &egui::Context, pages: Vec<i32>, target: PathBuf) {
+        if !self.security.permissions.copy {
+            return self.deny("copiar páginas");
+        }
+        if self.copy_pending.is_some() || pages.is_empty() {
+            return;
+        }
+        match crate::print_job::spool_dir() {
+            Ok(dir) => {
+                use crate::print_job::{spool_file_name, COPY_PREFIX};
+                let file = dir.join(spool_file_name(COPY_PREFIX, ".pdf"));
+                self.copy_pending = Some((file.clone(), target));
+                self.worker.send(Request::ExportPages { pages, dest: file });
+            }
+            Err(e) => self.status = format!("Não foi possível copiar as páginas: {e}"),
+        }
+    }
+
+    /// Insere no fim as páginas copiadas de outra aba (o temporário some depois).
+    pub(crate) fn insert_copied(&mut self, file: PathBuf) -> Result<(), String> {
+        if !self.bookmarks_editable() {
+            return Err("o documento de destino não permite alterar as páginas".into());
+        }
+        let at = self.view.as_ref().map_or(0, |v| v.sizes.len() as i32);
+        self.received_copies.push(file.clone());
+        self.worker
+            .send(Request::Pages(pdf_core::PageOp::InsertFrom {
+                at,
+                path: file,
+                password: None,
+                range: None,
+            }));
+        Ok(())
+    }
+
+    fn forget_received_copies(&mut self) {
+        for file in self.received_copies.drain(..) {
+            let _ = std::fs::remove_file(file);
+        }
+    }
+
     fn thumb_actions(&mut self, ctx: &egui::Context, actions: Vec<crate::thumbnails::ThumbAction>) {
         use crate::thumbnails::ThumbAction;
         for action in actions {
@@ -2443,6 +2522,8 @@ impl DocTab {
                     }
                 }
                 ThumbAction::Zoom(width) => self.events.push(DocEvent::ThumbWidth(width)),
+                ThumbAction::CopyTo { pages, target } => self.copy_pages(ctx, pages, target),
+                ThumbAction::DragOut(pages) => self.events.push(DocEvent::DragPagesOut(pages)),
             }
         }
     }
@@ -3766,6 +3847,16 @@ mod tests {
         tab.thumbs.org.sel.click(1);
         tab.run(&ctx, DocCommand::Delete);
         assert_eq!(tab.thumbs.confirming(), Some(&[1][..]));
+    }
+
+    #[test]
+    fn copy_from_protected_document_is_refused() {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_pages(3);
+        tab.security.permissions.copy = false;
+        tab.copy_pages(&ctx, vec![0], PathBuf::from("/outro.pdf"));
+        assert!(tab.copy_pending.is_none(), "nada foi exportado");
+        assert!(tab.status.contains("não permite"), "{}", tab.status);
     }
 
     #[test]
