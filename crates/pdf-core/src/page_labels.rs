@@ -281,6 +281,19 @@ impl PdfDoc {
         self.with_snapshot(|d| d.write_page_labels(ranges))
     }
 
+    /// Diálogo Rótulos de página: as páginas `from..=to` começam uma seção nova (`new`) ou estendem
+    /// a anterior (`None`); as demais faixas continuam (uma etapa do desfazer).
+    pub fn apply_page_labels(
+        &mut self,
+        from: i32,
+        to: i32,
+        new: Option<PageLabelRange>,
+    ) -> Result<()> {
+        let total = self.page_count()?;
+        let ranges = apply_labels(&self.page_labels(), from, to, new, total);
+        self.set_page_labels(ranges)
+    }
+
     /// Grava as faixas sem histórico (as operações de página põem de volta as que havia: o MuPDF
     /// ajusta e até cria rótulos ao mover, inserir e excluir, e o Acrobat não).
     pub(crate) fn write_page_labels(&mut self, ranges: Vec<PageLabelRange>) -> Result<()> {

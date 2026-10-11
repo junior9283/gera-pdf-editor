@@ -17,6 +17,7 @@ mod icon;
 mod links;
 mod open_dialog;
 mod organize;
+mod page_labels_dialog;
 mod pagination_tool;
 mod prepare;
 mod print_job;

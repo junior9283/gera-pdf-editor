@@ -99,3 +99,14 @@ fn page_operations_do_not_invent_or_shift_labels() {
         "as faixas ficam nos índices"
     );
 }
+
+#[test]
+fn the_dialog_request_applies_on_top_of_the_current_ranges() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut d = PdfDoc::open(&write_sample(&dir, "a.pdf", 6, 0), None).unwrap();
+    d.apply_page_labels(0, 1, Some(range(0, PageLabelStyle::LowerRoman, "", 1)))
+        .unwrap();
+    assert_eq!(d.labels(), ["i", "ii", "3", "4", "5", "6"]);
+    d.apply_page_labels(2, 3, None).unwrap();
+    assert_eq!(d.labels(), ["i", "ii", "iii", "iv", "5", "6"]);
+}

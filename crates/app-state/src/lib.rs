@@ -10,6 +10,7 @@ pub mod layout;
 pub mod link_policy;
 pub mod nav;
 pub mod organize;
+pub mod page_input;
 pub mod pdf_date;
 pub mod prefs;
 pub mod prepare;

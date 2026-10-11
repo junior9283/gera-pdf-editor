@@ -99,6 +99,8 @@ pub struct Prefs {
     pub last_views: Vec<(String, ViewEntry)>,
     /// Largura das miniaturas de página (Ampliar/Reduzir miniaturas).
     pub thumb_width: f32,
+    /// Usar números lógicos de página (os rótulos do documento na caixa de página).
+    pub logical_page_numbers: bool,
 }
 
 impl Default for Prefs {
@@ -118,6 +120,7 @@ impl Default for Prefs {
             max_recents: 20,
             last_views: Vec::new(),
             thumb_width: 110.0,
+            logical_page_numbers: true,
         }
     }
 }

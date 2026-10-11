@@ -619,6 +619,7 @@ impl GeraApp {
             .collect();
         let doc = &mut self.docs[i];
         doc.copy_targets = targets;
+        doc.logical_pages = self.prefs.logical_page_numbers;
         doc.begin();
         if self.reading {
             // modo leitura: só as páginas e a barra flutuante

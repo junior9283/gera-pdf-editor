@@ -64,8 +64,13 @@ pub enum Request {
     },
     /// Cria, renomeia, redefine ou exclui um destino nomeado.
     Destination(crate::DestOp),
-    /// Grava os rótulos de página (diálogo Rótulos de página).
-    PageLabels(Vec<crate::PageLabelRange>),
+    /// Diálogo Rótulos de página: `from..=to` começam uma seção nova (`new`) ou estendem a
+    /// anterior (`None`).
+    PageLabels {
+        from: i32,
+        to: i32,
+        new: Option<crate::PageLabelRange>,
+    },
     DescribeAttachment {
         name: String,
         text: String,
@@ -544,8 +549,8 @@ impl State {
             Request::Destination(op) => {
                 self.edit(send, |d| Ok(Changed::Destinations(d.edit_destination(op)?)))
             }
-            Request::PageLabels(ranges) => self.edit(send, |d| {
-                d.set_page_labels(ranges)?;
+            Request::PageLabels { from, to, new } => self.edit(send, |d| {
+                d.apply_page_labels(from, to, new)?;
                 Ok(Changed::Document)
             }),
             Request::RemoveAttachment { name } => self.edit(send, |d| {

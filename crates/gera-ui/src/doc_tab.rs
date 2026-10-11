@@ -163,6 +163,12 @@ pub struct DocTab {
     pub(crate) thumbs: crate::thumbnails::ThumbnailsPanel,
     /// Cópia de páginas para outra aba em andamento: (arquivo temporário, aba de destino).
     pub(crate) copy_pending: Option<(PathBuf, PathBuf)>,
+    /// Diálogo Rótulos de página aberto.
+    labels_dialog: Option<crate::page_labels_dialog::PageLabelsDialog>,
+    /// Usar números lógicos de página (preferência; o app atualiza).
+    pub(crate) logical_pages: bool,
+    /// Texto da caixa de página com rótulos (enquanto se digita).
+    page_input: Option<String>,
     /// Outras abas abertas (caminho, título), para Copiar para ▸ (o app atualiza).
     pub(crate) copy_targets: Vec<(PathBuf, String)>,
     /// Temporários de páginas recebidas: apagados quando a inserção termina.
@@ -350,6 +356,9 @@ impl DocTab {
             destinations: Vec::new(),
             thumbs: Default::default(),
             copy_pending: None,
+            labels_dialog: None,
+            logical_pages: true,
+            page_input: None,
             copy_targets: Vec::new(),
             received_copies: Vec::new(),
             layers: Vec::new(),
@@ -2301,6 +2310,17 @@ impl DocTab {
                 }
             }
         }
+        if let Some(answer) = self.labels_dialog.as_mut().and_then(|d| d.show(ui.ctx())) {
+            if let (true, Some(d)) = (answer, self.labels_dialog.as_ref()) {
+                let (from, to, new) = d.request();
+                if self.bookmarks_editable() {
+                    self.worker.send(Request::PageLabels { from, to, new });
+                } else {
+                    self.deny("alterar os rótulos de página");
+                }
+            }
+            self.labels_dialog = None;
+        }
         if let (Some(rx), Some(dialog)) = (&self.printers_rx, self.print_dialog.as_mut()) {
             if let Ok((list, default)) = rx.try_recv() {
                 dialog.set_printers(list, default);
@@ -2524,6 +2544,12 @@ impl DocTab {
                 ThumbAction::Zoom(width) => self.events.push(DocEvent::ThumbWidth(width)),
                 ThumbAction::CopyTo { pages, target } => self.copy_pages(ctx, pages, target),
                 ThumbAction::DragOut(pages) => self.events.push(DocEvent::DragPagesOut(pages)),
+                ThumbAction::Labels(pages) => {
+                    let total = self.view.as_ref().map_or(0, |v| v.sizes.len());
+                    self.labels_dialog = Some(crate::page_labels_dialog::PageLabelsDialog::new(
+                        &pages, total,
+                    ));
+                }
             }
         }
     }
@@ -2673,15 +2699,44 @@ impl DocTab {
                 ui.label(commands::hover(&Command::Doc(DocCommand::PrevPage)));
             })
             .clicked();
-        let go = ui
-            .add(egui::DragValue::new(&mut page).range(1..=count).speed(0.2))
-            .on_hover_ui(|ui| {
-                ui.label(commands::hover(&Command::Doc(DocCommand::GoToPage)));
-            });
-        if std::mem::take(&mut self.focus_page) {
-            go.request_focus(); // Ir para página: digita o número e Enter
+        let labeled = self.logical_pages && !self.labels.is_empty();
+        if labeled {
+            // números lógicos: o campo mostra o rótulo e aceita rótulo ou número
+            let (label, suffix) =
+                app_state::page_input::page_box_text(&self.labels, page - 1, count, true);
+            let mut text = self.page_input.clone().unwrap_or(label);
+            let edit = ui
+                .add(egui::TextEdit::singleline(&mut text).desired_width(56.0))
+                .on_hover_ui(|ui| {
+                    ui.label(commands::hover(&Command::Doc(DocCommand::GoToPage)));
+                });
+            if std::mem::take(&mut self.focus_page) {
+                edit.request_focus();
+            }
+            self.page_input = edit.has_focus().then(|| text.clone());
+            if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                match app_state::page_input::page_for_input(&text, &self.labels, count) {
+                    Some(p) => self.page_field(p + 1, PageField::Typed),
+                    None => self.status = format!("Não há página \"{}\".", text.trim()),
+                }
+                self.page_input = None;
+            }
+            ui.label(suffix);
         }
-        ui.label(format!("/ {count}"));
+        let go = if labeled {
+            None
+        } else {
+            let go = ui
+                .add(egui::DragValue::new(&mut page).range(1..=count).speed(0.2))
+                .on_hover_ui(|ui| {
+                    ui.label(commands::hover(&Command::Doc(DocCommand::GoToPage)));
+                });
+            if std::mem::take(&mut self.focus_page) {
+                go.request_focus(); // Ir para página: digita o número e Enter
+            }
+            ui.label(format!("/ {count}"));
+            Some(go)
+        };
         let next = ui
             .button("▶")
             .on_hover_ui(|ui| {
@@ -2694,15 +2749,17 @@ impl DocTab {
             } else {
                 DocCommand::PrevPage
             });
-        } else if go.drag_started() {
-            self.page_field(page, PageField::DragStart);
-        } else if go.changed() {
-            let how = if go.dragged() {
-                PageField::Dragging
-            } else {
-                PageField::Typed
-            };
-            self.page_field(page, how);
+        } else if let Some(go) = go {
+            if go.drag_started() {
+                self.page_field(page, PageField::DragStart);
+            } else if go.changed() {
+                let how = if go.dragged() {
+                    PageField::Dragging
+                } else {
+                    PageField::Typed
+                };
+                self.page_field(page, how);
+            }
         }
     }
 

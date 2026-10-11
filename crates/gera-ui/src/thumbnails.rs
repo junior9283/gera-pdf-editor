@@ -125,6 +125,8 @@ pub enum ThumbAction {
     },
     /// Arrastadas e soltas fora do painel: talvez sobre outra aba.
     DragOut(Vec<i32>),
+    /// Rótulos de página… com estas páginas selecionadas.
+    Labels(Vec<i32>),
 }
 
 pub struct ThumbnailsPanel {
@@ -360,6 +362,10 @@ impl ThumbnailsPanel {
             crate::organize::page_menu(ui, &mut self.org, total, &mut orgs);
             out.extend(orgs.into_iter().map(ThumbAction::Org));
             ui.separator();
+        }
+        if can_edit && ui.button("Rótulos de página…").clicked() {
+            out.push(ThumbAction::Labels(self.org.sel.to_vec()));
+            ui.close();
         }
         ui.add_enabled_ui(!targets.is_empty(), |ui| {
             ui.menu_button("Copiar para", |ui| {
