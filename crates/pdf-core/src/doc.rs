@@ -976,27 +976,23 @@ impl PdfDoc {
                 .object()
                 .resolve()?
                 .ok_or_else(|| PdfError::InvalidAnnotation("anotação sem dicionário".into()))?;
-            deep_copy(&self.inner, &dict)?
+            deep_copy(&self.inner, &dict, 0)?
         };
-        // ligações com o original e a página de origem saem; o MuPDF dá um nome novo
-        for key in ["P", "Popup", "IRT", "NM", "Parent"] {
+        // ligações com o original e a página de origem saem; o MuPDF dá um nome novo. A chave da
+        // estrutura (PDF marcado) também: duas anotações não podem ter a mesma.
+        for key in ["P", "Popup", "IRT", "NM", "Parent", "StructParent"] {
             copy.dict_delete(key)?;
         }
+        // a cópia é sempre visível: o original pode estar escondido (recortado, apagado até salvar)
+        // ou ser uma resposta (invisível na página), e a cópia deixa de ser resposta
+        if let Some(flags) = copy.get_dict("F")?.and_then(|f| f.as_int().ok()) {
+            const HIDDEN: i32 = 2;
+            const NO_VIEW: i32 = 32;
+            copy.dict_put("F", PdfObject::new_int(flags & !(HIDDEN | NO_VIEW))?)?;
+        }
         if let Some(ap) = copy.get_dict("AP")? {
-            let mut ap = ap.copy_dict()?;
-            for state in ["N", "R", "D"] {
-                let Some(stream) = ap
-                    .get_dict(state)?
-                    .filter(|s| s.is_stream().unwrap_or(false))
-                else {
-                    continue;
-                };
-                let raw = mupdf::Buffer::from_bytes(&stream.read_raw_stream()?)?;
-                let dict = stream.copy_dict()?;
-                let own = self.inner.add_stream(&raw, Some(&dict), true)?;
-                ap.dict_put(state, own)?;
-            }
-            copy.dict_put("AP", ap)?;
+            let own = own_appearance(&mut self.inner, &ap)?;
+            copy.dict_put("AP", own)?;
         }
         let target = self.inner.load_pdf_page(to_page)?;
         let mut page_obj = target.object();
@@ -1386,18 +1382,34 @@ impl PdfDoc {
     }
 }
 
-/// Cópia de um objeto com os dicionários e arrays diretos também copiados (uma cópia rasa
-/// compartilharia, por exemplo, a borda `/BS`, e mudar a cópia mudaria o original). Objetos
-/// indiretos continuam compartilhados.
-fn deep_copy(doc: &PdfDocument, obj: &PdfObject) -> Result<PdfObject> {
-    if obj.is_indirect()? {
+/// Chaves cujo valor fica compartilhado na cópia: apontam para outras partes do documento
+/// (página, árvore, ação, destino), que a edição da anotação nunca altera.
+const SHARED_KEYS: [&str; 7] = ["P", "Parent", "Popup", "IRT", "A", "AA", "Dest"];
+
+/// Cópia de um objeto com os dicionários e arrays (diretos ou indiretos) também copiados: uma
+/// cópia rasa compartilharia, por exemplo, a borda `/BS`, e mudar a cópia mudaria o original.
+/// Streams continuam compartilhados (a aparência é trocada à parte, em `own_appearance`).
+fn deep_copy(doc: &PdfDocument, obj: &PdfObject, depth: u32) -> Result<PdfObject> {
+    if depth > 16 {
         return Ok(obj.clone());
+    }
+    if obj.is_indirect()? {
+        return match obj.resolve()? {
+            Some(r) if !r.is_stream()? && (r.is_dict()? || r.is_array()?) => {
+                deep_copy(doc, &r, depth + 1)
+            }
+            _ => Ok(obj.clone()),
+        };
     }
     if obj.is_dict()? {
         let mut out = doc.new_dict()?;
         for i in 0..obj.dict_len()? as i32 {
             if let (Some(k), Some(v)) = (obj.get_dict_key(i)?, obj.get_dict_val(i)?) {
-                out.dict_put(k, deep_copy(doc, &v)?)?;
+                let shared = k
+                    .as_name()
+                    .is_ok_and(|n| SHARED_KEYS.iter().any(|s| s.as_bytes() == n.as_slice()));
+                let v = if shared { v } else { deep_copy(doc, &v, depth + 1)? };
+                out.dict_put(k, v)?;
             }
         }
         return Ok(out);
@@ -1406,12 +1418,46 @@ fn deep_copy(doc: &PdfDocument, obj: &PdfObject) -> Result<PdfObject> {
         let mut out = doc.new_array()?;
         for i in 0..obj.len()? as i32 {
             if let Some(v) = obj.get_array(i)? {
-                out.array_push(deep_copy(doc, &v)?)?;
+                out.array_push(deep_copy(doc, &v, depth + 1)?)?;
             }
         }
         return Ok(out);
     }
     Ok(obj.clone())
+}
+
+/// `/AP` com streams próprios em todos os níveis (`/N`, `/R`, `/D` e os estados dentro deles):
+/// ao mexer na cópia, o MuPDF regrava a aparência dela, nunca a do original.
+fn own_appearance(doc: &mut PdfDocument, ap: &PdfObject) -> Result<PdfObject> {
+    let mut out = doc.new_dict()?;
+    for i in 0..ap.dict_len()? as i32 {
+        let (Some(k), Some(v)) = (ap.get_dict_key(i)?, ap.get_dict_val(i)?) else {
+            continue;
+        };
+        let v = if v.is_stream()? {
+            own_stream(doc, &v)?
+        } else if v.is_dict()? {
+            // estados (ex.: /On e /Off)
+            let mut states = doc.new_dict()?;
+            for j in 0..v.dict_len()? as i32 {
+                if let (Some(sk), Some(sv)) = (v.get_dict_key(j)?, v.get_dict_val(j)?) {
+                    let sv = if sv.is_stream()? { own_stream(doc, &sv)? } else { sv };
+                    states.dict_put(sk, sv)?;
+                }
+            }
+            states
+        } else {
+            v
+        };
+        out.dict_put(k, v)?;
+    }
+    Ok(out)
+}
+
+fn own_stream(doc: &mut PdfDocument, stream: &PdfObject) -> Result<PdfObject> {
+    let raw = mupdf::Buffer::from_bytes(&stream.read_raw_stream()?)?;
+    let dict = stream.copy_dict()?;
+    Ok(doc.add_stream(&raw, Some(&dict), true)?)
 }
 
 /// Escala máxima de um ladrilho: 6400 % numa tela 4× (o ladrilho tem tamanho fixo).

@@ -118,3 +118,46 @@ fn revert_goes_back_to_the_saved_file() {
     assert!(d.annotations(0).unwrap().is_empty());
     assert!(!d.is_dirty() && !d.can_undo());
 }
+
+#[test]
+fn cut_then_paste_gives_a_visible_comment_also_after_saving() {
+    let (dir, _p, mut d) = doc();
+    let id = shape(&mut d);
+    // Recortar: o original fica escondido (apagado até salvar)
+    d.apply(AnnotOp::Delete { page: 0, id }).unwrap();
+    let new = d.duplicate_annot(0, id, 1, 0.0, 0.0).unwrap();
+    assert!(d.annotations(1).unwrap().iter().any(|a| a.id == new), "a cópia aparece");
+    let out = dir.path().join("salvo.pdf");
+    d.save(&out).unwrap();
+    let reopened = PdfDoc::open(&out, None).unwrap();
+    assert_eq!(reopened.annotations(1).unwrap().len(), 1, "e continua visível no arquivo");
+    assert!(reopened.annotations(0).unwrap().is_empty(), "o recortado saiu");
+}
+
+#[test]
+fn indirect_border_is_not_shared_with_the_copy() {
+    // PDF de outro programa: a borda (/BS) é um objeto indireto
+    let dir = tempfile::tempdir().unwrap();
+    let objs = vec![
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[4 0 R]>>".to_string(),
+        "<</Type/Annot/Subtype/Square/Rect[100 100 200 200]/C[1 0 0]/BS 5 0 R/StructParent 3>>".to_string(),
+        "<</W 1/S/S>>".to_string(),
+    ];
+    let path = dir.path().join("bs.pdf");
+    std::fs::write(&path, pdf_core::sample::pdf_from_objects(&objs)).unwrap();
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let id = d.annotations(0).unwrap()[0].id;
+    let new = d.duplicate_annot(0, id, 0, 10.0, 10.0).unwrap();
+    d.apply(AnnotOp::Style {
+        page: 0,
+        id: new,
+        color: Some([0.0, 0.0, 1.0]),
+        opacity: 1.0,
+        width: Some(6.0),
+    })
+    .unwrap();
+    let orig = d.annotations(0).unwrap().into_iter().find(|a| a.id == id).unwrap();
+    assert_eq!(orig.width, Some(1.0), "a borda do original não mudou");
+}
