@@ -15,26 +15,52 @@ pub const MAX_SITES: usize = 500;
 /// Chave do site: `esquema://host` em minúsculas, sem usuário nem porta. Endereços sem host
 /// (`mailto:`) são lembrados pelo esquema. `None` se não der para entender o endereço.
 pub fn site_key(url: &str) -> Option<String> {
-    let (scheme, rest) = url.trim().split_once(':')?;
-    let scheme = scheme.to_ascii_lowercase();
-    if scheme.is_empty()
-        || !scheme
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+    // espaço, controle ou barra invertida: os navegadores corrigem o endereço e podem ir a outro
+    // host; um endereço assim nunca é lembrado (o aviso aparece sempre)
+    if url
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
     {
+        return None;
+    }
+    let (scheme, rest) = url.split_once(':')?;
+    let scheme = scheme.to_ascii_lowercase();
+    let scheme_ok = scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c));
+    if !scheme_ok {
         return None;
     }
     let Some(rest) = rest.strip_prefix("//") else {
         return Some(format!("{scheme}:"));
     };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    let host = if let Some(v6) = host_port.strip_prefix('[') {
-        format!("[{}]", v6.split(']').next()?)
-    } else {
-        host_port.split(':').next().unwrap_or("").to_string()
+    let (host, port) = match authority.strip_prefix('[') {
+        Some(v6) => {
+            let (h, after) = v6.split_once(']')?;
+            let ok = !h.is_empty()
+                && h.chars()
+                    .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.');
+            let port = match after {
+                "" => None,
+                a => Some(a.strip_prefix(':')?),
+            };
+            (ok.then(|| format!("[{h}]"))?, port)
+        }
+        None => match authority.split_once(':') {
+            Some((h, p)) => (h.to_string(), Some(p)),
+            None => (authority.to_string(), None),
+        },
     };
-    (!host.is_empty()).then(|| format!("{scheme}://{}", host.to_ascii_lowercase()))
+    let host_ok = host.starts_with('[')
+        || (!host.is_empty()
+            && host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'));
+    let port_ok =
+        port.is_none_or(|p| !p.is_empty() && p.len() <= 5 && p.chars().all(|c| c.is_ascii_digit()));
+    (host_ok && port_ok).then(|| format!("{scheme}://{}", host.to_ascii_lowercase()))
 }
 
 /// Escolha lembrada para o endereço, se houver.
@@ -62,18 +88,33 @@ mod tests {
             k("HTTPS://Ex.com:8080/a?b#c").as_deref(),
             Some("https://ex.com")
         );
-        assert_eq!(
-            k("https://user:senha@ex.com/x").as_deref(),
-            Some("https://ex.com")
-        );
         assert_eq!(k("http://[::1]:80/").as_deref(), Some("http://[::1]"));
         assert_eq!(k("mailto:x@y.com").as_deref(), Some("mailto:"));
-        assert_eq!(
-            k("https://evil.com@ex.com").as_deref(),
-            Some("https://ex.com")
-        );
         assert_eq!(k("sem esquema"), None);
         assert_eq!(k("https://"), None);
+    }
+
+    #[test]
+    fn ambiguous_urls_are_never_remembered() {
+        // onde o navegador e um analisador simples podem discordar do host: sempre perguntar
+        for url in [
+            "https://user:senha@ex.com/x",
+            "https://evil.com@ex.com",
+            "https://ex.com\\@evil.com/",
+            "https://ex.com\\.evil.com/",
+            "https://ex.com\t/",
+            "https://ex.com\n.evil.com",
+            "https://ex%2ecom/",
+            "https://ex.com:80:90/",
+            "https://ex.com:/",
+            "https://exé.com/",
+            " https://ex.com",
+        ] {
+            assert_eq!(site_key(url), None, "{url:?}");
+        }
+        let mut sites = BTreeMap::new();
+        remember(&mut sites, "https://ex.com", LinkDecision::Allow);
+        assert_eq!(remembered(&sites, "https://ex.com\\@evil.com"), None);
     }
 
     #[test]

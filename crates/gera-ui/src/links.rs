@@ -53,6 +53,7 @@ pub fn outcome(target: &LinkTarget, sites: &BTreeMap<String, LinkDecision>) -> O
         LinkTarget::File { path, page } => Outcome::Ask(LinkWarning {
             target: Target::File(path.clone(), *page),
             remember: false,
+            opened_at: None,
         }),
         LinkTarget::Blocked(_) => Outcome::Refuse(BLOCKED_MESSAGE.into()),
     })
@@ -70,6 +71,15 @@ pub struct LinkWarning {
     pub target: Target,
     /// "Lembrar desta ação para este site" (só para endereços).
     pub remember: bool,
+    /// Quando a janela apareceu (os botões só valem depois de `ARM_DELAY`).
+    pub opened_at: Option<f64>,
+}
+
+/// Segundos até os botões aceitarem clique: o clique que abriu o aviso não pode cair em Permitir.
+pub const ARM_DELAY: f64 = 0.6;
+
+fn armed(opened_at: f64, now: f64) -> bool {
+    now - opened_at >= ARM_DELAY - 1e-9
 }
 
 /// Resposta da janela.
@@ -84,12 +94,18 @@ impl LinkWarning {
         Self {
             target: Target::Url(url.into()),
             remember: false,
+            opened_at: None,
         }
     }
 
     /// Mostra a janela; devolve a resposta quando o usuário escolhe.
     pub fn show(&mut self, ctx: &egui::Context) -> Option<Answer> {
         let mut answer = None;
+        let now = ctx.input(|i| i.time);
+        let ready = armed(*self.opened_at.get_or_insert(now), now);
+        if !ready {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(ARM_DELAY));
+        }
         egui::Window::new("Aviso de segurança")
             .collapsible(false)
             .resizable(false)
@@ -115,10 +131,13 @@ impl LinkWarning {
                 }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Permitir").clicked() {
+                    if ui
+                        .add_enabled(ready, egui::Button::new("Permitir"))
+                        .clicked()
+                    {
                         answer = Some(Answer::Allow);
                     }
-                    let block = ui.button("Bloquear");
+                    let block = ui.add_enabled(ready, egui::Button::new("Bloquear"));
                     if block.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                         answer = Some(Answer::Block);
                     }
@@ -159,6 +178,14 @@ mod tests {
         assert_eq!(hit(1, 7.0).as_deref(), Some("https://c"));
         assert_eq!(hit(0, 50.0), None);
         assert_eq!(hit(2, 2.0), None);
+    }
+
+    #[test]
+    fn buttons_wait_before_accepting_a_click() {
+        // o clique (ou o duplo clique) que abriu o aviso não pode cair em Permitir
+        assert!(!armed(10.0, 10.0));
+        assert!(!armed(10.0, 10.0 + ARM_DELAY - 0.01));
+        assert!(armed(10.0, 10.0 + ARM_DELAY));
     }
 
     #[test]
