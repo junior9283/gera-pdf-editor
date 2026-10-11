@@ -2,6 +2,7 @@
 pub mod sample;
 
 mod annot_edit;
+mod attachments;
 mod compare;
 mod compare_report;
 mod compress;
@@ -32,6 +33,7 @@ mod text_fit;
 mod types;
 mod worker;
 
+pub use attachments::MAX_ATTACHMENT_BYTES;
 pub use compare::{
     compare, Change, ChangeKind, CompareInput, CompareOptions, CompareStage, Comparison,
 };

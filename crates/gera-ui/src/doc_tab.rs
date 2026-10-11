@@ -136,6 +136,8 @@ pub struct DocTab {
     paste_rx: Option<std::sync::mpsc::Receiver<crate::clipboard::SystemClip>>,
     /// Imagens coladas gravadas na pasta temporária (apagadas ao fechar a aba).
     pasted_files: Vec<std::path::PathBuf>,
+    /// Anexos do documento e dos comentários (painel Anexos).
+    pub(crate) attachments: Vec<pdf_core::AttachmentInfo>,
     /// Marcador recém-criado (o painel o seleciona e abre a renomeação).
     pub(crate) bookmark_created: Option<i32>,
     /// Arquivo → Reverter: a pergunta está aberta.
@@ -301,6 +303,7 @@ impl DocTab {
             select_newest_on: None,
             revert_ask: false,
             bookmark_created: None,
+            attachments: Vec::new(),
             marquee: None,
             focus_zoom: false,
             zoom_text: None,
@@ -1032,6 +1035,7 @@ impl DocTab {
         self.form.notes = summary.form_notes;
         self.outline = summary.outline;
         self.links = summary.links;
+        self.attachments = summary.attachments;
         (summary.path, summary.sizes)
     }
 
@@ -1255,6 +1259,19 @@ impl DocTab {
                     if let Some(view) = self.view.as_mut() {
                         view.on_tile(ctx, page, scale, invert, rotation, tile, image);
                     }
+                }
+                Response::AttachmentsChanged {
+                    attachments,
+                    history,
+                } => {
+                    self.attachments = attachments;
+                    self.history = history;
+                }
+                Response::AttachmentWritten { dest, open: true } => {
+                    self.events.push(DocEvent::OpenFile(dest))
+                }
+                Response::AttachmentWritten { dest, open: false } => {
+                    self.status = format!("Anexo salvo em {}", dest.display());
                 }
                 Response::OutlineChanged {
                     outline,

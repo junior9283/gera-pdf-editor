@@ -448,6 +448,25 @@ pub enum InitialZoom {
     Factor(f32),
 }
 
+/// Anexo (painel Anexos).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AttachmentInfo {
+    /// Nome na árvore de anexos (ou o do arquivo, nos de comentário).
+    pub name: String,
+    pub filename: String,
+    pub description: String,
+    pub size: usize,
+    pub origin: AttachmentOrigin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachmentOrigin {
+    /// Anexado ao documento (`/EmbeddedFiles`).
+    Document,
+    /// Anexo de um comentário `FileAttachment`.
+    Comment { page: i32, id: i32 },
+}
+
 /// Marcador (painel Marcadores), em ordem de exibição.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutlineNode {
@@ -516,6 +535,7 @@ pub struct DocSummary {
     /// Links de todas as páginas.
     pub links: Vec<LinkInfo>,
     pub initial_view: InitialView,
+    pub attachments: Vec<AttachmentInfo>,
     /// Campos de formulário de todas as páginas.
     pub fields: Vec<crate::FieldInfo>,
     pub form_notes: crate::FormNotes,
@@ -825,4 +845,5 @@ pub enum Changed {
     Fields,
     /// Marcadores (com o id do criado, se houver).
     Outline(Option<i32>),
+    Attachments,
 }

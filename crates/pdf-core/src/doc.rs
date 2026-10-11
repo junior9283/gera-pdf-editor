@@ -1373,6 +1373,7 @@ impl PdfDoc {
             annots,
             links,
             initial_view: self.initial_view(),
+            attachments: self.attachments(),
             fields: self.all_fields().unwrap_or_default(),
             form_notes: self.form_notes().unwrap_or_default(),
             security: self.security()?,

@@ -42,6 +42,25 @@ pub enum Request {
     },
     /// Arquivo → Reverter: relê o arquivo salvo (responde `PagesChanged`).
     Revert,
+    /// Anexos (respondem `AttachmentsChanged`).
+    AddAttachment {
+        path: PathBuf,
+        description: String,
+    },
+    RemoveAttachment {
+        name: String,
+    },
+    DescribeAttachment {
+        name: String,
+        text: String,
+    },
+    /// Grava o anexo em `dest` (Salvar, ou a cópia para abrir); responde `AttachmentWritten`.
+    WriteAttachment {
+        origin: crate::types::AttachmentOrigin,
+        name: String,
+        dest: PathBuf,
+        open: bool,
+    },
     /// Edição dos marcadores (responde `OutlineChanged`).
     Outline(crate::types::OutlineOp),
     /// Propriedades → OK (responde `PagesChanged`: o resumo leva a visualização inicial).
@@ -227,6 +246,15 @@ pub enum Response {
     ContentBox {
         page: i32,
         rect: Option<PdfRect>,
+    },
+    AttachmentsChanged {
+        attachments: Vec<crate::types::AttachmentInfo>,
+        history: HistoryState,
+    },
+    /// O anexo foi gravado em `dest` (`open`: abrir numa aba).
+    AttachmentWritten {
+        dest: PathBuf,
+        open: bool,
     },
     /// Marcadores depois de uma edição (`created`: o novo, para selecionar).
     OutlineChanged {
@@ -458,6 +486,32 @@ impl State {
                 }
             }
             Request::Outline(op) => self.edit(send, |d| Ok(Changed::Outline(d.edit_outline(op)?))),
+            Request::AddAttachment { path, description } => self.edit(send, |d| {
+                d.add_attachment(&path, &description)?;
+                Ok(Changed::Attachments)
+            }),
+            Request::RemoveAttachment { name } => self.edit(send, |d| {
+                d.remove_attachment(&name)?;
+                Ok(Changed::Attachments)
+            }),
+            Request::DescribeAttachment { name, text } => self.edit(send, |d| {
+                d.set_attachment_description(&name, &text)?;
+                Ok(Changed::Attachments)
+            }),
+            Request::WriteAttachment {
+                origin,
+                name,
+                dest,
+                open,
+            } => send(
+                match self.with_doc(|d| {
+                    let bytes = d.attachment_bytes(&origin, &name)?;
+                    crate::doc::write_bytes_atomic(&dest, &bytes)
+                }) {
+                    Ok(()) => Response::AttachmentWritten { dest, open },
+                    Err(e) => Response::EditFailed(e),
+                },
+            ),
             Request::SetProperties(e) => self.edit(send, |d| {
                 d.set_properties(&e)?;
                 Ok(Changed::Document)
@@ -725,6 +779,10 @@ impl State {
             Ok(Changed::Outline(created)) => send(Response::OutlineChanged {
                 outline: d.outline_tree().unwrap_or_default(),
                 created,
+                history: d.history_state(),
+            }),
+            Ok(Changed::Attachments) => send(Response::AttachmentsChanged {
+                attachments: d.attachments(),
                 history: d.history_state(),
             }),
             Ok(Changed::Fields) => send(Response::FieldsChanged {
