@@ -873,9 +873,13 @@ impl PdfDoc {
         self.after_protection_saved()
     }
 
-    /// Arquivo → Reverter.
+    /// Arquivo → Reverter: também a proteção pedida e as fontes embutidas desde o último Salvar
+    /// deixam de valer (o Salvar seguinte grava o arquivo como ele está no disco).
     pub fn revert(&mut self) -> Result<()> {
-        self.discard_changes()
+        self.discard_changes()?;
+        self.pending_protection = None;
+        self.added_fonts.clear();
+        Ok(())
     }
 
     /// Volta ao arquivo do disco (com a mesma senha), sem as edições em memória.

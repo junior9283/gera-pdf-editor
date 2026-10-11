@@ -161,3 +161,21 @@ fn indirect_border_is_not_shared_with_the_copy() {
     let orig = d.annotations(0).unwrap().into_iter().find(|a| a.id == id).unwrap();
     assert_eq!(orig.width, Some(1.0), "a borda do original não mudou");
 }
+
+#[test]
+fn revert_drops_a_pending_password() {
+    let (dir, _p, mut d) = doc();
+    d.set_protection(Some(pdf_core::Protection {
+        open_password: "segredo".into(),
+        owner_password: String::new(),
+        permissions: pdf_core::Permissions::ALL,
+    }))
+    .unwrap();
+    assert!(d.protection_pending());
+    d.revert().unwrap();
+    assert!(!d.protection_pending(), "a senha pendente foi revertida");
+    shape(&mut d);
+    let out = dir.path().join("depois.pdf");
+    d.save(&out).unwrap();
+    assert!(PdfDoc::open(&out, None).is_ok(), "salvo sem a senha revertida");
+}
