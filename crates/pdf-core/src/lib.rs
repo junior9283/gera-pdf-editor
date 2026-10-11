@@ -37,6 +37,7 @@ mod stamp;
 mod text_fit;
 mod types;
 mod worker;
+mod xfdf;
 
 pub use annot_edit::{callout_end, dist_to_segment, MAX_VERTICES};
 pub use attachments::MAX_ATTACHMENT_BYTES;

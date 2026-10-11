@@ -144,3 +144,73 @@ fn garbage_is_refused_without_changes() {
     assert!(dst.import_comments(&bad).is_err());
     assert!(summary(&dst).is_empty());
 }
+
+#[test]
+fn xfdf_round_trip_keeps_kind_page_text_author_color_and_replies() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = commented(&dir);
+    let xfdf = dir.path().join("c.xfdf");
+    assert_eq!(
+        src.export_comments(&xfdf, CommentFormat::Xfdf, None)
+            .unwrap(),
+        4
+    );
+    let text = std::fs::read_to_string(&xfdf).unwrap();
+    assert!(text.contains("<xfdf") && text.contains("feito ✓"), "{text}");
+    let mut dst = blank(&dir, 2);
+    let report = dst.import_comments(&xfdf).unwrap();
+    assert_eq!((report.added, report.skipped), (4, 0));
+    assert_eq!(summary(&dst), summary(&src));
+    dst.undo().unwrap();
+    assert!(summary(&dst).is_empty(), "uma etapa");
+}
+
+#[test]
+fn hostile_xfdf_is_read_safely() {
+    let dir = tempfile::tempdir().unwrap();
+    let bad = dir.path().join("ruim.xfdf");
+    std::fs::write(
+        &bad,
+        r#"<?xml version="1.0"?>
+<!DOCTYPE x [<!ENTITY a "aaaaaaaaaa"><!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;">]>
+<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+<text page="0" rect="NaN,1,2,3" name="a"><contents>&b;</contents></text>
+<text page="-1" rect="10,10,30,30" name="b"/>
+<text page="0" rect="10,10,30,30" name="c" inreplyto="d"><contents>x &amp; y</contents></text>
+<text page="0" rect="40,10,60,30" name="d" inreplyto="c"/>
+<blob page="0" rect="10,10,30,30"/>
+</annots></xfdf>"#,
+    )
+    .unwrap();
+    let mut dst = blank(&dir, 1);
+    let report = dst.import_comments(&bad).unwrap();
+    assert_eq!(report.added, 2, "só os de retângulo e página válidos");
+    assert_eq!(report.skipped, 3);
+    let all = dst.annotations(0).unwrap();
+    assert!(all.iter().any(|a| a.contents == "x & y"));
+    let broken = dir.path().join("quebrado.xfdf");
+    std::fs::write(&broken, "<?xml version=\"1.0\"?><xfdf><annots><text page=").unwrap();
+    assert!(dst.import_comments(&broken).is_err());
+}
+
+#[test]
+fn imported_comments_bring_no_actions() {
+    let dir = tempfile::tempdir().unwrap();
+    let objs = vec![
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[4 0 R]>>".to_string(),
+        "<</Type/Annot/Subtype/Text/Rect[10 10 30 30]/Contents(oi)/A<</S/JavaScript/JS(app.alert(1))>>/AA<</E<</S/Launch/F(calc)>>>>>>".to_string(),
+    ];
+    let src = dir.path().join("hostil.pdf");
+    std::fs::write(&src, pdf_core::sample::pdf_from_objects(&objs)).unwrap();
+    let mut dst = blank(&dir, 1);
+    assert_eq!(dst.import_comments(&src).unwrap().added, 1);
+    let out = dir.path().join("saida.pdf");
+    dst.save(&out).unwrap();
+    let raw = String::from_utf8_lossy(&std::fs::read(&out).unwrap()).into_owned();
+    assert!(
+        !raw.contains("JavaScript") && !raw.contains("Launch"),
+        "ações vieram junto"
+    );
+}
