@@ -91,7 +91,7 @@ fn empty_sig_field(
 ) -> Option<i32> {
     fields
         .iter()
-        .filter(|f| f.page == page && matches!(f.kind, FieldKind::Signature))
+        .filter(|f| f.page == page && !f.hidden && matches!(f.kind, FieldKind::Signature))
         .filter(|f| !signed.iter().any(|s| s.page == page && s.id == f.id))
         .find(|f| f.rect.x0 <= p.0 && p.0 <= f.rect.x1 && f.rect.y0 <= p.1 && p.1 <= f.rect.y1)
         .map(|f| f.id)
@@ -296,6 +296,10 @@ mod tests {
         let fields = [field(1, FieldKind::Signature)];
         assert_eq!(empty_sig_field(&fields, &[], 0, (10.0, 10.0)), Some(1));
         assert_eq!(empty_sig_field(&fields, &[], 0, (200.0, 10.0)), None);
+        // um campo oculto não recebe a assinatura (ela ficaria invisível)
+        let mut hidden = field(1, FieldKind::Signature);
+        hidden.hidden = true;
+        assert_eq!(empty_sig_field(&[hidden], &[], 0, (10.0, 10.0)), None);
         let text = [field(2, FieldKind::Button { reset: false })];
         assert_eq!(empty_sig_field(&text, &[], 0, (10.0, 10.0)), None);
     }
