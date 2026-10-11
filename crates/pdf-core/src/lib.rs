@@ -15,6 +15,7 @@ mod doc;
 mod edit_images;
 mod edit_text;
 mod error;
+mod form_scripts;
 mod forms;
 mod layers;
 mod links;
@@ -58,6 +59,11 @@ pub use doc::{max_render_scale, PdfDoc};
 pub use edit_images::{ImageEdit, PageImage};
 pub use edit_text::{PageTextBlock, MIN_TEXT_WIDTH, NEW_TEXT_SIZE, TEXT_MARGIN};
 pub use error::{PdfError, Result};
+pub use form_scripts::{
+    calc_fields, calc_script, commit_value, evaluate, format_scripts, format_value, keystroke_ok,
+    number_of, parse_calc, parse_format, parse_validate, validate as validate_field,
+    validate_script, CalcOp, FieldCalc, FieldFormat, FieldValidate, Formatted,
+};
 pub use forms::{FieldInfo, FieldKind, FormNotes};
 pub use layers::LayerNode;
 pub use ocr::{tessdata_dir, OcrLanguage, OcrReport};
