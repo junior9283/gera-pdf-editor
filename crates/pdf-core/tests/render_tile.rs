@@ -11,7 +11,9 @@ fn doc(pages: usize, rotate: i32) -> (tempfile::TempDir, PdfDoc) {
 /// O ladrilho (tx, ty) de lado `size` é o mesmo recorte do render inteiro na mesma escala.
 fn assert_tile_matches(d: &PdfDoc, rotation: Rotation, scale: f32, tile: (u32, u32), size: u32) {
     let full = d.render_rotated(0, scale, false, rotation).unwrap();
-    let t = d.render_tile(0, scale, false, rotation, tile, size).unwrap();
+    let t = d
+        .render_tile(0, scale, false, rotation, tile, size)
+        .unwrap();
     let (x0, y0) = (tile.0 * size, tile.1 * size);
     assert_eq!(t.width, size.min(full.width - x0));
     assert_eq!(t.height, size.min(full.height - y0));
@@ -52,15 +54,21 @@ fn tile_outside_the_page_is_refused() {
     let err = d.render_tile(0, 1.0, false, Rotation::R0, (50, 0), 128);
     assert!(matches!(err, Err(PdfError::InvalidScale(_))), "{err:?}");
     // escala absurda também
-    assert!(d.render_tile(0, 1.0e6, false, Rotation::R0, (0, 0), 128).is_err());
-    assert!(d.render_tile(0, 1.0, false, Rotation::R0, (0, 0), 0).is_err());
+    assert!(d
+        .render_tile(0, 1.0e6, false, Rotation::R0, (0, 0), 128)
+        .is_err());
+    assert!(d
+        .render_tile(0, 1.0, false, Rotation::R0, (0, 0), 0)
+        .is_err());
 }
 
 #[test]
 fn tiles_allow_zooms_above_the_full_page_cap() {
     let (_dir, d) = doc(1, 0);
     // 6400 % em tela 2× (escala 128): a página inteira seria gigante, o ladrilho não
-    let t = d.render_tile(0, 128.0, false, Rotation::R0, (72, 70), 512).unwrap();
+    let t = d
+        .render_tile(0, 128.0, false, Rotation::R0, (72, 70), 512)
+        .unwrap();
     assert_eq!((t.width, t.height), (512, 512));
 }
 
@@ -108,6 +116,10 @@ fn content_box_of_a_giant_page_does_not_allocate_the_page() {
     let size = d.page_size(0).unwrap();
     let t = std::time::Instant::now();
     let r = d.content_box(0).unwrap();
-    assert!(t.elapsed().as_secs_f32() < 2.0, "{:?} para {size:?}", t.elapsed());
+    assert!(
+        t.elapsed().as_secs_f32() < 2.0,
+        "{:?} para {size:?}",
+        t.elapsed()
+    );
     assert!(r.is_some(), "o X aparece mesmo na escala reduzida");
 }

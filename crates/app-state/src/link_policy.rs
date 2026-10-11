@@ -17,7 +17,11 @@ pub const MAX_SITES: usize = 500;
 pub fn site_key(url: &str) -> Option<String> {
     let (scheme, rest) = url.trim().split_once(':')?;
     let scheme = scheme.to_ascii_lowercase();
-    if scheme.is_empty() || !scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c)) {
+    if scheme.is_empty()
+        || !scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+    {
         return None;
     }
     let Some(rest) = rest.strip_prefix("//") else {
@@ -54,11 +58,20 @@ mod tests {
     #[test]
     fn site_key_normalizes_host() {
         let k = |u| site_key(u);
-        assert_eq!(k("HTTPS://Ex.com:8080/a?b#c").as_deref(), Some("https://ex.com"));
-        assert_eq!(k("https://user:senha@ex.com/x").as_deref(), Some("https://ex.com"));
+        assert_eq!(
+            k("HTTPS://Ex.com:8080/a?b#c").as_deref(),
+            Some("https://ex.com")
+        );
+        assert_eq!(
+            k("https://user:senha@ex.com/x").as_deref(),
+            Some("https://ex.com")
+        );
         assert_eq!(k("http://[::1]:80/").as_deref(), Some("http://[::1]"));
         assert_eq!(k("mailto:x@y.com").as_deref(), Some("mailto:"));
-        assert_eq!(k("https://evil.com@ex.com").as_deref(), Some("https://ex.com"));
+        assert_eq!(
+            k("https://evil.com@ex.com").as_deref(),
+            Some("https://ex.com")
+        );
         assert_eq!(k("sem esquema"), None);
         assert_eq!(k("https://"), None);
     }
@@ -67,7 +80,10 @@ mod tests {
     fn remembered_choice_matches_by_site() {
         let mut sites = BTreeMap::new();
         remember(&mut sites, "https://ex.com/a", LinkDecision::Block);
-        assert_eq!(remembered(&sites, "https://EX.com:443/b"), Some(LinkDecision::Block));
+        assert_eq!(
+            remembered(&sites, "https://EX.com:443/b"),
+            Some(LinkDecision::Block)
+        );
         assert_eq!(remembered(&sites, "http://ex.com/b"), None, "outro esquema");
         assert_eq!(remembered(&sites, "https://outro.com"), None);
     }
@@ -76,7 +92,11 @@ mod tests {
     fn remembered_sites_are_capped() {
         let mut sites = BTreeMap::new();
         for i in 0..MAX_SITES + 10 {
-            remember(&mut sites, &format!("https://s{i}.com"), LinkDecision::Allow);
+            remember(
+                &mut sites,
+                &format!("https://s{i}.com"),
+                LinkDecision::Allow,
+            );
         }
         assert_eq!(sites.len(), MAX_SITES);
     }

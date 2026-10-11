@@ -3,8 +3,8 @@ pub const MAX_ZOOM: f32 = 64.0;
 
 /// Níveis de ampliação do Acrobat (lista do campo de zoom e passos de Ampliar/Reduzir).
 pub const LEVELS: [f32; 20] = [
-    MIN_ZOOM, 0.125, 0.25, 0.3333, 0.5, 0.6667, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0,
-    16.0, 24.0, 32.0, MAX_ZOOM,
+    MIN_ZOOM, 0.125, 0.25, 0.3333, 0.5, 0.6667, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0,
+    12.0, 16.0, 24.0, 32.0, MAX_ZOOM,
 ];
 pub const DEFAULT_ZOOM: f32 = 1.0;
 

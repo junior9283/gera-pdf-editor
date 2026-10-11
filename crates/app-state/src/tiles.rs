@@ -5,10 +5,16 @@ pub const MAX_TILES: usize = 64;
 
 /// Ladrilhos (coluna, linha) de lado `tile` px que cobrem `visible` (x0, y0, x1, y1 em pixels
 /// da página inteira renderizada, que mede `page_px`). Recortado à página; no máximo `MAX_TILES`.
-pub fn visible_tiles(page_px: (f32, f32), visible: (f32, f32, f32, f32), tile: f32) -> Vec<(u32, u32)> {
+pub fn visible_tiles(
+    page_px: (f32, f32),
+    visible: (f32, f32, f32, f32),
+    tile: f32,
+) -> Vec<(u32, u32)> {
     let ok = |v: f32| v.is_finite();
     if !(tile >= 1.0 && ok(page_px.0) && ok(page_px.1))
-        || ![visible.0, visible.1, visible.2, visible.3].into_iter().all(ok)
+        || ![visible.0, visible.1, visible.2, visible.3]
+            .into_iter()
+            .all(ok)
     {
         return Vec::new();
     }
@@ -34,7 +40,11 @@ mod tests {
     #[test]
     fn visible_tiles_cover_only_the_viewport_and_are_capped() {
         // página de 10 000 px; janela de 1000×600 a partir de (1100, 2000)
-        let t = visible_tiles((10_000.0, 10_000.0), (1100.0, 2000.0, 2100.0, 2600.0), 512.0);
+        let t = visible_tiles(
+            (10_000.0, 10_000.0),
+            (1100.0, 2000.0, 2100.0, 2600.0),
+            512.0,
+        );
         assert_eq!(t.first(), Some(&(2, 3)));
         assert_eq!(t.last(), Some(&(4, 5)));
         assert_eq!(t.len(), 9);

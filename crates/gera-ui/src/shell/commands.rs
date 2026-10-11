@@ -55,7 +55,9 @@ impl Command {
             Command::Identity => "Identidade…",
             Command::Compare => "Comparar arquivos…",
             Command::Tool(id) => {
-                return app_state::tools_catalog::find(id).map_or(*id, |t| t.name).into()
+                return app_state::tools_catalog::find(id)
+                    .map_or(*id, |t| t.name)
+                    .into()
             }
             Command::Doc(d) => match d {
                 DocCommand::Save => "Salvar",
@@ -298,7 +300,10 @@ mod tests {
         assert_eq!(text(DocCommand::FirstPage), "Ctrl+Shift+PageUp");
         assert_eq!(text(DocCommand::LastPage), "Ctrl+Shift+PageDown");
         let all = shortcuts();
-        let has = |m, k, c: DocCommand| all.iter().any(|(s, x)| s.modifiers == m && s.logical_key == k && *x == Command::Doc(c));
+        let has = |m, k, c: DocCommand| {
+            all.iter()
+                .any(|(s, x)| s.modifiers == m && s.logical_key == k && *x == Command::Doc(c))
+        };
         let cs = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
         assert!(has(cs, Key::ArrowUp, DocCommand::FirstPage));
         assert!(has(cs, Key::ArrowDown, DocCommand::LastPage));
@@ -306,7 +311,12 @@ mod tests {
 
     #[test]
     fn tool_commands_are_labelled_from_the_catalog() {
-        assert_eq!(Command::Tool(app_state::tools_catalog::EXPORT).label(), app_state::tools_catalog::find(app_state::tools_catalog::EXPORT).unwrap().name);
+        assert_eq!(
+            Command::Tool(app_state::tools_catalog::EXPORT).label(),
+            app_state::tools_catalog::find(app_state::tools_catalog::EXPORT)
+                .unwrap()
+                .name
+        );
     }
 
     #[test]

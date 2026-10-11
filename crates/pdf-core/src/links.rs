@@ -97,8 +97,13 @@ impl PdfDoc {
             } else {
                 String::from_utf8_lossy(&dest.as_name().ok()?).into_owned()
             };
-            let d = self.inner.resolve_link(&format!("#nameddest={name}")).ok()??;
-            let page = i32::try_from(d.loc.page_number).ok().filter(|p| *p < count)?;
+            let d = self
+                .inner
+                .resolve_link(&format!("#nameddest={name}"))
+                .ok()??;
+            let page = i32::try_from(d.loc.page_number)
+                .ok()
+                .filter(|p| *p < count)?;
             return Some((page, None));
         }
         (dest.is_array().ok()? && dest.len().ok()? >= 2).then_some(())?;
@@ -231,7 +236,11 @@ mod tests {
                 kind: DestinationKind::Fit,
             },
         };
-        let t = target_of(LinkAction::Action(goto_r("../../bin/sh")), 1, Path::new("/a"));
+        let t = target_of(
+            LinkAction::Action(goto_r("../../bin/sh")),
+            1,
+            Path::new("/a"),
+        );
         assert!(matches!(t, Some(LinkTarget::Blocked(_))), "{t:?}");
         let t = target_of(LinkAction::Action(goto_r("x.PDF")), 1, Path::new("/a"));
         assert!(matches!(t, Some(LinkTarget::File { .. })), "{t:?}");

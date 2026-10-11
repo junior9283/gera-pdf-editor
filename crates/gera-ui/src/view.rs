@@ -159,7 +159,6 @@ impl DocView {
         std::mem::replace(&mut self.spread, new) != new
     }
 
-
     /// Faixa vertical do layout mostrada na área de rolagem: `(topo, altura)`. Tudo, ou só a
     /// linha atual nos modos página a página.
     pub fn window(&self) -> (f32, f32) {
@@ -243,7 +242,9 @@ impl DocView {
     /// Primeira página da linha `step` linhas adiante (ou atrás) da que tem `page`; `None` se não
     /// houver. Uma linha é uma página, ou um par nos modos de duas páginas.
     pub fn page_step(&self, page: usize, step: i32) -> Option<usize> {
-        let row = self.layout.row_of(page.min(self.layout.page_count().checked_sub(1)?));
+        let row = self
+            .layout
+            .row_of(page.min(self.layout.page_count().checked_sub(1)?));
         let target = row.checked_add_signed(step as isize)?;
         (target != row && target <= self.layout.last_row())
             .then(|| self.layout.row_pages(target).start)
@@ -251,7 +252,9 @@ impl DocView {
 
     /// A vista atual (`scroll_y` da área de rolagem, `page` em cima), para o histórico.
     pub fn view_entry(&self, scroll_y: f32, page: usize) -> ViewEntry {
-        let top = self.layout.page_top(page.min(self.layout.page_count().saturating_sub(1)));
+        let top = self
+            .layout
+            .page_top(page.min(self.layout.page_count().saturating_sub(1)));
         ViewEntry {
             page,
             y: (scroll_y + self.window().0 - top) / self.zoom,

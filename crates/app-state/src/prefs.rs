@@ -1,8 +1,8 @@
 //! Preferências da interface, guardadas entre sessões.
 use crate::link_policy::{site_key, LinkDecision, MAX_SITES};
 use crate::store;
-use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 pub const MIN_PANEL: f32 = 120.0;
@@ -117,8 +117,10 @@ mod tests {
     #[test]
     fn bad_link_sites_are_dropped() {
         let mut p = Prefs::default();
-        p.link_sites.insert("https://ex.com".into(), LinkDecision::Allow);
-        p.link_sites.insert("HTTPS://Ex.com/x".into(), LinkDecision::Allow);
+        p.link_sites
+            .insert("https://ex.com".into(), LinkDecision::Allow);
+        p.link_sites
+            .insert("HTTPS://Ex.com/x".into(), LinkDecision::Allow);
         p.link_sites.insert("lixo".into(), LinkDecision::Block);
         let p = p.sanitized();
         assert_eq!(p.link_sites.keys().collect::<Vec<_>>(), ["https://ex.com"]);

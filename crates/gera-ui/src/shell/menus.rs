@@ -42,7 +42,6 @@ fn check(ui: &mut egui::Ui, out: &mut Option<Command>, cmd: Command, checked: bo
     }
 }
 
-
 pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
     let mut out = None;
     let has_doc = s.doc_mode.is_some();
@@ -163,8 +162,18 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
             check(ui, &mut out, Command::ToggleDark, s.dark, true);
         });
         ui.menu_button("Assinar", |ui| {
-            item(ui, &mut out, Command::Tool(tools_catalog::FILL_SIGN), has_doc);
-            item(ui, &mut out, Command::Tool(tools_catalog::CERTIFICATES), has_doc);
+            item(
+                ui,
+                &mut out,
+                Command::Tool(tools_catalog::FILL_SIGN),
+                has_doc,
+            );
+            item(
+                ui,
+                &mut out,
+                Command::Tool(tools_catalog::CERTIFICATES),
+                has_doc,
+            );
         });
         ui.menu_button("Janela", |ui| {
             for (tab, title) in &s.tabs {

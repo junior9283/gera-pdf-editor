@@ -206,7 +206,10 @@ impl PdfDoc {
         size: u32,
     ) -> Result<RenderedPage> {
         let page = self.load(page)?;
-        if !scale.is_finite() || scale <= 0.0 || scale > MAX_TILE_SCALE || !(1..=4096).contains(&size)
+        if !scale.is_finite()
+            || scale <= 0.0
+            || scale > MAX_TILE_SCALE
+            || !(1..=4096).contains(&size)
         {
             return Err(PdfError::InvalidScale(scale));
         }

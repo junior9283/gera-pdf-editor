@@ -3,8 +3,8 @@ use crate::canvas::{self, CanvasFrame};
 use crate::edit::{screen_rect, EditState};
 use crate::print_job::{self, PrintJobs};
 use crate::search::SearchState;
-use crate::shell::print_dialog::{PrintChoice, PrintDialog};
 use crate::shell::commands::{self, Command};
+use crate::shell::print_dialog::{PrintChoice, PrintDialog};
 use crate::sidebar::{self, SidebarAction};
 use crate::view::DocView;
 use app_state::layout::ViewMode;
@@ -1761,7 +1761,11 @@ impl DocTab {
             .on_hover_text(commands::hover(&Command::Doc(DocCommand::NextPage)))
             .clicked();
         if prev || next {
-            self.navigate(if next { DocCommand::NextPage } else { DocCommand::PrevPage });
+            self.navigate(if next {
+                DocCommand::NextPage
+            } else {
+                DocCommand::PrevPage
+            });
         } else if go.changed() {
             self.jump(page as i32 - 1, None);
         }
