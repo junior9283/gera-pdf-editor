@@ -33,7 +33,9 @@ pub fn site_key(url: &str) -> Option<String> {
         return None;
     }
     let Some(rest) = rest.strip_prefix("//") else {
-        return Some(format!("{scheme}:"));
+        // só um esquema sem host (mailto:) é lembrado pelo esquema; "https:host" sem "//" ainda
+        // vai a um host no navegador, e lembrar "https:" liberaria todos
+        return (scheme == "mailto").then(|| format!("{scheme}:"));
     };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     let (host, port) = match authority.strip_prefix('[') {
@@ -109,6 +111,11 @@ mod tests {
             "https://ex.com:/",
             "https://exé.com/",
             " https://ex.com",
+            // sem "//" o navegador ainda acha o host (WHATWG): nunca lembrar pelo esquema
+            "https:evil.com",
+            "http:/evil.com",
+            "HTTPS:ex.com",
+            "ftp:host/x",
         ] {
             assert_eq!(site_key(url), None, "{url:?}");
         }

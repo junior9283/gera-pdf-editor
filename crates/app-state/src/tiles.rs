@@ -1,7 +1,8 @@
 //! Ladrilhos de alta resolução: quais recortes da página cobrem a parte visível.
 
-/// Teto de ladrilhos por página e quadro (uma tela 4K com ladrilhos de 512 px usa 40).
-pub const MAX_TILES: usize = 64;
+/// Teto de ladrilhos por página e quadro: uma tela 4K com ladrilhos de 512 px, desalinhados, usa
+/// até 9 × 6.
+pub const MAX_TILES: usize = 56;
 
 /// Ladrilhos (coluna, linha) de lado `tile` px que cobrem `visible` (x0, y0, x1, y1 em pixels
 /// da página inteira renderizada, que mede `page_px`). Recortado à página; no máximo `MAX_TILES`.
