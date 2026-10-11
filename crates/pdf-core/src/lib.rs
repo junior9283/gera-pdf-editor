@@ -37,6 +37,7 @@ mod text_fit;
 mod types;
 mod worker;
 
+pub use annot_edit::erase_strokes;
 pub use attachments::MAX_ATTACHMENT_BYTES;
 pub use compare::{
     compare, Change, ChangeKind, CompareInput, CompareOptions, CompareStage, Comparison,

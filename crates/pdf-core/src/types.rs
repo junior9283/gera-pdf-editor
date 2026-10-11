@@ -115,6 +115,8 @@ pub enum AnnotKind {
     Caret,
     /// Texto explicativo (caixa de texto com linha de chamada).
     Callout,
+    /// Arquivo anexado como comentário (ícone de clipe).
+    FileAttachment,
     /// Tipo que não criamos (de outro programa): selecionável e apagável.
     #[default]
     Other,
@@ -351,6 +353,13 @@ pub enum NewAnnot {
         size: f32,
         color: [f32; 3],
     },
+    /// Anexar arquivo: o arquivo vai embutido no comentário (ícone de clipe em `at`).
+    FileAttachment {
+        page: i32,
+        at: (f32, f32),
+        path: std::path::PathBuf,
+        description: String,
+    },
     /// Polígono (`closed`), linhas conectadas (aberto) ou nuvem (`cloud`, sempre fechada).
     Polygon {
         page: i32,
@@ -422,7 +431,8 @@ impl NewAnnot {
             | Self::Polygon { page, .. }
             | Self::Caret { page, .. }
             | Self::ReplaceText { page, .. }
-            | Self::Callout { page, .. } => *page,
+            | Self::Callout { page, .. }
+            | Self::FileAttachment { page, .. } => *page,
         }
     }
 
@@ -433,6 +443,7 @@ impl NewAnnot {
             | Self::Underline { rects, .. }
             | Self::StrikeOut { rects, .. } => rects.is_empty(),
             Self::ReplaceText { rects, .. } => rects.is_empty(),
+            Self::FileAttachment { path, .. } => path.as_os_str().is_empty(),
             Self::Caret { rect, .. } => rect.width() <= 0.0 || rect.height() <= 0.0,
             Self::Callout { text, rect, .. } => {
                 text.trim().is_empty() || rect.width() < 3.0 || rect.height() < 3.0
@@ -733,6 +744,13 @@ pub enum AnnotOp {
         parent: i32,
         model: StateModel,
         state: String,
+    },
+    /// Borracha: apaga do desenho os trechos a menos de `radius` do caminho `path`.
+    Erase {
+        page: i32,
+        id: i32,
+        path: Vec<(f32, f32)>,
+        radius: f32,
     },
     /// Texto explicativo: leva o joelho e a ponta da linha de chamada.
     MoveCallout {

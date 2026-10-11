@@ -327,6 +327,59 @@ pub(crate) fn callout_of(doc: &PdfDocument, page: i32, id: i32) -> Result<Option
 /// Caixa do texto explicativo e a linha de chamada (ponta, joelho, ponto na caixa).
 pub(crate) type CalloutGeometry = (PdfRect, [(f32, f32); 3]);
 
+/// Teto de pontos de um desenho depois da borracha.
+const MAX_INK_POINTS: usize = 10_000;
+
+/// Distância de `p` ao segmento `a`–`b`.
+fn dist_to_segment(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 > 0.0 {
+        (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (p.0 - (a.0 + t * dx)).hypot(p.1 - (a.1 + t * dy))
+}
+
+/// Borracha do lápis: tira dos traços os pontos a menos de `radius` do caminho e corta o traço
+/// onde algum trecho passou sob a borracha. Traços com menos de 2 pontos saem.
+pub fn erase_strokes(
+    strokes: &[Vec<(f32, f32)>],
+    path: &[(f32, f32)],
+    radius: f32,
+) -> Vec<Vec<(f32, f32)>> {
+    let near = |p: (f32, f32)| path.iter().any(|&e| (e.0 - p.0).hypot(e.1 - p.1) < radius);
+    let crosses =
+        |a: (f32, f32), b: (f32, f32)| path.iter().any(|&e| dist_to_segment(e, a, b) < radius);
+    let mut out = Vec::new();
+    let mut total = 0;
+    for stroke in strokes {
+        let mut current: Vec<(f32, f32)> = Vec::new();
+        for &p in stroke {
+            let cut = near(p) || current.last().is_some_and(|&q| crosses(q, p));
+            if cut {
+                if current.len() >= 2 {
+                    total += current.len();
+                    out.push(std::mem::take(&mut current));
+                }
+                current.clear();
+            }
+            if !near(p) {
+                current.push(p);
+            }
+        }
+        if current.len() >= 2 {
+            total += current.len();
+            out.push(current);
+        }
+        if total > MAX_INK_POINTS {
+            break;
+        }
+    }
+    out
+}
+
 /// Texto explicativo (/IT /FreeTextCallout)?
 pub(crate) fn is_callout(a: &PdfAnnotation) -> Result<bool> {
     Ok(name_entry(a, "IT")?.as_deref() == Some("FreeTextCallout"))
@@ -716,6 +769,36 @@ pub(crate) fn scaled(from: PdfRect, to: PdfRect, ink: Option<Strokes>) -> Option
 
 #[cfg(test)]
 mod tests {
+
+    fn line() -> Vec<(f32, f32)> {
+        (0..=10).map(|k| (k as f32 * 10.0, 0.0)).collect()
+    }
+
+    #[test]
+    fn erasing_the_middle_splits_the_stroke() {
+        let out = erase_strokes(&[line()], &[(50.0, 0.0)], 8.0);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out[0].last(), Some(&(40.0, 0.0)));
+        assert_eq!(out[1].first(), Some(&(60.0, 0.0)));
+    }
+
+    #[test]
+    fn erasing_everything_leaves_nothing_and_far_away_changes_nothing() {
+        let all: Vec<(f32, f32)> = (0..=10).map(|k| (k as f32 * 10.0, 0.0)).collect();
+        assert!(erase_strokes(&[line()], &all, 6.0).is_empty());
+        assert_eq!(erase_strokes(&[line()], &[(50.0, 80.0)], 8.0), vec![line()]);
+    }
+
+    #[test]
+    fn erasing_between_sparse_points_cuts_the_segment() {
+        let sparse = vec![(0.0, 0.0), (100.0, 0.0), (200.0, 0.0)];
+        let out = erase_strokes(&[sparse], &[(50.0, 2.0)], 8.0);
+        assert_eq!(
+            out,
+            vec![vec![(100.0, 0.0), (200.0, 0.0)]],
+            "o trecho cortado sai"
+        );
+    }
     use super::*;
 
     fn snap(size: usize) -> Snapshot {

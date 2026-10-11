@@ -89,3 +89,58 @@ fn too_big_is_refused() {
     assert!(d.add_attachment(&big, "").is_err());
     assert!(!d.is_dirty());
 }
+
+#[test]
+fn file_attachment_comment_embeds_the_file_and_lists_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = common::write_sample(&dir, "a.pdf", 1, 0);
+    let file = dir.path().join("planilha.csv");
+    std::fs::write(&file, b"a;b\n1;2\n").unwrap();
+    let mut d = pdf_core::PdfDoc::open(&path, None).unwrap();
+    d.apply(pdf_core::AnnotOp::Create(
+        pdf_core::NewAnnot::FileAttachment {
+            page: 0,
+            at: (100.0, 100.0),
+            path: file.clone(),
+            description: "dados do mês".into(),
+        },
+    ))
+    .unwrap();
+    d.save(&path).unwrap();
+    let d = pdf_core::PdfDoc::open(&path, None).unwrap();
+    let a = d.annotations(0).unwrap().remove(0);
+    assert_eq!(a.kind, pdf_core::AnnotKind::FileAttachment);
+    assert_eq!(a.contents, "dados do mês");
+    let list = d.attachments();
+    let item = list.iter().find(|x| x.name == "planilha.csv").unwrap();
+    assert!(matches!(
+        item.origin,
+        pdf_core::AttachmentOrigin::Comment { .. }
+    ));
+    assert_eq!(
+        d.attachment_bytes(&item.origin, &item.name).unwrap(),
+        b"a;b\n1;2\n"
+    );
+}
+
+#[test]
+fn attaching_more_than_100_mb_as_a_comment_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = common::write_sample(&dir, "a.pdf", 1, 0);
+    let big = dir.path().join("grande.bin");
+    std::fs::File::create(&big)
+        .unwrap()
+        .set_len(101 * 1024 * 1024)
+        .unwrap();
+    let mut d = pdf_core::PdfDoc::open(&path, None).unwrap();
+    let r = d.apply(pdf_core::AnnotOp::Create(
+        pdf_core::NewAnnot::FileAttachment {
+            page: 0,
+            at: (100.0, 100.0),
+            path: big,
+            description: String::new(),
+        },
+    ));
+    assert!(r.is_err());
+    assert!(d.annotations(0).unwrap().is_empty());
+}

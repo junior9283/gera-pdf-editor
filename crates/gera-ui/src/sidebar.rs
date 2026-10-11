@@ -38,6 +38,7 @@ pub(crate) fn kind_label(kind: AnnotKind) -> &'static str {
         AnnotKind::Cloud => "Nuvem",
         AnnotKind::Caret => "Inserir texto",
         AnnotKind::Callout => "Texto explicativo",
+        AnnotKind::FileAttachment => "Anexo",
         AnnotKind::Other => "Anotação",
     }
 }

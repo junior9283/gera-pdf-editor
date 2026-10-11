@@ -541,6 +541,52 @@ fn add_one(doc: &mut PdfDocument, page: &mut PdfPage, a: &NewAnnot) -> Result<Pd
             annot_edit::set_callout(doc, &mut a, &ctm, *rect, [*tip, *knee, *knee])?;
             a
         }
+        NewAnnot::FileAttachment {
+            at,
+            path,
+            description,
+            ..
+        } => {
+            let len = std::fs::metadata(path)?.len();
+            if len > crate::attachments::MAX_ATTACHMENT_BYTES {
+                return Err(PdfError::InvalidAnnotation(
+                    "o arquivo passa de 100 MB".into(),
+                ));
+            }
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .filter(|n| !n.is_empty())
+                .ok_or_else(|| PdfError::InvalidAnnotation("arquivo sem nome".into()))?;
+            let bytes = std::fs::read(path)?;
+            // o arquivo vai no comentário (/FS), não na lista de anexos do documento
+            let mut params = doc.new_dict()?;
+            params.dict_put(
+                "Size",
+                PdfObject::new_int(bytes.len().min(i32::MAX as usize) as i32)?,
+            )?;
+            let mut ef_dict = doc.new_dict()?;
+            ef_dict.dict_put("Type", PdfObject::new_name("EmbeddedFile")?)?;
+            ef_dict.dict_put("Params", params)?;
+            let stream =
+                doc.add_stream(&mupdf::Buffer::from_bytes(&bytes)?, Some(&ef_dict), false)?;
+            let mut ef = doc.new_dict()?;
+            ef.dict_put("F", stream.clone())?;
+            ef.dict_put("UF", stream)?;
+            let mut fs = doc.new_dict()?;
+            fs.dict_put("Type", PdfObject::new_name("Filespec")?)?;
+            fs.dict_put("F", PdfObject::new_string(&name)?)?;
+            fs.dict_put("UF", PdfObject::new_string(&name)?)?;
+            fs.dict_put("EF", ef)?;
+            let fs = doc.add_object(&fs)?;
+            let mut a = page.create_annotation(PdfAnnotationType::FileAttachment)?;
+            a.set_rect(Rect::new(at.0, at.1, at.0 + 14.0, at.1 + 20.0))?;
+            a.object().dict_put("FS", fs)?;
+            a.set_icon_name("Paperclip")?;
+            a.set_contents(description)?;
+            a.set_color(rgb([0.0, 0.0, 1.0]))?;
+            a
+        }
         NewAnnot::ReplaceText { .. } => {
             return Err(PdfError::InvalidAnnotation(
                 "substituir texto cria duas anotações (replace_text)".into(),
@@ -715,6 +761,7 @@ fn kind_of(t: PdfAnnotationType) -> AnnotKind {
         PdfAnnotationType::Redact => AnnotKind::Redact,
         PdfAnnotationType::Polygon => AnnotKind::Polygon,
         PdfAnnotationType::Caret => AnnotKind::Caret,
+        PdfAnnotationType::FileAttachment => AnnotKind::FileAttachment,
         PdfAnnotationType::PolyLine => AnnotKind::PolyLine,
         _ => AnnotKind::Other,
     }
@@ -1215,6 +1262,36 @@ impl PdfDoc {
                     .and_then(|mut s| s.pop())
                     .unwrap_or_default();
                 Edit::Vertices { page, id, points }
+            }
+            AnnotOp::Erase {
+                page,
+                id,
+                path,
+                radius,
+            } => {
+                let (rect, ink) = annot_edit::geometry_of(&self.inner, page, id)?;
+                let strokes = ink.ok_or_else(|| {
+                    PdfError::InvalidAnnotation("a borracha só apaga desenhos".into())
+                })?;
+                let left = annot_edit::erase_strokes(&strokes, &path, radius.max(0.5));
+                if left == strokes {
+                    return Ok(Vec::new()); // nada sob a borracha
+                }
+                if left.is_empty() {
+                    // o desenho todo sumiu: sai (como Excluir)
+                    Edit::Visibility {
+                        page,
+                        id,
+                        hidden: true,
+                    }
+                } else {
+                    Edit::Geometry {
+                        page,
+                        id,
+                        rect,
+                        ink: Some(left),
+                    }
+                }
             }
             AnnotOp::MoveCallout {
                 page,

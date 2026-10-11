@@ -355,3 +355,43 @@ fn undoing_a_color_change_keeps_the_original_color_space() {
     let out = restyle_and_undo(Some(cmyk));
     assert_eq!(common::raw_color(&out), Some(cmyk));
 }
+
+#[test]
+fn eraser_splits_a_stroke_and_undoes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = common::write_sample(&dir, "a.pdf", 1, 0);
+    let mut d = pdf_core::PdfDoc::open(&path, None).unwrap();
+    let stroke: Vec<(f32, f32)> = (0..=10).map(|k| (100.0 + k as f32 * 10.0, 200.0)).collect();
+    d.apply(pdf_core::AnnotOp::Create(pdf_core::NewAnnot::Ink {
+        page: 0,
+        strokes: vec![stroke],
+    }))
+    .unwrap();
+    let id = d.annotations(0).unwrap()[0].id;
+    d.apply(pdf_core::AnnotOp::Erase {
+        page: 0,
+        id,
+        path: vec![(150.0, 200.0)],
+        radius: 8.0,
+    })
+    .unwrap();
+    assert_eq!(
+        d.annotations(0).unwrap().len(),
+        1,
+        "um desenho com dois traços"
+    );
+    d.apply(pdf_core::AnnotOp::Erase {
+        page: 0,
+        id,
+        path: (0..=10).map(|k| (100.0 + k as f32 * 10.0, 200.0)).collect(),
+        radius: 8.0,
+    })
+    .unwrap();
+    assert!(
+        d.annotations(0).unwrap().is_empty(),
+        "sem traços, o desenho sai"
+    );
+    d.undo().unwrap();
+    d.undo().unwrap();
+    assert_eq!(d.annotations(0).unwrap().len(), 1);
+}
