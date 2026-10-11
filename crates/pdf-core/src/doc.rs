@@ -1313,7 +1313,11 @@ impl PdfDoc {
             AnnotOp::Move { page, id, dx, dy } => {
                 // o grupo se move junto
                 let annots = self.annotations(page)?;
-                let members = group_members(&annots, group_root(&annots, id));
+                // marcações de texto do grupo ficam presas ao texto (como no Acrobat)
+                let members: Vec<i32> = group_members(&annots, group_root(&annots, id))
+                    .into_iter()
+                    .filter(|m| m == &id || annots.iter().any(|a| a.id == *m && a.movable()))
+                    .collect();
                 if members.len() > 1 {
                     let moves = members
                         .into_iter()

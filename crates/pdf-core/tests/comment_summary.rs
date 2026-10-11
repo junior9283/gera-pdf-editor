@@ -139,3 +139,66 @@ fn empty_pages_only_when_asked() {
     };
     assert!(summarize_comments(&d, &o, &out).is_err(), "nada a resumir");
 }
+
+#[test]
+fn a_long_thread_stays_inside_the_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut d = commented(&dir, 0);
+    let note = d.annotations(0).unwrap()[0].id;
+    for k in 0..120 {
+        d.apply(AnnotOp::Reply {
+            page: 0,
+            parent: note,
+            text: format!("resposta numero {k}"),
+        })
+        .unwrap();
+    }
+    for layout in [
+        SummaryLayout::CommentsOnly,
+        SummaryLayout::ConnectorSeparate,
+    ] {
+        let out = dir.path().join("longo.pdf");
+        summarize_comments(&d, &opts(layout), &out).unwrap();
+        let doc = mupdf::Document::open(out.to_str().unwrap()).unwrap();
+        let mut seen = String::new();
+        for k in 0..doc.page_count().unwrap() {
+            let page = doc.load_page(k).unwrap();
+            let b = page.bounds().unwrap();
+            let tp = page.to_text_page(mupdf::TextPageFlags::empty()).unwrap();
+            for block in tp.blocks() {
+                let r = block.bounds();
+                if r.y0 >= b.y0 - 1.0 && r.y1 <= b.y1 + 1.0 {
+                    for line in block.lines() {
+                        seen.extend(line.chars().filter_map(|c| c.char()));
+                        seen.push('\n');
+                    }
+                }
+            }
+        }
+        assert!(
+            seen.contains("resposta numero 119"),
+            "{layout:?}: texto fora da página"
+        );
+    }
+}
+
+#[test]
+fn documents_that_forbid_copying_only_summarize_comments() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut d = commented(&dir, 0);
+    d.set_protection(Some(pdf_core::Protection {
+        open_password: String::new(),
+        owner_password: "dono".into(),
+        permissions: pdf_core::Permissions {
+            copy: false,
+            ..pdf_core::Permissions::ALL
+        },
+    }))
+    .unwrap();
+    let path = dir.path().join("protegido.pdf");
+    d.save(&path).unwrap();
+    let d = PdfDoc::open(&path, None).unwrap();
+    let out = dir.path().join("r.pdf");
+    assert!(summarize_comments(&d, &opts(SummaryLayout::ConnectorSingle), &out).is_err());
+    assert!(summarize_comments(&d, &opts(SummaryLayout::CommentsOnly), &out).is_ok());
+}

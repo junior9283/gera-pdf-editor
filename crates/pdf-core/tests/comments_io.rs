@@ -214,3 +214,26 @@ fn imported_comments_bring_no_actions() {
         "ações vieram junto"
     );
 }
+
+#[test]
+fn imported_reply_cycles_and_foreign_kinds_stay_visible_or_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let objs = vec![
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[4 0 R 5 0 R 6 0 R 7 0 R]>>"
+            .to_string(),
+        "<</Type/Annot/Subtype/Text/Rect[10 10 30 30]/Contents(a)/IRT 5 0 R>>".to_string(),
+        "<</Type/Annot/Subtype/Text/Rect[40 10 60 30]/Contents(b)/IRT 4 0 R>>".to_string(),
+        "<</Type/Annot/Subtype/Text/Rect[70 10 90 30]/Contents(c)/IRT 6 0 R>>".to_string(),
+        "<</Type/Annot/Subtype/RichMedia/Rect[100 10 200 110]>>".to_string(),
+    ];
+    let src = dir.path().join("ciclo.pdf");
+    std::fs::write(&src, pdf_core::sample::pdf_from_objects(&objs)).unwrap();
+    let mut dst = blank(&dir, 1);
+    let r = dst.import_comments(&src).unwrap();
+    assert_eq!((r.added, r.skipped), (3, 1), "o RichMedia fica de fora");
+    let all = dst.annotations(0).unwrap();
+    assert_eq!(all.len(), 3);
+    assert!(all.iter().all(|a| a.reply_to.is_none()), "{all:?}");
+}

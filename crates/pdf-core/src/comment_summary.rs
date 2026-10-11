@@ -296,15 +296,26 @@ impl Out {
         let mut pages = Vec::new();
         let (mut ops, mut starts) = (String::new(), Vec::new());
         let (mut x, mut y) = first;
+        let line = self.size * 1.25;
         for lines in blocks {
-            if y - self.height(lines) < MARGIN && !starts.is_empty() {
+            // o bloco inteiro vai para a próxima página quando cabe nela; mais alto que uma página,
+            // ele continua linha a linha
+            let fits_a_page = self.height(lines) <= rest.1 - MARGIN;
+            if y - self.height(lines) < MARGIN && !ops.is_empty() && fits_a_page {
                 pages.push((std::mem::take(&mut ops), std::mem::take(&mut starts)));
                 (x, y) = rest;
             }
             starts.push(y - self.size * 0.6);
-            let (more, end) = self.draw(lines, x, y);
-            ops.push_str(&more);
-            y = end - self.size * 0.9;
+            for l in lines {
+                if y - line < MARGIN && !ops.is_empty() {
+                    pages.push((std::mem::take(&mut ops), std::mem::take(&mut starts)));
+                    (x, y) = rest;
+                }
+                let (more, end) = self.draw(std::slice::from_ref(l), x, y);
+                ops.push_str(&more);
+                y = end;
+            }
+            y -= self.size * 0.9;
         }
         pages.push((ops, starts));
         pages
@@ -367,6 +378,12 @@ pub fn summarize_comments(doc: &PdfDoc, opts: &SummaryOptions, dest: &Path) -> R
     };
     if first > last {
         return Err(refused("intervalo de páginas inválido"));
+    }
+    // com o documento, as páginas vão para um PDF novo sem proteção: só se a cópia é permitida
+    if opts.layout != SummaryLayout::CommentsOnly && !doc.security()?.permissions.copy {
+        return Err(refused(
+            "o documento não permite copiar o conteúdo: use o layout Somente comentários",
+        ));
     }
     // comentários por página, cada um com as respostas
     let only: Option<HashSet<(i32, i32)>> = opts.only.as_ref().map(|o| o.iter().copied().collect());

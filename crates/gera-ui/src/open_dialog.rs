@@ -2,8 +2,9 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
-/// Testes de interface (sem D-Bus, sem portal): com `GERA_E2E_PICK=<caminho>`, todo seletor
-/// devolve esse caminho em vez de abrir. Fora disso, o seletor do sistema.
+/// Testes de interface (sem D-Bus, sem portal): no build com a feature `e2e`, com
+/// `GERA_E2E_PICK=<caminho>`, todo seletor devolve esse caminho em vez de abrir. No build normal a
+/// variável não vale (esquecida no ambiente, faria Salvar gravar por cima sem perguntar).
 trait PickOrE2e: Sized {
     fn pick_file_or_e2e(self) -> Option<PathBuf>;
     fn pick_files_or_e2e(self) -> Option<Vec<PathBuf>>;
@@ -12,6 +13,9 @@ trait PickOrE2e: Sized {
 }
 
 fn e2e_path() -> Option<PathBuf> {
+    if !cfg!(feature = "e2e") {
+        return None;
+    }
     std::env::var_os("GERA_E2E_PICK")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
@@ -258,5 +262,18 @@ impl FileDialogs {
         };
         self.pending = None;
         Some(picked)
+    }
+}
+
+#[cfg(all(test, not(feature = "e2e")))]
+mod hook_tests {
+    #[test]
+    fn the_pick_hook_is_off_in_normal_builds() {
+        std::env::set_var("GERA_E2E_PICK", "/tmp/nao-deve-valer.pdf");
+        assert_eq!(
+            super::e2e_path(),
+            None,
+            "build normal ignora a variável dos testes"
+        );
     }
 }

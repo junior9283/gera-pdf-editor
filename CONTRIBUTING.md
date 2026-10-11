@@ -46,6 +46,8 @@ cargo fmt --all
 1. Crie um branch a partir da `main` (`feat/…`, `fix/…`).
 2. Commits pequenos e descritivos (ex.: `fix: …`, `feat: …`, `docs: …`).
 3. Garanta que `cargo test`, `cargo clippy` e `cargo fmt --check` passam.
+   Os testes de interface (Xvfb) usam `cargo build --release --features gera-ui/e2e`: só nesse
+   build a variável `GERA_E2E_PICK` substitui os seletores de arquivo.
 4. Descreva o que mudou e como testou; inclua capturas de tela para mudanças visuais.
 
 Ao contribuir, você concorda que sua contribuição seja licenciada sob a [AGPL-3.0](LICENSE).

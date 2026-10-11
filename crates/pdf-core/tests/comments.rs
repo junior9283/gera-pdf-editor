@@ -549,3 +549,39 @@ fn self_groups_and_group_cycles_from_other_programs_are_not_groups() {
     assert_eq!(all.len(), 3);
     assert!(all.iter().all(|a| a.group.is_none()), "{all:?}");
 }
+
+#[test]
+fn a_group_with_a_highlight_still_moves() {
+    let (_d, _p, mut d) = blank();
+    d.apply(AnnotOp::Create(NewAnnot::Highlight {
+        page: 0,
+        rects: vec![pdf_core::PdfRect::new(100.0, 300.0, 200.0, 314.0)],
+    }))
+    .unwrap();
+    d.apply(AnnotOp::Create(NewAnnot::Note {
+        page: 0,
+        at: (300.0, 100.0),
+        text: "nota".into(),
+    }))
+    .unwrap();
+    let all = d.annotations(0).unwrap();
+    let (hl, note) = (all[0].id, all[1].id);
+    d.apply(AnnotOp::Group {
+        page: 0,
+        ids: vec![note, hl],
+    })
+    .unwrap();
+    let (before, hl_before) = (rect_of(&d, note), rect_of(&d, hl));
+    d.apply(AnnotOp::Move {
+        page: 0,
+        id: note,
+        dx: 10.0,
+        dy: 0.0,
+    })
+    .unwrap();
+    assert!(
+        (rect_of(&d, note).x0 - before.x0 - 10.0).abs() < 0.5,
+        "a nota anda"
+    );
+    assert_eq!(rect_of(&d, hl), hl_before, "o destaque fica preso ao texto");
+}

@@ -109,6 +109,25 @@ const LINK_KEYS: [&str; 8] = [
 ];
 /// Tipos que não são comentários.
 const NOT_COMMENTS: [&str; 3] = ["Popup", "Link", "Widget"];
+/// Tipos de comentário que entram (multimídia, 3D e outros de arquivo hostil ficam de fora).
+const COMMENT_KINDS: [&str; 16] = [
+    "Text",
+    "Highlight",
+    "Underline",
+    "StrikeOut",
+    "Squiggly",
+    "FreeText",
+    "Square",
+    "Circle",
+    "Line",
+    "Polygon",
+    "PolyLine",
+    "Ink",
+    "Stamp",
+    "Caret",
+    "Redact",
+    "FileAttachment",
+];
 
 /// Comentário lido de outro arquivo: página, dicionário, número do objeto e do pai (/IRT).
 struct Incoming {
@@ -240,7 +259,7 @@ impl PdfDoc {
         let pages = self.page_count()?;
         let start = self.inner.count_objects()?;
         let mut map = self.inner.new_graft_map()?;
-        let mut added: HashMap<i32, PdfObject> = HashMap::new();
+        let mut added: HashMap<i32, (i32, PdfObject)> = HashMap::new();
         let mut pending = Vec::new();
         let (mut placer, mut count, mut skipped) = (Placer::default(), 0, 0);
         for item in items {
@@ -254,15 +273,20 @@ impl PdfDoc {
             }
             let r = placer.put(&mut self.inner, item.page, copy)?;
             if let Some(num) = item.num {
-                if let Some(parent) = item.parent {
-                    pending.push((r.clone(), parent));
+                if let Some(parent) = item.parent.filter(|p| *p != num) {
+                    pending.push((r.clone(), num, item.page, parent));
                 }
-                added.insert(num, r);
+                added.insert(num, (item.page, r));
             }
             count += 1;
         }
-        for (child, parent) in pending {
-            link_parent(child, added.get(&parent))?;
+        // só vale pai que veio, na mesma página, sem ciclo (A responde a B que responde a A)
+        let parents: HashMap<i32, i32> = pending.iter().map(|(_, n, _, p)| (*n, *p)).collect();
+        for (child, num, page, parent) in pending {
+            let ok = added
+                .get(&parent)
+                .filter(|(p, _)| *p == page && !in_cycle(&parents, &num));
+            link_parent(child, ok.map(|(_, r)| r))?;
         }
         Ok(placer.report(count, skipped))
     }
@@ -325,7 +349,7 @@ fn by_page(picked: &[AnnotInfo]) -> BTreeMap<i32, HashSet<i32>> {
 }
 
 /// `name` está num ciclo de respostas?
-fn in_cycle(parents: &HashMap<String, String>, name: &str) -> bool {
+fn in_cycle<K: Eq + std::hash::Hash>(parents: &HashMap<K, K>, name: &K) -> bool {
     let mut at = name;
     for _ in 0..=parents.len() {
         match parents.get(at) {
@@ -346,10 +370,10 @@ fn incoming(src: &PdfDocument) -> Result<(Vec<Incoming>, usize)> {
             return Ok(());
         };
         let subtype = get(&dict, "Subtype").and_then(|s| name_of(&s));
-        if subtype.is_none_or(|s| NOT_COMMENTS.contains(&s.as_str())) {
+        let Some(subtype) = subtype.filter(|s| !NOT_COMMENTS.contains(&s.as_str())) else {
             return Ok(());
-        }
-        if items.len() >= MAX_IMPORTED {
+        };
+        if items.len() >= MAX_IMPORTED || !COMMENT_KINDS.contains(&subtype.as_str()) {
             skipped += 1;
             return Ok(());
         }
