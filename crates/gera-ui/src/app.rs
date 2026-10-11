@@ -696,7 +696,7 @@ impl GeraApp {
             doc_dirty: self
                 .tabs
                 .doc_index(self.tabs.active())
-                .is_some_and(|i| self.docs[i].is_dirty()),
+                .is_some_and(|i| self.docs[i].can_revert()),
             dark: self.prefs.dark,
             left: self.prefs.left_panel,
             tools_panel: self.prefs.tools_panel,

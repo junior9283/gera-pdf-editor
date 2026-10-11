@@ -223,7 +223,10 @@ mod tests {
         let mut draft = PrefsDraft::new(&Prefs::default());
         draft.author_text = "João ".into(); // digitando: o espaço fica
         draft.author_text.push_str("Silva ");
-        assert_eq!(draft.finish(true).unwrap().author.as_deref(), Some("João Silva"));
+        assert_eq!(
+            draft.finish(true).unwrap().author.as_deref(),
+            Some("João Silva")
+        );
         let mut draft = PrefsDraft::new(&Prefs::default());
         draft.author_text = "   ".into();
         assert_eq!(draft.finish(true).unwrap().author, None);

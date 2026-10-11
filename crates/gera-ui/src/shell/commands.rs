@@ -470,11 +470,17 @@ mod tests {
     fn function_keys_work_while_typing_but_letters_do_not() {
         let key = |k| KeyboardShortcut::new(Modifiers::NONE, k);
         let doc = Command::Doc;
-        assert!(!blocked_while_typing(&key(Key::F3), &doc(DocCommand::FindNext)));
+        assert!(!blocked_while_typing(
+            &key(Key::F3),
+            &doc(DocCommand::FindNext)
+        ));
         assert!(!blocked_while_typing(&key(Key::F11), &Command::FullScreen));
         assert!(!blocked_while_typing(&key(Key::F1), &Command::Help));
         let tool = doc(DocCommand::Tool(app_state::tools::Tool::Hand));
-        assert!(blocked_while_typing(&key(Key::H), &tool), "letra é do campo");
+        assert!(
+            blocked_while_typing(&key(Key::H), &tool),
+            "letra é do campo"
+        );
         let undo = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
         assert!(blocked_while_typing(&undo, &doc(DocCommand::Undo)));
     }

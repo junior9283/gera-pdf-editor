@@ -404,7 +404,7 @@ impl DocTab {
                 return self.search_step(cmd == DocCommand::FindNext)
             }
             DocCommand::Revert => {
-                self.revert_ask = self.is_dirty();
+                self.revert_ask = self.can_revert();
                 return;
             }
             _ => {}
@@ -412,7 +412,23 @@ impl DocTab {
         if self.navigate(cmd) {
             return;
         }
-        // com um comentário selecionado (e sem texto), Copiar e Recortar são dele
+        // com um comentário selecionado (e sem texto), Copiar e Recortar são dele, dentro das
+        // permissões do documento
+        let comment_selected = self.edit.selected.is_some()
+            && !self
+                .edit
+                .selection
+                .as_ref()
+                .is_some_and(|s| !s.text.is_empty());
+        if matches!(cmd, DocCommand::Copy | DocCommand::Cut) && comment_selected {
+            let p = self.security.permissions;
+            if !p.copy {
+                return self.deny("copiar");
+            }
+            if cmd == DocCommand::Cut && !p.annotate {
+                return self.deny("alterar comentários");
+            }
+        }
         if matches!(cmd, DocCommand::Copy | DocCommand::Cut) && self.copy_comment(ctx) {
             if cmd == DocCommand::Cut {
                 self.edit.delete_selected();
@@ -606,6 +622,9 @@ impl DocTab {
                 });
             }
             Paste::Text(text) => self.paste_text_box(page, text),
+            Paste::FromSystem if self.paste_rx.is_some() => {
+                self.status = "Ainda lendo a área de transferência…".into();
+            }
             Paste::FromSystem => self.read_system_clipboard(),
         }
     }
@@ -842,6 +861,16 @@ impl DocTab {
     pub(crate) fn drop_unused_focus(&mut self) {
         self.focus_page = false;
         self.focus_zoom = false;
+    }
+
+    /// Reverter só faz sentido com alterações num arquivo que existe no disco.
+    pub(crate) fn can_revert(&self) -> bool {
+        self.history.dirty && !self.created
+    }
+
+    /// Esc com uma janela da aba aberta: fecha (como Cancelar). Devolve se fechou alguma.
+    pub(crate) fn escape_window(&mut self) -> bool {
+        std::mem::take(&mut self.revert_ask)
     }
 
     /// O Espaço segurado vira Mão (fora de um campo de formulário com o foco).
@@ -1432,7 +1461,9 @@ impl DocTab {
             && self.edit.text_draft.is_none()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
-            if self.organize.is_some() {
+            if self.escape_window() {
+                // janela Reverter: Esc é Cancelar
+            } else if self.organize.is_some() {
                 self.organize = None; // Esc fecha o Organizar páginas
             } else if self.prepare_tools && self.prepare.escape() {
                 // Preparar formulário: solta a ferramenta, depois a seleção
@@ -2775,7 +2806,11 @@ impl DocTab {
                         {
                             screen_action = Some(a);
                         }
-                        if edit.tool.is_screen_tool() && edit.page_menu_allowed(page as i32) {
+                        // na tela cheia o botão direito volta a página (sem menu)
+                        if edit.tool.is_screen_tool()
+                            && !presenting
+                            && edit.page_menu_allowed(page as i32)
+                        {
                             response.context_menu(|ui| {
                                 if let Some(c) = page_menu(ui, edit.tool) {
                                     page_cmd = Some(c);
@@ -3293,6 +3328,62 @@ mod tests {
         assert!(
             tab.history_views.back(e).is_none(),
             "só uma vista no histórico"
+        );
+    }
+
+    #[test]
+    fn copying_a_comment_respects_the_permissions() {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_pages(1);
+        tab.annots.push(pdf_core::AnnotInfo {
+            page: 0,
+            id: 5,
+            contents: "segredo".into(),
+            ..Default::default()
+        });
+        tab.edit.selected = Some((0, 5));
+        tab.security.permissions.copy = false;
+        tab.security.permissions.annotate = true;
+        tab.run(&ctx, DocCommand::Copy);
+        assert!(tab.status.contains("não permite copiar"), "{}", tab.status);
+        tab.security.permissions.copy = true;
+        tab.security.permissions.annotate = false;
+        tab.status.clear();
+        tab.run(&ctx, DocCommand::Cut);
+        assert!(
+            tab.edit.ops.is_empty(),
+            "sem permissão de comentar, Recortar não apaga"
+        );
+        assert!(tab.status.contains("não permite"), "{}", tab.status);
+    }
+
+    #[test]
+    fn revert_is_for_saved_files_and_escape_cancels_it() {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_pages(1);
+        tab.created = true; // criado pelo app, nunca salvo: não há versão salva
+        tab.run(&ctx, DocCommand::Revert);
+        tab.history.dirty = true;
+        tab.run(&ctx, DocCommand::Revert);
+        assert!(!tab.revert_ask, "criado e nunca salvo: nada a reverter");
+        tab.created = false;
+        tab.run(&ctx, DocCommand::Revert);
+        assert!(tab.revert_ask);
+        tab.escape_window();
+        assert!(!tab.revert_ask, "Esc é Cancelar");
+    }
+
+    #[test]
+    fn a_second_paste_waits_for_the_first_read() {
+        let mut tab = tab_with_pages(1);
+        tab.security.permissions.annotate = true;
+        let (_tx, rx) = std::sync::mpsc::channel();
+        tab.paste_rx = Some(rx);
+        tab.paste(None);
+        assert!(
+            tab.paste_rx.is_some() && tab.status.contains("lendo"),
+            "{}",
+            tab.status
         );
     }
 
