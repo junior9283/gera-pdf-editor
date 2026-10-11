@@ -65,8 +65,8 @@ pub enum DocCommand {
     ZoomTo,
     /// Escolhe a ferramenta (Selecionar, Mão, Zoom com marca; teclas únicas).
     Tool(app_state::tools::Tool),
-    /// Shift+U: alterna entre Destacar e Sublinhar.
-    CycleMarkup,
+    /// Shift+U, Shift+D, Shift+J: a ferramenta seguinte do grupo (como no Acrobat).
+    Cycle(app_state::tools::ToolGroup),
     /// Recortar o comentário selecionado (Ctrl+X).
     Cut,
     /// Desmarcar tudo (Ctrl+Shift+A): seleção de texto e de comentário.
@@ -312,6 +312,11 @@ enum PickFor {
     },
     /// Anexos → Adicionar arquivo.
     Attachment,
+    /// Anexar arquivo como comentário em (página, ponto).
+    AttachComment {
+        page: i32,
+        at: (f32, f32),
+    },
     /// Anexos → Salvar: onde gravar este anexo.
     SaveAttachment(pdf_core::AttachmentInfo),
 }
@@ -583,14 +588,8 @@ impl DocTab {
             DocCommand::Fit(fit) => view.fit = fit,
             DocCommand::ZoomTo => self.focus_zoom = true,
             DocCommand::Tool(tool) => self.pick_tool(tool),
-            DocCommand::CycleMarkup => {
-                use app_state::tools::Tool;
-                let next = if self.edit.tool == Tool::Highlight {
-                    Tool::Underline
-                } else {
-                    Tool::Highlight
-                };
-                self.pick_tool(next);
+            DocCommand::Cycle(group) => {
+                self.pick_tool(app_state::tools::cycle(group, self.edit.tool))
             }
             DocCommand::NextChange
             | DocCommand::PrevChange
@@ -1036,6 +1035,20 @@ impl DocTab {
         let typed = self.commit_field();
         if let Some(view) = self.view.as_ref().filter(|_| self.history.dirty || typed) {
             self.edit.save(&self.worker, view.path.clone());
+        }
+    }
+
+    /// Anexar arquivo: o clique na página pede o arquivo (o comentário nasce quando ele chega).
+    fn pick_attachment_for_comment(&mut self, ctx: &egui::Context) {
+        let Some((page, at)) = self.edit.attach_at.take() else {
+            return;
+        };
+        if !self.security.permissions.annotate {
+            return self.deny("alterar comentários");
+        }
+        if !self.files.busy() {
+            self.picking = Some(PickFor::AttachComment { page, at });
+            self.files.pick_any_file(ctx, "Anexar arquivo");
         }
     }
 
@@ -2410,6 +2423,7 @@ impl DocTab {
         self.split_window(ui);
         self.poll_files();
         self.identity_window(ui);
+        self.pick_attachment_for_comment(ui.ctx());
         self.send_edits();
         self.password_window(ui);
         if let Some(view) = self.view.as_mut() {
@@ -3225,6 +3239,18 @@ impl DocTab {
                     d.path = files.into_iter().next().or(d.path.take());
                 }
             }
+            (Some(PickFor::AttachComment { page, at }), Picked::Open(files)) => {
+                if let Some(path) = files.into_iter().next() {
+                    self.worker.send(Request::Annot(pdf_core::AnnotOp::Create(
+                        pdf_core::NewAnnot::FileAttachment {
+                            page,
+                            at,
+                            path,
+                            description: String::new(),
+                        },
+                    )));
+                }
+            }
             (Some(PickFor::Attachment), Picked::Open(files)) => {
                 if let Some(path) = files.into_iter().next() {
                     self.worker.send(Request::AddAttachment { path });
@@ -3938,9 +3964,9 @@ mod tests {
         tab.run(&ctx, DocCommand::Tool(Tool::Note));
         assert!(tab.comment_tools);
         assert_eq!(tab.edit.tool, Tool::Note);
-        tab.run(&ctx, DocCommand::CycleMarkup);
+        tab.run(&ctx, DocCommand::Cycle(app_state::tools::ToolGroup::Markup));
         assert_eq!(tab.edit.tool, Tool::Highlight);
-        tab.run(&ctx, DocCommand::CycleMarkup);
+        tab.run(&ctx, DocCommand::Cycle(app_state::tools::ToolGroup::Markup));
         assert_eq!(tab.edit.tool, Tool::Underline);
         tab.run(&ctx, DocCommand::Tool(Tool::Hand));
         assert_eq!(tab.edit.tool, Tool::Hand);

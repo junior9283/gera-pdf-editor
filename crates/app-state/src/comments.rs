@@ -11,6 +11,8 @@ pub struct Thread {
     /// Status vigente e quem o definiu.
     pub review: Option<(ReviewState, String)>,
     pub checked: bool,
+    /// Tem anotações agrupadas (Substituir texto: o cursor com o riscado).
+    pub grouped: bool,
 }
 
 impl Thread {
@@ -75,14 +77,22 @@ fn chrono_key(a: &AnnotInfo) -> (i64, i32) {
 /// Monta as conversas: só os comentários (sem `reply_to`) viram linhas; respostas e status ficam
 /// dentro do pai; os de pai inexistente (PDF de outro programa) são ignorados.
 pub fn threads(annots: &[AnnotInfo]) -> Vec<Thread> {
+    let ids: std::collections::HashSet<i32> = annots.iter().map(|a| a.id).collect();
+    let group_roots: std::collections::HashSet<i32> = annots
+        .iter()
+        .filter_map(|a| a.group)
+        .filter(|g| ids.contains(g))
+        .collect();
     let mut out: Vec<Thread> = annots
         .iter()
-        .filter(|a| !a.is_reply())
+        // o membro de um grupo (o riscado do Substituir texto) aparece no item da principal
+        .filter(|a| !a.is_reply() && !a.group.is_some_and(|g| ids.contains(&g)))
         .map(|a| Thread {
             root: a.clone(),
             replies: Vec::new(),
             review: None,
             checked: false,
+            grouped: group_roots.contains(&a.id),
         })
         .collect();
     let index: HashMap<i32, usize> = out
@@ -256,6 +266,23 @@ mod tests {
         assert_eq!(t.len(), 1);
         let texts: Vec<_> = t[0].replies.iter().map(|r| r.contents.as_str()).collect();
         assert_eq!(texts, ["primeira", "segunda"]);
+    }
+
+    #[test]
+    fn a_replace_text_pair_is_one_thread() {
+        let caret = AnnotInfo {
+            kind: AnnotKind::Caret,
+            ..a(1, 0, "Ana", "D:20261009100000", "novo texto")
+        };
+        let strike = AnnotInfo {
+            kind: AnnotKind::StrikeOut,
+            group: Some(1),
+            ..a(2, 0, "Ana", "D:20261009100000", "")
+        };
+        let t = threads(&[caret, strike]);
+        assert_eq!(t.len(), 1, "o riscado agrupado não vira linha");
+        assert!(t[0].grouped, "o cursor tem par: é Substituir texto");
+        assert_eq!(t[0].root.id, 1);
     }
 
     #[test]

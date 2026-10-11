@@ -161,6 +161,20 @@ pub(crate) fn comment_attachments(pdf_page: &PdfPage, page: i32, out: &mut Vec<A
     }
 }
 
+/// Nome e tamanho do arquivo a anexar (até 100 MB; arquivo sem nome é recusado).
+pub(crate) fn attachment_file(path: &Path) -> Result<(String, u64)> {
+    let len = std::fs::metadata(path)?.len();
+    if len > MAX_ATTACHMENT_BYTES {
+        return Err(refused("o arquivo passa de 100 MB"));
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| refused("arquivo sem nome"))?;
+    Ok((name, len))
+}
+
 impl PdfDoc {
     /// Os pares (nome, filespec) da árvore `/EmbeddedFiles` (lista simples, como o MuPDF lê).
     fn document_files(&self) -> Vec<(String, PdfObject)> {
@@ -239,15 +253,7 @@ impl PdfDoc {
 
     /// Anexa o arquivo ao documento; devolve o nome (único) que ele recebeu.
     pub fn add_attachment(&mut self, path: &Path, description: &str) -> Result<String> {
-        let len = std::fs::metadata(path)?.len();
-        if len > MAX_ATTACHMENT_BYTES {
-            return Err(refused("o arquivo passa de 100 MB"));
-        }
-        let wanted = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .filter(|n| !n.is_empty())
-            .ok_or_else(|| refused("arquivo sem nome"))?;
+        let (wanted, _) = attachment_file(path)?;
         self.require_modifiable("anexar arquivos")?;
         let bytes = std::fs::read(path)?;
         let taken: Vec<String> = self.document_files().into_iter().map(|(n, _)| n).collect();

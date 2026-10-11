@@ -43,17 +43,20 @@ pub struct Sections {
     pub fill: bool,
     /// Espessura do traço ou da borda.
     pub width: bool,
-    /// Cor e tamanho do texto (caixa de texto).
+    /// Cor e tamanho do texto (caixa de texto e texto explicativo).
     pub font: bool,
+    /// Estilo da nuvem ("Nuvem 1" ou "Nuvem 2").
+    pub cloud: bool,
 }
 
 pub fn sections(kind: AnnotKind) -> Sections {
     use AnnotKind::*;
     Sections {
-        color: !matches!(kind, TextBox | Stamp),
+        color: !matches!(kind, TextBox | Callout | Stamp),
         fill: kind.has_fill(),
         width: kind.has_border(),
-        font: kind == TextBox,
+        font: matches!(kind, TextBox | Callout),
+        cloud: kind == Cloud,
     }
 }
 
@@ -209,6 +212,21 @@ pub fn window(
                     op = Some(fill(info, choice));
                 }
             }
+            if let (true, Some(now)) = (sec.cloud, info.cloud) {
+                ui.horizontal(|ui| {
+                    ui.label("Estilo");
+                    for (label, level) in [("Nuvem 1", 1.0), ("Nuvem 2", 2.0)] {
+                        let on = (now - level).abs() < 0.5;
+                        if ui.add(egui::Button::selectable(on, label)).clicked() && !on {
+                            op = Some(AnnotOp::Cloud {
+                                page: info.page,
+                                id: info.id,
+                                intensity: level,
+                            });
+                        }
+                    }
+                });
+            }
             ui.add_space(6.0);
             let r = ui.add(
                 egui::Slider::new(&mut draft.opacity, 0.0..=100.0)
@@ -290,6 +308,7 @@ mod tests {
             fill,
             width,
             font,
+            cloud: false,
         };
         assert_eq!(sections(Rect), s(true, true, true, false));
         assert_eq!(sections(Ellipse), s(true, true, true, false));
@@ -298,6 +317,14 @@ mod tests {
         assert_eq!(sections(Stamp), s(false, false, false, false));
         assert_eq!(sections(Highlight), s(true, false, false, false));
         assert_eq!(sections(Ink), s(true, false, true, false));
+        assert_eq!(sections(Callout), s(false, true, true, true));
+        assert_eq!(sections(Polygon), s(true, true, true, false));
+        assert_eq!(sections(PolyLine), s(true, false, true, false));
+        let cloud = Sections {
+            cloud: true,
+            ..s(true, true, true, false)
+        };
+        assert_eq!(sections(Cloud), cloud);
     }
 
     #[test]

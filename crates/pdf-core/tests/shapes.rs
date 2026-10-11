@@ -433,3 +433,163 @@ fn bigger_font_grows_the_box() {
     d.undo().unwrap();
     assert_eq!(d.annotations(0).unwrap()[0], t);
 }
+
+fn polygon(closed: bool, cloud: bool) -> NewAnnot {
+    NewAnnot::Polygon {
+        page: 0,
+        vertices: vec![(100.0, 100.0), (200.0, 100.0), (150.0, 180.0)],
+        closed,
+        cloud,
+    }
+}
+
+#[test]
+fn polygon_polyline_and_cloud_round_trip() {
+    for (annot, kind) in [
+        (polygon(true, false), AnnotKind::Polygon),
+        (polygon(false, false), AnnotKind::PolyLine),
+        (polygon(true, true), AnnotKind::Cloud),
+    ] {
+        let (_d, path, mut d) = doc();
+        d.apply(AnnotOp::Create(annot)).unwrap();
+        d.save(&path).unwrap();
+        let a = reopen_only(&path);
+        assert_eq!(a.kind, kind);
+        assert_eq!(a.vertices, [(100.0, 100.0), (200.0, 100.0), (150.0, 180.0)]);
+        assert_eq!(a.color, Some([1.0, 0.0, 0.0]), "vermelho padrão");
+    }
+}
+
+#[test]
+fn moving_a_vertex_changes_only_it_and_undoes() {
+    let (_d, _p, mut d) = doc();
+    let a = created(&mut d, polygon(true, true));
+    d.apply(AnnotOp::MoveVertex {
+        page: 0,
+        id: a.id,
+        index: 2,
+        to: (160.0, 220.0),
+    })
+    .unwrap();
+    let now = d.annotations(0).unwrap().remove(0);
+    assert_eq!(
+        now.vertices,
+        [(100.0, 100.0), (200.0, 100.0), (160.0, 220.0)]
+    );
+    d.apply(AnnotOp::Move {
+        page: 0,
+        id: a.id,
+        dx: 10.0,
+        dy: 5.0,
+    })
+    .unwrap();
+    let moved = d.annotations(0).unwrap().remove(0);
+    assert_eq!(moved.vertices[0], (110.0, 105.0), "mover leva os vértices");
+    d.undo().unwrap();
+    d.undo().unwrap();
+    assert_eq!(d.annotations(0).unwrap()[0].vertices, a.vertices);
+}
+
+#[test]
+fn odd_or_huge_vertices_are_read_safely() {
+    let dir = tempfile::tempdir().unwrap();
+    let many: String = (0..5000).map(|k| format!("{} 100 ", k % 500)).collect();
+    let objs = vec![
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[4 0 R 5 0 R]>>".to_string(),
+        "<</Type/Annot/Subtype/Polygon/Rect[0 0 300 300]/Vertices[10 10 20 20 30]>>".to_string(),
+        format!("<</Type/Annot/Subtype/PolyLine/Rect[0 0 500 200]/Vertices[{many}]>>"),
+    ];
+    let path = dir.path().join("vertices.pdf");
+    std::fs::write(&path, pdf_core::sample::pdf_from_objects(&objs)).unwrap();
+    let a = PdfDoc::open(&path, None).unwrap().annotations(0).unwrap();
+    // coordenadas do MuPDF (y de cima para baixo: 792 - y)
+    assert_eq!(
+        a[0].vertices,
+        [(10.0, 782.0), (20.0, 772.0)],
+        "o ponto sem par sai"
+    );
+    assert_eq!(a[1].vertices.len(), 1000, "teto de vértices");
+}
+
+#[test]
+fn cloud_intensity_changes_survives_save_and_undoes() {
+    let (_d, path, mut d) = doc();
+    let a = created(&mut d, polygon(true, true));
+    assert_eq!(a.cloud, Some(2.0), "nuvem nova com intensidade 2");
+    d.apply(AnnotOp::Cloud {
+        page: 0,
+        id: a.id,
+        intensity: 1.0,
+    })
+    .unwrap();
+    assert_eq!(d.annotations(0).unwrap()[0].cloud, Some(1.0));
+    d.undo().unwrap();
+    assert_eq!(d.annotations(0).unwrap()[0].cloud, Some(2.0));
+    d.redo().unwrap();
+    d.save(&path).unwrap();
+    assert_eq!(reopen_only(&path).cloud, Some(1.0));
+    let plain = created(&mut d, polygon(true, false));
+    assert_eq!(plain.cloud, None, "polígono comum não é nuvem");
+    assert!(d
+        .apply(AnnotOp::Cloud {
+            page: 0,
+            id: plain.id,
+            intensity: 1.0,
+        })
+        .is_err());
+}
+
+fn many_vertices_pdf(dir: &std::path::Path, n: usize) -> std::path::PathBuf {
+    let many: String = (0..n).map(|k| format!("{} 100 ", k % 500)).collect();
+    let objs = vec![
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[4 0 R]>>".to_string(),
+        format!("<</Type/Annot/Subtype/PolyLine/Rect[0 0 500 200]/Vertices[{many}]>>"),
+    ];
+    let path = dir.join("many.pdf");
+    std::fs::write(&path, pdf_core::sample::pdf_from_objects(&objs)).unwrap();
+    path
+}
+
+#[test]
+fn polygons_past_the_vertex_cap_are_not_edited_and_keep_every_vertex() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut d = PdfDoc::open(&many_vertices_pdf(dir.path(), 5000), None).unwrap();
+    let id = d.annotations(0).unwrap()[0].id;
+    for op in [
+        AnnotOp::Move {
+            page: 0,
+            id,
+            dx: 5.0,
+            dy: 5.0,
+        },
+        AnnotOp::MoveVertex {
+            page: 0,
+            id,
+            index: 0,
+            to: (1.0, 1.0),
+        },
+    ] {
+        assert!(d.apply(op).is_err(), "cortaria os vértices além do teto");
+    }
+    let out = dir.path().join("out.pdf");
+    d.save(&out).unwrap();
+    let raw = std::fs::read(&out).unwrap();
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&raw).unwrap();
+    let page = doc.load_pdf_page(0).unwrap();
+    let a = page.annotations().next().unwrap();
+    assert_eq!(a.vertices().unwrap().len(), 5000);
+}
+
+#[test]
+fn huge_vertex_arrays_are_listed_quickly() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = PdfDoc::open(&many_vertices_pdf(dir.path(), 400_000), None).unwrap();
+    let t = std::time::Instant::now();
+    let a = d.annotations(0).unwrap();
+    assert_eq!(a[0].vertices.len(), 1000);
+    assert!(t.elapsed().as_millis() < 300, "{:?}", t.elapsed());
+}

@@ -40,6 +40,19 @@ enum Grab {
         end: LineEnd,
         fixed: (f32, f32),
     },
+    /// Um vértice (polígono, linhas conectadas, nuvem) e os vizinhos (para a pré-visualização).
+    Vertex {
+        index: usize,
+        prev: Option<(f32, f32)>,
+        next: Option<(f32, f32)>,
+    },
+    /// Texto explicativo: a ponta (o joelho fica) ou o joelho (a ponta fica).
+    CalloutTip {
+        knee: (f32, f32),
+    },
+    CalloutKnee {
+        tip: (f32, f32),
+    },
 }
 
 /// Arrasto de anotação em andamento (mover ou redimensionar pela alça).
@@ -83,7 +96,22 @@ impl AnnotDrag {
                     resized(r, h, to, MIN_SIZE)
                 }
             }
-            Grab::LinePoint { .. } => r,
+            Grab::LinePoint { .. }
+            | Grab::Vertex { .. }
+            | Grab::CalloutTip { .. }
+            | Grab::CalloutKnee { .. } => r,
+        }
+    }
+
+    /// Trecho a mostrar tracejado durante o arrasto de vértice ou da linha de chamada.
+    fn preview_path(&self) -> Option<Vec<(f32, f32)>> {
+        match self.grab {
+            Grab::Vertex { prev, next, .. } => {
+                Some(prev.into_iter().chain([self.to]).chain(next).collect())
+            }
+            Grab::CalloutTip { knee } => Some(vec![self.to, knee]),
+            Grab::CalloutKnee { tip } => Some(vec![tip, self.to]),
+            _ => None,
         }
     }
 
@@ -117,6 +145,24 @@ impl AnnotDrag {
                 end,
                 to: self.to,
             },
+            Grab::Vertex { index, .. } => AnnotOp::MoveVertex {
+                page,
+                id,
+                index,
+                to: self.to,
+            },
+            Grab::CalloutTip { knee } => AnnotOp::MoveCallout {
+                page,
+                id,
+                knee,
+                tip: self.to,
+            },
+            Grab::CalloutKnee { tip } => AnnotOp::MoveCallout {
+                page,
+                id,
+                knee: self.to,
+                tip,
+            },
         })
     }
 }
@@ -125,6 +171,15 @@ impl AnnotDrag {
 enum NoteTarget {
     New((f32, f32)),
     Existing(i32),
+    /// Inserir texto: o cursor de inserção nesse retângulo.
+    Insert(PdfRect),
+    /// Substituir texto: o texto riscado (com o cursor no fim).
+    Replace(Vec<PdfRect>),
+    /// Texto explicativo: a caixa e a ponta da linha.
+    Callout {
+        rect: PdfRect,
+        tip: (f32, f32),
+    },
 }
 
 struct NoteDraft {
@@ -141,6 +196,8 @@ pub enum Markup {
     StrikeOut,
     /// Marca de redação sobre o texto (Redigir).
     Redact,
+    /// Substituir texto: o riscado vem com a nota do texto novo (pergunta antes de criar).
+    Replace,
 }
 
 impl Markup {
@@ -149,17 +206,10 @@ impl Markup {
         match tool {
             Tool::Highlight => Some(Self::Highlight),
             Tool::Underline => Some(Self::Underline),
+            Tool::StrikeOut => Some(Self::StrikeOut),
+            Tool::ReplaceText => Some(Self::Replace),
             Tool::RedactText => Some(Self::Redact),
             _ => None,
-        }
-    }
-
-    fn annot(self, page: i32, rects: Vec<PdfRect>) -> NewAnnot {
-        match self {
-            Self::Highlight => NewAnnot::Highlight { page, rects },
-            Self::Underline => NewAnnot::Underline { page, rects },
-            Self::StrikeOut => NewAnnot::StrikeOut { page, rects },
-            Self::Redact => NewAnnot::Redact { page, rects },
         }
     }
 }
@@ -200,6 +250,19 @@ pub struct EditState {
     pub can_annotate: bool,
     /// Carimbo dinâmico esperando a Identidade: (página, ponto).
     pub identity_for: Option<(i32, (f32, f32))>,
+    /// Polígono, linhas conectadas ou nuvem em construção.
+    poly: Option<crate::comment_tools::PolyBuilder>,
+    /// Texto explicativo: arrasto da caixa (página, início) e a caixa pronta esperando a ponta.
+    callout_drag: Option<(i32, (f32, f32))>,
+    callout_box: Option<(i32, PdfRect)>,
+    /// Borracha em andamento: (página, caminho).
+    eraser: Option<(i32, Vec<(f32, f32)>)>,
+    /// Anexar arquivo: a aba abre o seletor e cria o comentário em (página, ponto).
+    pub(crate) attach_at: Option<(i32, (f32, f32))>,
+    /// A janela de nota acabou de abrir: o campo recebe o foco (já dá para digitar).
+    note_focus: bool,
+    /// Ferramenta dos gestos em andamento: trocar de ferramenta os descarta.
+    gesture_tool: Tool,
 }
 
 /// O que a caixa de texto em digitação vai virar.
@@ -235,6 +298,9 @@ pub(crate) fn press_point(
     let pressed = response.ctx.input(|i| i.pointer.press_origin());
     pressed.map(|p| map.to_page(p.into())).or(pointer)
 }
+
+/// Raio da borracha do lápis, em pixels da tela (como o círculo do Acrobat).
+const ERASER_RADIUS: f32 = 8.0;
 
 /// Folga do clique sobre uma anotação, em pixels da tela.
 const HIT_TOL: f32 = 3.0;
@@ -292,6 +358,13 @@ fn paint_stroke(painter: &egui::Painter, points: &[(f32, f32)], map: &PageMap) {
 impl EditState {
     /// Cria uma anotação (vai ao worker, que a grava no documento em memória).
     /// Vazia (nota em branco, clique sem traço) é ignorada sem aviso.
+    /// Abre a janela de nota (nova, editar, inserir/substituir texto, texto explicativo) já com o
+    /// cursor no campo.
+    fn open_note(&mut self, draft: NoteDraft) {
+        self.note_draft = Some(draft);
+        self.note_focus = true;
+    }
+
     pub fn add(&mut self, annot: NewAnnot) {
         if !annot.is_empty() {
             self.ops.push(AnnotOp::Create(annot));
@@ -331,9 +404,27 @@ impl EditState {
         self.props = find(annots, target).map(PropsDraft::new);
     }
 
+    /// Polígono, texto explicativo ou borracha começados com outra ferramenta não continuam
+    /// (o Acrobat também cancela o desenho ao trocar de ferramenta).
+    fn forget_other_tool_gestures(&mut self) {
+        if self.gesture_tool != self.tool {
+            self.gesture_tool = self.tool;
+            self.drop_tool_gestures();
+        }
+    }
+
+    /// Descarta polígono, texto explicativo e borracha em andamento.
+    fn drop_tool_gestures(&mut self) {
+        self.poly = None;
+        self.callout_drag = None;
+        self.callout_box = None;
+        self.eraser = None;
+    }
+
     /// Esc (como no Acrobat): volta para Selecionar, tira a seleção e cancela gestos em andamento.
     pub fn escape(&mut self) {
         self.tool = Tool::Select;
+        self.drop_tool_gestures();
         self.fill.tool = None;
         self.selected = None;
         self.annot_drag = None;
@@ -392,7 +483,7 @@ impl EditState {
             self.finish_tag = None;
             self.selection = None;
             if !sel.quads.is_empty() {
-                self.add(markup.annot(page, sel.quads));
+                self.commit_markup(markup, page, sel.quads);
             }
             return;
         }
@@ -441,8 +532,26 @@ impl EditState {
             .selection
             .take_if(|s| s.page.is_some() && !s.quads.is_empty())
         {
-            self.add(markup.annot(page, quads));
+            self.commit_markup(markup, page, quads);
         }
+    }
+
+    /// Cria a marca sobre o texto; Substituir texto antes pergunta o texto novo.
+    fn commit_markup(&mut self, markup: Markup, page: i32, rects: Vec<PdfRect>) {
+        let annot = match markup {
+            Markup::Highlight => NewAnnot::Highlight { page, rects },
+            Markup::Underline => NewAnnot::Underline { page, rects },
+            Markup::StrikeOut => NewAnnot::StrikeOut { page, rects },
+            Markup::Redact => NewAnnot::Redact { page, rects },
+            Markup::Replace => {
+                return self.open_note(NoteDraft {
+                    page,
+                    target: NoteTarget::Replace(rects),
+                    text: String::new(),
+                })
+            }
+        };
+        self.add(annot);
     }
 
     /// Trata o mouse sobre uma página visível e desenha os gestos em andamento nela.
@@ -463,8 +572,14 @@ impl EditState {
         let pointer = response
             .interact_pointer_pos()
             .map(|p| map.to_page(p.into()));
+        self.forget_other_tool_gestures();
         match self.tool {
-            Tool::Select | Tool::Highlight | Tool::Underline | Tool::RedactText => {
+            Tool::Select
+            | Tool::Highlight
+            | Tool::Underline
+            | Tool::StrikeOut
+            | Tool::ReplaceText
+            | Tool::RedactText => {
                 let grabbed = self.tool == Tool::Select
                     && self.annot_gestures(&response, pointer, annots, page, map);
                 if !grabbed {
@@ -476,7 +591,7 @@ impl EditState {
             Tool::Hand | Tool::Zoom => {}
             Tool::Note => {
                 if let (true, Some(at)) = (response.clicked(), pointer) {
-                    self.note_draft = Some(NoteDraft {
+                    self.open_note(NoteDraft {
                         page,
                         target: NoteTarget::New(at),
                         text: String::new(),
@@ -484,6 +599,31 @@ impl EditState {
                 }
             }
             Tool::Ink => self.draw_ink(ui, &response, pointer, page, map),
+            Tool::InsertText => {
+                if let (true, Some((x, y))) = (response.clicked(), pointer) {
+                    // cursor de inserção no ponto clicado (altura de uma linha de 12 pt)
+                    self.open_note(NoteDraft {
+                        page,
+                        target: NoteTarget::Insert(PdfRect::new(
+                            x - 4.0,
+                            y - 9.0,
+                            x + 4.0,
+                            y + 3.0,
+                        )),
+                        text: String::new(),
+                    });
+                }
+            }
+            Tool::Polygon | Tool::PolyLine | Tool::Cloud => {
+                self.poly_gestures(ui, &response, pointer, page, map)
+            }
+            Tool::Callout => self.callout_gestures(ui, &response, pointer, page, map),
+            Tool::Eraser => self.eraser_gestures(ui, &response, pointer, annots, page, map),
+            Tool::Attach => {
+                if let (true, Some(at)) = (response.clicked(), pointer) {
+                    self.attach_at = Some((page, at));
+                }
+            }
             Tool::Fill => self.fill_gestures(ui, &response, pointer, page, map),
             Tool::TextBox
             | Tool::Rect
@@ -522,7 +662,7 @@ impl EditState {
         if response.double_clicked() {
             match pointer.and_then(hit).and_then(|s| find(annots, s)) {
                 Some(note) if note.kind == AnnotKind::Note => {
-                    self.note_draft = Some(NoteDraft {
+                    self.open_note(NoteDraft {
                         page,
                         target: NoteTarget::Existing(note.id),
                         text: note.contents.clone(),
@@ -564,10 +704,32 @@ impl EditState {
                 let fixed = if end == LineEnd::Start { e } else { s };
                 Some((a, Grab::LinePoint { end, fixed }))
             });
+            let vertex = selected.and_then(|a| {
+                let v = &a.vertices;
+                let index = app_state::annot_geom::vertex_at(v, p, size)?;
+                let closed = a.kind != AnnotKind::PolyLine;
+                let prev = index
+                    .checked_sub(1)
+                    .or(closed.then(|| v.len().saturating_sub(1)))
+                    .and_then(|k| v.get(k).copied());
+                let next = v
+                    .get(index + 1)
+                    .copied()
+                    .or_else(|| closed.then(|| v.first().copied()).flatten());
+                Some((a, Grab::Vertex { index, prev, next }))
+            });
+            let callout_point = selected.and_then(|a| {
+                let [tip, knee, _] = a.callout?;
+                let grab = match app_state::annot_geom::vertex_at(&[tip, knee], p, size)? {
+                    0 => Grab::CalloutTip { knee },
+                    _ => Grab::CalloutKnee { tip },
+                };
+                Some((a, grab))
+            });
             let handle = selected
                 .filter(|a| a.resizable())
                 .and_then(|a| Some((a, Grab::Resize(handle_at(a.rect, p, size)?))));
-            let grab = match line_end.or(handle) {
+            let grab = match line_end.or(vertex).or(callout_point).or(handle) {
                 Some(found) => Some(found),
                 None => hit(p)
                     .and_then(|s| find(annots, s))
@@ -701,6 +863,15 @@ impl EditState {
         map: &PageMap,
     ) {
         let dashed = egui::Stroke::new(1.5, SELECTED);
+        if let Some(path) = self
+            .annot_drag
+            .filter(|d| d.page == page)
+            .and_then(|d| d.preview_path())
+        {
+            let pts: Vec<egui::Pos2> = path.iter().map(|&p| map.to_screen(p).into()).collect();
+            painter.extend(egui::Shape::dashed_line(&pts, dashed, 6.0, 4.0));
+            return;
+        }
         if let Some((a, b)) = self
             .annot_drag
             .filter(|d| d.page == page)
@@ -740,6 +911,17 @@ impl EditState {
             handle(s);
             handle(e);
             return;
+        }
+        if !a.vertices.is_empty() {
+            // polígono, linhas conectadas e nuvem: uma alça em cada vértice, como no Acrobat
+            for &v in &a.vertices {
+                handle(v);
+            }
+            return;
+        }
+        if let Some([tip, knee, _]) = a.callout {
+            handle(tip);
+            handle(knee);
         }
         let r = screen_rect(&a.rect, map).expand(2.0);
         painter.rect_stroke(
@@ -827,6 +1009,164 @@ impl EditState {
     }
 
     /// Desenho à mão livre: acumula os pontos e, ao soltar, guarda o traço.
+    /// Polígono, linhas conectadas e nuvem: clique acrescenta vértice; clique duplo (ou clique
+    /// no primeiro ponto, no polígono e na nuvem) termina; Backspace tira o último; Esc cancela.
+    fn poly_gestures(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        pointer: Option<(f32, f32)>,
+        page: i32,
+        map: &PageMap,
+    ) {
+        use crate::comment_tools::PolyBuilder;
+        let closable = self.tool != Tool::PolyLine;
+        if let (true, Some(p)) = (response.clicked(), pointer) {
+            let builder = self
+                .poly
+                .get_or_insert_with(|| PolyBuilder::new(page, closable));
+            if builder.page != page {
+                *builder = PolyBuilder::new(page, closable);
+            }
+            // o egui conta como triplo o duplo que vem logo depois do vértice anterior
+            let double = response.double_clicked() || response.triple_clicked();
+            if let Some(vertices) = builder.click(p, double, 6.0 / map.zoom) {
+                self.poly = None;
+                self.add(NewAnnot::Polygon {
+                    page,
+                    vertices,
+                    closed: closable,
+                    cloud: self.tool == Tool::Cloud,
+                });
+            }
+        }
+        let Some(builder) = self.poly.as_mut().filter(|b| b.page == page) else {
+            return;
+        };
+        if ui.input(|i| i.key_pressed(egui::Key::Backspace)) {
+            builder.undo_last();
+        }
+        // pré-visualização: os vértices e o trecho até o ponteiro
+        let mut preview = builder.points.clone();
+        if let Some(h) = response.hover_pos() {
+            preview.push(map.to_page(h.into()));
+        }
+        if preview.len() > 1 {
+            paint_stroke(ui.painter(), &preview, map);
+        }
+    }
+
+    /// Texto explicativo: arrastar desenha a caixa; o clique seguinte põe a ponta da seta e abre o
+    /// texto.
+    fn callout_gestures(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        pointer: Option<(f32, f32)>,
+        page: i32,
+        map: &PageMap,
+    ) {
+        if let Some((box_page, rect)) = self.callout_box.filter(|(p, _)| *p == page) {
+            if let (true, Some(tip)) = (response.clicked(), pointer) {
+                self.callout_box = None;
+                self.open_note(NoteDraft {
+                    page: box_page,
+                    target: NoteTarget::Callout { rect, tip },
+                    text: String::new(),
+                });
+                return;
+            }
+            let painter = ui.painter();
+            paint_stroke(painter, &outline(rect), map);
+            if let Some(h) = response.hover_pos() {
+                let tip = map.to_page(h.into());
+                let knee = crate::comment_tools::callout_knee(rect, tip);
+                // o mesmo ponto na caixa que o pdf-core grava
+                let end = pdf_core::callout_end(rect, knee);
+                paint_stroke(painter, &[tip, knee, end], map);
+            }
+            return;
+        }
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            if let Some(p) = press_point(response, map, pointer) {
+                self.callout_drag = Some((page, p));
+            }
+        }
+        if let (Some((drag_page, from)), Some(to)) = (self.callout_drag, pointer) {
+            if drag_page == page {
+                let rect = app_state::annot_geom::rect_from_drag(from, to, false);
+                if response.drag_stopped_by(egui::PointerButton::Primary) {
+                    self.callout_drag = None;
+                    // clique sem arrasto: caixa padrão a partir do ponto
+                    let rect = if rect.width() < 10.0 || rect.height() < 10.0 {
+                        PdfRect::new(from.0, from.1, from.0 + 150.0, from.1 + 40.0)
+                    } else {
+                        rect
+                    };
+                    self.callout_box = Some((page, rect));
+                } else {
+                    paint_stroke(ui.painter(), &outline(rect), map);
+                }
+            }
+        }
+    }
+
+    /// Borracha: arrastar sobre um desenho apaga o que fica sob o círculo (uma etapa ao soltar).
+    fn eraser_gestures(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        pointer: Option<(f32, f32)>,
+        annots: &[AnnotInfo],
+        page: i32,
+        map: &PageMap,
+    ) {
+        let radius = ERASER_RADIUS / map.zoom;
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            self.eraser = Some((page, Vec::new()));
+        }
+        if let (Some((p, path)), Some(at)) = (self.eraser.as_mut(), pointer) {
+            // pontos quase repetidos (mouse parado) não acrescentam nada ao que o círculo cobre
+            let moved = path
+                .last()
+                .is_none_or(|&(x, y)| (at.0 - x).hypot(at.1 - y) >= radius / 4.0);
+            if *p == page && moved && response.dragged_by(egui::PointerButton::Primary) {
+                path.push(at);
+            }
+        }
+        if response.drag_stopped_by(egui::PointerButton::Primary) {
+            if let Some((p, path)) = self.eraser.take().filter(|(p, _)| *p == page) {
+                let reach = |r: &PdfRect| {
+                    let r =
+                        PdfRect::new(r.x0 - radius, r.y0 - radius, r.x1 + radius, r.y1 + radius);
+                    path.iter().any(|&(x, y)| r.contains(x, y))
+                };
+                let ids: Vec<i32> = annots
+                    .iter()
+                    .filter(|a| a.page == p && a.kind == AnnotKind::Ink && reach(&a.rect))
+                    .map(|a| a.id)
+                    .collect();
+                if !ids.is_empty() {
+                    // uma passada é uma etapa do desfazer, mesmo sobre vários desenhos
+                    self.ops.push(AnnotOp::Erase {
+                        page: p,
+                        ids,
+                        path,
+                        radius,
+                    });
+                }
+            }
+        }
+        // o círculo da borracha sob o ponteiro
+        if let Some(h) = response.hover_pos() {
+            ui.painter().circle_stroke(
+                h,
+                ERASER_RADIUS,
+                egui::Stroke::new(1.0, egui::Color32::from_gray(90)),
+            );
+        }
+    }
+
     fn draw_ink(
         &mut self,
         ui: &egui::Ui,
@@ -861,10 +1201,17 @@ impl EditState {
         let (title, ok) = match draft.target {
             NoteTarget::New(_) => ("Nova nota", "Adicionar"),
             NoteTarget::Existing(_) => ("Editar nota", "OK"),
+            NoteTarget::Insert(_) => ("Inserir texto", "Adicionar"),
+            NoteTarget::Replace(_) => ("Substituir texto", "Adicionar"),
+            NoteTarget::Callout { .. } => ("Texto explicativo", "Adicionar"),
         };
         let mut choice = None; // Some(true) = confirmar, Some(false) = cancelar
+        let focus = std::mem::take(&mut self.note_focus);
         egui::Window::new(title).collapsible(false).show(ui, |ui| {
-            ui.text_edit_multiline(&mut draft.text);
+            let edit = ui.text_edit_multiline(&mut draft.text);
+            if focus {
+                edit.request_focus();
+            }
             ui.horizontal(|ui| {
                 if ui.button(ok).clicked() {
                     choice = Some(true);
@@ -879,6 +1226,19 @@ impl EditState {
                 let (page, text) = (draft.page, draft.text);
                 match draft.target {
                     NoteTarget::New(at) => self.add(NewAnnot::Note { page, at, text }),
+                    NoteTarget::Insert(rect) => self.add(NewAnnot::Caret { page, rect, text }),
+                    NoteTarget::Replace(rects) => {
+                        self.add(NewAnnot::ReplaceText { page, rects, text })
+                    }
+                    NoteTarget::Callout { rect, tip } => self.add(NewAnnot::Callout {
+                        page,
+                        rect,
+                        knee: crate::comment_tools::callout_knee(rect, tip),
+                        tip,
+                        text,
+                        size: crate::create::TEXT_SIZE,
+                        color: [0.0; 3],
+                    }),
                     NoteTarget::Existing(id) => {
                         self.ops.push(AnnotOp::SetContents { page, id, text })
                     }
@@ -902,6 +1262,17 @@ impl EditState {
     }
 }
 
+/// Contorno fechado do retângulo (para `paint_stroke`).
+fn outline(r: PdfRect) -> [(f32, f32); 5] {
+    [
+        (r.x0, r.y0),
+        (r.x1, r.y0),
+        (r.x1, r.y1),
+        (r.x0, r.y1),
+        (r.x0, r.y0),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -920,6 +1291,26 @@ mod tests {
             (r.min, r.max),
             (egui::pos2(120.0, 90.0), egui::pos2(160.0, 130.0))
         );
+    }
+
+    #[test]
+    fn switching_tools_drops_a_polygon_in_progress() {
+        let mut edit = EditState {
+            tool: Tool::Polygon,
+            ..Default::default()
+        };
+        edit.forget_other_tool_gestures();
+        let mut b = crate::comment_tools::PolyBuilder::new(0, true);
+        b.points = vec![(0.0, 0.0), (10.0, 0.0)];
+        edit.poly = Some(b);
+        edit.callout_box = Some((0, PdfRect::new(0.0, 0.0, 1.0, 1.0)));
+        edit.forget_other_tool_gestures();
+        assert!(edit.poly.is_some(), "mesma ferramenta: continua");
+        edit.tool = Tool::Ink;
+        edit.forget_other_tool_gestures();
+        edit.tool = Tool::Polygon;
+        edit.forget_other_tool_gestures();
+        assert!(edit.poly.is_none() && edit.callout_box.is_none());
     }
 
     #[test]

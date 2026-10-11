@@ -59,6 +59,20 @@ pub(crate) enum Edit {
         a: (f32, f32),
         b: (f32, f32),
     },
+    /// Vértices do polígono, das linhas conectadas e da nuvem (mover, puxar um vértice).
+    Vertices {
+        page: i32,
+        id: i32,
+        points: Vec<(f32, f32)>,
+    },
+    /// Texto explicativo: a caixa, a ponta da seta e o joelho (o ponto na caixa sai da caixa).
+    Callout {
+        page: i32,
+        id: i32,
+        rect: PdfRect,
+        tip: (f32, f32),
+        knee: (f32, f32),
+    },
     /// Preenchimento das formas (/IC) ou fundo da caixa de texto (/C).
     Fill {
         page: i32,
@@ -72,6 +86,8 @@ pub(crate) enum Edit {
         size: f32,
         color: [f32; 3],
     },
+    /// Intensidade da borda de nuvem (/BE /I).
+    Cloud { page: i32, id: i32, intensity: f32 },
     /// Várias mudanças da mesma anotação num passo só do desfazer (ex.: texto e tamanho da caixa).
     Batch(Vec<Edit>),
 }
@@ -84,7 +100,10 @@ impl Edit {
             | Self::Style { page, .. }
             | Self::Contents { page, .. }
             | Self::LinePoints { page, .. }
+            | Self::Vertices { page, .. }
+            | Self::Callout { page, .. }
             | Self::Fill { page, .. }
+            | Self::Cloud { page, .. }
             | Self::Font { page, .. } => *page,
             Self::Batch(edits) => edits.first().map_or(0, Edit::page),
         }
@@ -273,6 +292,265 @@ pub(crate) fn line_of(doc: &PdfDocument, page: i32, id: i32) -> Result<Option<Se
     Ok(Some(((p.x, p.y), (q.x, q.y))))
 }
 
+/// Teto de vértices lidos (polígono de outro programa com milhares de pontos).
+pub const MAX_VERTICES: usize = 1000;
+
+/// Vértices da anotação (vazio se não tiver), em coordenadas do MuPDF, sem os não finitos e com
+/// teto: lidos direto do /Vertices, parando no teto (um array gigante não é percorrido inteiro).
+/// O `bool` diz se o teto cortou vértices.
+fn read_vertices(a: &PdfAnnotation, ctm: &mupdf::Matrix) -> Result<(Vec<(f32, f32)>, bool)> {
+    if !matches!(
+        a.r#type()?,
+        PdfAnnotationType::Polygon | PdfAnnotationType::PolyLine
+    ) {
+        return Ok((Vec::new(), false));
+    }
+    let Some(raw) = a.object().get_dict("Vertices")? else {
+        return Ok((Vec::new(), false));
+    };
+    let pairs = if raw.is_array()? { raw.len()? / 2 } else { 0 };
+    let num = |k: usize| {
+        raw.get_array(k as i32)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_float().ok())
+            .filter(|v| v.is_finite())
+    };
+    let mut out = Vec::new();
+    for k in 0..pairs.min(MAX_VERTICES) {
+        if let (Some(x), Some(y)) = (num(2 * k), num(2 * k + 1)) {
+            let p = Point::new(x, y).transform(ctm);
+            out.push((p.x, p.y));
+        }
+    }
+    Ok((out, pairs > MAX_VERTICES))
+}
+
+/// Vértices para mostrar (até o teto).
+pub(crate) fn vertices(a: &PdfAnnotation, ctm: &mupdf::Matrix) -> Result<Vec<(f32, f32)>> {
+    Ok(read_vertices(a, ctm)?.0)
+}
+
+/// Vértices para editar: com mais que o teto a edição é recusada (regravar só os primeiros
+/// apagaria o resto, sem volta).
+fn editable_vertices(a: &PdfAnnotation, ctm: &mupdf::Matrix) -> Result<Vec<(f32, f32)>> {
+    match read_vertices(a, ctm)? {
+        (_, true) => Err(crate::error::refused(
+            "polígono com mais de 1000 vértices: só dá para excluir ou mudar o estilo",
+        )),
+        (points, false) => Ok(points),
+    }
+}
+
+/// Anotação agrupada a outra (/IRT com /RT /Group): o id da principal.
+pub(crate) fn group_of(a: &PdfAnnotation) -> Result<Option<i32>> {
+    if name_entry(a, "RT")?.as_deref() != Some("Group") {
+        return Ok(None);
+    }
+    Ok(match a.object().get_dict("IRT")? {
+        Some(o) if o.is_indirect()? => Some(o.as_indirect()?),
+        _ => None,
+    })
+}
+
+/// Geometria editável da anotação, lida numa busca só: decide como mover e redimensionar.
+pub(crate) enum Shape {
+    Callout {
+        rect: PdfRect,
+        tip: (f32, f32),
+        knee: (f32, f32),
+    },
+    Vertices {
+        rect: PdfRect,
+        points: Vec<(f32, f32)>,
+    },
+    Line(Segment),
+    /// Caixa, com os traços se for desenho.
+    Box(PdfRect, Option<Strokes>),
+}
+
+pub(crate) fn shape_of(doc: &PdfDocument, page: i32, id: i32) -> Result<Shape> {
+    let (page_ref, a) = find(doc, page, id)?;
+    if let Some((rect, [tip, knee, _])) = callout(&a, &page_ref.ctm()?)? {
+        return Ok(Shape::Callout { rect, tip, knee });
+    }
+    if a.r#type()? == PdfAnnotationType::Line {
+        let (p, q) = a.line()?;
+        return Ok(Shape::Line(((p.x, p.y), (q.x, q.y))));
+    }
+    let points = editable_vertices(&a, &page_ref.ctm()?)?;
+    let (rect, ink) = geometry(&a)?;
+    Ok(if points.is_empty() {
+        Shape::Box(rect, ink)
+    } else {
+        Shape::Vertices { rect, points }
+    })
+}
+
+/// Caixa do texto explicativo e a linha de chamada (ponta, joelho, ponto na caixa).
+pub(crate) type CalloutGeometry = (PdfRect, [(f32, f32); 3]);
+
+/// Distância de `p` ao segmento `a`–`b`.
+pub fn dist_to_segment(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 > 0.0 {
+        (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (p.0 - (a.0 + t * dx)).hypot(p.1 - (a.1 + t * dy))
+}
+
+/// Borracha do lápis: tira dos traços os pontos a menos de `radius` do caminho e corta o traço
+/// onde algum trecho passou sob a borracha. Traços com menos de 2 pontos saem.
+pub fn erase_strokes(
+    strokes: &[Vec<(f32, f32)>],
+    path: &[(f32, f32)],
+    radius: f32,
+) -> Vec<Vec<(f32, f32)>> {
+    let near = |p: (f32, f32)| path.iter().any(|&e| (e.0 - p.0).hypot(e.1 - p.1) < radius);
+    let crosses =
+        |a: (f32, f32), b: (f32, f32)| path.iter().any(|&e| dist_to_segment(e, a, b) < radius);
+    // apagar só tira pontos: o desenho nunca cresce, e todo traço longe da borracha fica
+    let mut out = Vec::new();
+    for stroke in strokes {
+        let mut current: Vec<(f32, f32)> = Vec::new();
+        for &p in stroke {
+            let gone = near(p);
+            if gone || current.last().is_some_and(|&q| crosses(q, p)) {
+                if current.len() >= 2 {
+                    out.push(std::mem::take(&mut current));
+                }
+                current.clear();
+            }
+            if !gone {
+                current.push(p);
+            }
+        }
+        if current.len() >= 2 {
+            out.push(current);
+        }
+    }
+    out
+}
+
+/// Texto explicativo (/IT /FreeTextCallout)?
+pub(crate) fn is_callout(a: &PdfAnnotation) -> Result<bool> {
+    Ok(name_entry(a, "IT")?.as_deref() == Some("FreeTextCallout"))
+}
+
+/// Caixa do texto explicativo (o /Rect sem as margens /RD, que abrem espaço para a linha) e a
+/// linha de chamada (/CL: ponta, joelho, ponto na caixa), em coordenadas do MuPDF.
+pub(crate) fn callout(a: &PdfAnnotation, ctm: &mupdf::Matrix) -> Result<Option<CalloutGeometry>> {
+    if !is_callout(a)? {
+        return Ok(None);
+    }
+    let num = |o: &mupdf::pdf::PdfObject, k: i32| {
+        o.get_array(k)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_float().ok())
+            .filter(|v| v.is_finite())
+    };
+    let Some(cl) = a.object().get_dict("CL")? else {
+        return Ok(None);
+    };
+    let pt = |k: i32| -> Option<(f32, f32)> {
+        let p = Point::new(num(&cl, 2 * k)?, num(&cl, 2 * k + 1)?).transform(ctm);
+        Some((p.x, p.y))
+    };
+    let line = match cl.len()? {
+        6 => [pt(0), pt(1), pt(2)],
+        // só ponta e fim: o joelho fica na ponta
+        4 => [pt(0), pt(0), pt(1)],
+        _ => return Ok(None),
+    };
+    let [Some(tip), Some(knee), Some(end)] = line else {
+        return Ok(None);
+    };
+    // /Rect e /RD lidos juntos do dicionário, em pontos do PDF (o MuPDF regrava os dois ao gerar
+    // a aparência; a leitura pela API pode vir de antes): a caixa é o /Rect menos as margens /RD
+    // [esquerda base direita topo]
+    let Some(r) = a.object().get_dict("Rect")? else {
+        return Ok(None);
+    };
+    let [Some(x0), Some(y0), Some(x1), Some(y1)] = [0, 1, 2, 3].map(|k| num(&r, k)) else {
+        return Ok(None);
+    };
+    let rd = match a.object().get_dict("RD")? {
+        Some(rd) => [0, 1, 2, 3].map(|k| num(&rd, k).unwrap_or(0.0).max(0.0)),
+        None => [0.0; 4],
+    };
+    let (bx0, by0) = (x0.min(x1) + rd[0], y0.min(y1) + rd[1]);
+    let (bx1, by1) = (x0.max(x1) - rd[2], y0.max(y1) - rd[3]);
+    let p = Point::new(bx0, by0).transform(ctm);
+    let q = Point::new(bx1.max(bx0), by1.max(by0)).transform(ctm);
+    let rect = PdfRect::new(p.x.min(q.x), p.y.min(q.y), p.x.max(q.x), p.y.max(q.y));
+    Ok(Some((rect, [tip, knee, end])))
+}
+
+/// Ponto da borda da caixa mais perto do joelho (onde a linha de chamada encosta).
+pub fn callout_end(rect: PdfRect, knee: (f32, f32)) -> (f32, f32) {
+    let x = knee.0.clamp(rect.x0, rect.x1);
+    let y = knee.1.clamp(rect.y0, rect.y1);
+    let inside = x == knee.0 && y == knee.1;
+    if !inside {
+        return (x, y);
+    }
+    // joelho dentro da caixa: a borda mais próxima
+    let d = [
+        knee.0 - rect.x0,
+        rect.x1 - knee.0,
+        knee.1 - rect.y0,
+        rect.y1 - knee.1,
+    ];
+    let min = d.iter().copied().fold(f32::MAX, f32::min);
+    match d.iter().position(|&v| v == min) {
+        Some(0) => (rect.x0, knee.1),
+        Some(1) => (rect.x1, knee.1),
+        Some(2) => (knee.0, rect.y0),
+        _ => (knee.0, rect.y1),
+    }
+}
+
+/// Grava a caixa e a linha de chamada (o MuPDF refaz /Rect e /RD ao gerar a aparência).
+pub(crate) fn set_callout(
+    doc: &PdfDocument,
+    a: &mut PdfAnnotation,
+    ctm: &mupdf::Matrix,
+    rect: PdfRect,
+    tip: (f32, f32),
+    knee: (f32, f32),
+) -> Result<()> {
+    let inv = ctm.invert().unwrap_or(mupdf::Matrix::IDENTITY);
+    let end = callout_end(rect, knee);
+    let mut cl = doc.new_array()?;
+    for (x, y) in [tip, knee, end] {
+        let p = Point::new(x, y).transform(&inv);
+        cl.array_push(PdfObject::new_real(p.x)?)?;
+        cl.array_push(PdfObject::new_real(p.y)?)?;
+    }
+    // sem /RD velho: a caixa nova é o /Rect inteiro até o MuPDF recalcular
+    clear_key(a, "RD")?;
+    a.set_rect(Rect::from(rect))?;
+    let mut obj = a.object();
+    obj.dict_put("CL", cl)?;
+    obj.dict_put("IT", PdfObject::new_name("FreeTextCallout")?)?;
+    obj.dict_put("LE", PdfObject::new_name("OpenArrow")?)?;
+    Ok(())
+}
+
+/// Borda de nuvem (/BE /S /C): a nuvem do Acrobat.
+pub(crate) fn is_cloudy(a: &PdfAnnotation) -> Result<bool> {
+    Ok(match a.object().get_dict("BE")? {
+        Some(be) => be
+            .get_dict("S")?
+            .is_some_and(|s| s.as_name().is_ok_and(|n| n == b"C")),
+        None => false,
+    })
+}
+
 /// Geometria atual da anotação `id`.
 pub(crate) fn geometry_of(
     doc: &PdfDocument,
@@ -312,7 +590,10 @@ pub(crate) fn apply_edit(
         | Edit::Style { page, id, .. }
         | Edit::Contents { page, id, .. }
         | Edit::LinePoints { page, id, .. }
+        | Edit::Vertices { page, id, .. }
+        | Edit::Callout { page, id, .. }
         | Edit::Fill { page, id, .. }
+        | Edit::Cloud { page, id, .. }
         | Edit::Font { page, id, .. } => (*page, *id),
     };
     let (mut page_ref, mut a) = find(doc, page, id)?;
@@ -376,6 +657,30 @@ pub(crate) fn apply_edit(
                 width: old_width,
             }
         }
+        Edit::Callout {
+            rect, tip, knee, ..
+        } => {
+            let ctm = page_ref.ctm()?;
+            let (old_rect, [old_tip, old_knee, _]) = callout(&a, &ctm)?
+                .ok_or_else(|| PdfError::InvalidAnnotation("não é um texto explicativo".into()))?;
+            set_callout(doc, &mut a, &ctm, rect, tip, knee)?;
+            Edit::Callout {
+                page,
+                id,
+                rect: old_rect,
+                tip: old_tip,
+                knee: old_knee,
+            }
+        }
+        Edit::Vertices { points, .. } => {
+            let old = editable_vertices(&a, &page_ref.ctm()?)?;
+            a.set_vertices(points.iter().map(|&(x, y)| Point::new(x, y)))?;
+            Edit::Vertices {
+                page,
+                id,
+                points: old,
+            }
+        }
         Edit::LinePoints { a: p, b: q, .. } => {
             let (op, oq) = a.line()?;
             a.set_line(Point::new(p.0, p.1), Point::new(q.0, q.1))?;
@@ -405,6 +710,18 @@ pub(crate) fn apply_edit(
                 page,
                 id,
                 color: old,
+            }
+        }
+        Edit::Cloud { intensity, .. } => {
+            if !is_cloudy(&a)? {
+                return Err(PdfError::InvalidAnnotation("não é uma nuvem".into()));
+            }
+            let old = a.border_effect_intensity()?;
+            a.set_border_effect_intensity(intensity)?;
+            Edit::Cloud {
+                page,
+                id,
+                intensity: old,
             }
         }
         Edit::Font { size, color, .. } => {
@@ -513,6 +830,36 @@ pub(crate) fn scaled(from: PdfRect, to: PdfRect, ink: Option<Strokes>) -> Option
 
 #[cfg(test)]
 mod tests {
+
+    fn line() -> Vec<(f32, f32)> {
+        (0..=10).map(|k| (k as f32 * 10.0, 0.0)).collect()
+    }
+
+    #[test]
+    fn erasing_the_middle_splits_the_stroke() {
+        let out = erase_strokes(&[line()], &[(50.0, 0.0)], 8.0);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out[0].last(), Some(&(40.0, 0.0)));
+        assert_eq!(out[1].first(), Some(&(60.0, 0.0)));
+    }
+
+    #[test]
+    fn erasing_everything_leaves_nothing_and_far_away_changes_nothing() {
+        let all: Vec<(f32, f32)> = (0..=10).map(|k| (k as f32 * 10.0, 0.0)).collect();
+        assert!(erase_strokes(&[line()], &all, 6.0).is_empty());
+        assert_eq!(erase_strokes(&[line()], &[(50.0, 80.0)], 8.0), vec![line()]);
+    }
+
+    #[test]
+    fn erasing_between_sparse_points_cuts_the_segment() {
+        let sparse = vec![(0.0, 0.0), (100.0, 0.0), (200.0, 0.0)];
+        let out = erase_strokes(&[sparse], &[(50.0, 2.0)], 8.0);
+        assert_eq!(
+            out,
+            vec![vec![(100.0, 0.0), (200.0, 0.0)]],
+            "o trecho cortado sai"
+        );
+    }
     use super::*;
 
     fn snap(size: usize) -> Snapshot {

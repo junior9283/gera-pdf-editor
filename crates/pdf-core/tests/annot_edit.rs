@@ -355,3 +355,110 @@ fn undoing_a_color_change_keeps_the_original_color_space() {
     let out = restyle_and_undo(Some(cmyk));
     assert_eq!(common::raw_color(&out), Some(cmyk));
 }
+
+#[test]
+fn eraser_splits_a_stroke_and_undoes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = common::write_sample(&dir, "a.pdf", 1, 0);
+    let mut d = pdf_core::PdfDoc::open(&path, None).unwrap();
+    let stroke: Vec<(f32, f32)> = (0..=10).map(|k| (100.0 + k as f32 * 10.0, 200.0)).collect();
+    d.apply(pdf_core::AnnotOp::Create(pdf_core::NewAnnot::Ink {
+        page: 0,
+        strokes: vec![stroke],
+    }))
+    .unwrap();
+    let id = d.annotations(0).unwrap()[0].id;
+    d.apply(pdf_core::AnnotOp::Erase {
+        page: 0,
+        ids: vec![id],
+        path: vec![(150.0, 200.0)],
+        radius: 8.0,
+    })
+    .unwrap();
+    assert_eq!(
+        d.annotations(0).unwrap().len(),
+        1,
+        "um desenho com dois traços"
+    );
+    d.apply(pdf_core::AnnotOp::Erase {
+        page: 0,
+        ids: vec![id],
+        path: (0..=10).map(|k| (100.0 + k as f32 * 10.0, 200.0)).collect(),
+        radius: 8.0,
+    })
+    .unwrap();
+    assert!(
+        d.annotations(0).unwrap().is_empty(),
+        "sem traços, o desenho sai"
+    );
+    d.undo().unwrap();
+    d.undo().unwrap();
+    assert_eq!(d.annotations(0).unwrap().len(), 1);
+}
+
+#[test]
+fn erasing_a_big_drawing_keeps_the_strokes_far_away() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = common::write_sample(&dir, "a.pdf", 1, 0);
+    let mut d = pdf_core::PdfDoc::open(&path, None).unwrap();
+    let strokes: Vec<Vec<(f32, f32)>> = (0..60)
+        .map(|s| {
+            (0..200)
+                .map(|k| (50.0 + k as f32 * 2.0, 100.0 + s as f32 * 10.0))
+                .collect()
+        })
+        .collect();
+    d.apply(pdf_core::AnnotOp::Create(pdf_core::NewAnnot::Ink {
+        page: 0,
+        strokes,
+    }))
+    .unwrap();
+    let before = only(&d).rect;
+    d.apply(pdf_core::AnnotOp::Erase {
+        page: 0,
+        ids: vec![only(&d).id],
+        path: vec![(50.0, 100.0)],
+        radius: 3.0,
+    })
+    .unwrap();
+    let after = only(&d).rect;
+    assert!((after.y0 - before.y0).abs() < 2.0 && (after.y1 - before.y1).abs() < 2.0);
+}
+
+#[test]
+fn one_eraser_pass_over_two_drawings_is_one_undo_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = common::write_sample(&dir, "a.pdf", 1, 0);
+    let mut d = pdf_core::PdfDoc::open(&path, None).unwrap();
+    for y in [200.0, 300.0] {
+        let stroke: Vec<(f32, f32)> = (0..=10).map(|k| (100.0 + k as f32 * 10.0, y)).collect();
+        d.apply(pdf_core::AnnotOp::Create(pdf_core::NewAnnot::Ink {
+            page: 0,
+            strokes: vec![stroke],
+        }))
+        .unwrap();
+    }
+    let ids: Vec<i32> = d.annotations(0).unwrap().iter().map(|a| a.id).collect();
+    let before = d.annotations(0).unwrap();
+    d.apply(pdf_core::AnnotOp::Erase {
+        page: 0,
+        ids,
+        // apaga todo o primeiro desenho e a metade direita do segundo
+        path: (90..=210)
+            .step_by(5)
+            .map(|x| (x as f32, 200.0))
+            .chain((160..=210).step_by(5).map(|x| (x as f32, 300.0)))
+            .collect(),
+        radius: 8.0,
+    })
+    .unwrap();
+    let after = d.annotations(0).unwrap();
+    assert_eq!(after.len(), 1, "o primeiro desenho saiu");
+    assert!(after[0].rect.x1 < 170.0, "{:?}", after[0].rect);
+    d.undo().unwrap();
+    assert_eq!(
+        d.annotations(0).unwrap(),
+        before,
+        "uma etapa desfaz os dois"
+    );
+}

@@ -135,7 +135,7 @@ fn card(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             let header = ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(crate::sidebar::label_of(&t.root)).small());
+                ui.label(egui::RichText::new(thread_label(t)).small());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.menu_button("···", |ui| card_menu(ui, t, out, &mut st.focus_reply));
                     if t.checked {
@@ -354,6 +354,15 @@ pub fn show(
     out
 }
 
+/// Tipo do comentário no cartão; o par de Substituir texto (cursor e riscado) é um item só.
+fn thread_label(t: &Thread) -> &'static str {
+    if t.grouped && t.root.kind == AnnotKind::Caret {
+        "Substituir texto"
+    } else {
+        crate::sidebar::label_of(&t.root)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,6 +370,24 @@ mod tests {
     #[test]
     fn page_header_counts_comments() {
         assert_eq!(page_header(1, 3), "Página 2 (3)");
+    }
+
+    #[test]
+    fn a_replace_text_pair_is_labeled_as_one_item() {
+        let caret = pdf_core::AnnotInfo {
+            kind: pdf_core::AnnotKind::Caret,
+            ..Default::default()
+        };
+        let mut t = app_state::comments::Thread {
+            root: caret,
+            replies: Vec::new(),
+            review: None,
+            checked: false,
+            grouped: false,
+        };
+        assert_eq!(thread_label(&t), "Inserir texto");
+        t.grouped = true;
+        assert_eq!(thread_label(&t), "Substituir texto");
     }
 
     #[test]

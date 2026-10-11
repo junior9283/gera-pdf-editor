@@ -105,6 +105,18 @@ pub enum AnnotKind {
     Stamp,
     /// Marca de redação (a aplicar).
     Redact,
+    /// Polígono (cliques nos vértices).
+    Polygon,
+    /// Linhas conectadas (polilinha).
+    PolyLine,
+    /// Nuvem (polígono com borda de nuvem).
+    Cloud,
+    /// Cursor de inserção (Inserir texto; com riscado agrupado, Substituir texto).
+    Caret,
+    /// Texto explicativo (caixa de texto com linha de chamada).
+    Callout,
+    /// Arquivo anexado como comentário (ícone de clipe).
+    FileAttachment,
     /// Tipo que não criamos (de outro programa): selecionável e apagável.
     #[default]
     Other,
@@ -115,6 +127,8 @@ pub type Segment = ((f32, f32), (f32, f32));
 
 /// Cor dos comentários novos (contorno das formas e linhas, texto da caixa), como no Acrobat.
 pub const COMMENT_RED: [f32; 3] = [1.0, 0.0, 0.0];
+/// Azul das marcações de edição de texto (Inserir e Substituir texto), como no Acrobat.
+pub const TEXT_EDIT_BLUE: [f32; 3] = [0.0, 0.0, 1.0];
 
 /// Modelo de estado de um comentário (como o Acrobat grava): revisão ou visto.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,13 +160,29 @@ impl AnnotKind {
     pub fn has_border(self) -> bool {
         matches!(
             self,
-            Self::Ink | Self::TextBox | Self::Rect | Self::Ellipse | Self::Line
+            Self::Ink
+                | Self::TextBox
+                | Self::Callout
+                | Self::Rect
+                | Self::Ellipse
+                | Self::Line
+                | Self::Polygon
+                | Self::PolyLine
+                | Self::Cloud
         )
     }
 
     /// Tem preenchimento (formas) ou fundo (caixa de texto).
     pub fn has_fill(self) -> bool {
-        matches!(self, Self::Rect | Self::Ellipse | Self::TextBox)
+        matches!(
+            self,
+            Self::Rect
+                | Self::Ellipse
+                | Self::TextBox
+                | Self::Callout
+                | Self::Polygon
+                | Self::Cloud
+        )
     }
 }
 
@@ -172,6 +202,14 @@ pub struct AnnotInfo {
     pub fill: Option<[f32; 3]>,
     /// Pontos de início e fim (linha e seta).
     pub line: Option<Segment>,
+    /// Vértices (polígono, linhas conectadas e nuvem).
+    pub vertices: Vec<(f32, f32)>,
+    /// Intensidade da borda de nuvem (1 ou 2, como "Nuvem 1" e "Nuvem 2" do Acrobat).
+    pub cloud: Option<f32>,
+    /// Texto explicativo: ponta da seta, joelho e ponto na caixa.
+    pub callout: Option<[(f32, f32); 3]>,
+    /// Anotação agrupada a outra (Substituir texto: o riscado aponta para o cursor).
+    pub group: Option<i32>,
     /// Linha com ponta de seta.
     pub arrow: bool,
     /// Tamanho e cor do texto (caixa de texto).
@@ -195,6 +233,7 @@ impl AnnotInfo {
             AnnotKind::Highlight
                 | AnnotKind::Underline
                 | AnnotKind::StrikeOut
+                | AnnotKind::Caret
                 | AnnotKind::Redact
                 | AnnotKind::Other
         )
@@ -211,6 +250,7 @@ impl AnnotInfo {
             self.kind,
             AnnotKind::Ink
                 | AnnotKind::TextBox
+                | AnnotKind::Callout
                 | AnnotKind::Rect
                 | AnnotKind::Ellipse
                 | AnnotKind::Stamp
@@ -294,6 +334,42 @@ pub enum NewAnnot {
         subtitle: Option<String>,
         color: [f32; 3],
     },
+    /// Inserir texto: cursor de inserção com a nota do texto a inserir.
+    Caret {
+        page: i32,
+        rect: PdfRect,
+        text: String,
+    },
+    /// Substituir texto: riscado nas `rects` e cursor (com a nota) agrupados, numa etapa só.
+    ReplaceText {
+        page: i32,
+        rects: Vec<PdfRect>,
+        text: String,
+    },
+    /// Texto explicativo: a caixa `rect` e a linha de chamada do `knee` até a ponta `tip`.
+    Callout {
+        page: i32,
+        rect: PdfRect,
+        knee: (f32, f32),
+        tip: (f32, f32),
+        text: String,
+        size: f32,
+        color: [f32; 3],
+    },
+    /// Anexar arquivo: o arquivo vai embutido no comentário (ícone de clipe em `at`).
+    FileAttachment {
+        page: i32,
+        at: (f32, f32),
+        path: std::path::PathBuf,
+        description: String,
+    },
+    /// Polígono (`closed`), linhas conectadas (aberto) ou nuvem (`cloud`, sempre fechada).
+    Polygon {
+        page: i32,
+        vertices: Vec<(f32, f32)>,
+        closed: bool,
+        cloud: bool,
+    },
 }
 
 /// Marcas do Preencher e assinar (como no Acrobat).
@@ -354,7 +430,12 @@ impl NewAnnot {
             | Self::FillText { page, .. }
             | Self::Mark { page, .. }
             | Self::Redact { page, .. }
-            | Self::Stamp { page, .. } => *page,
+            | Self::Stamp { page, .. }
+            | Self::Polygon { page, .. }
+            | Self::Caret { page, .. }
+            | Self::ReplaceText { page, .. }
+            | Self::Callout { page, .. }
+            | Self::FileAttachment { page, .. } => *page,
         }
     }
 
@@ -364,6 +445,12 @@ impl NewAnnot {
             Self::Highlight { rects, .. }
             | Self::Underline { rects, .. }
             | Self::StrikeOut { rects, .. } => rects.is_empty(),
+            Self::ReplaceText { rects, .. } => rects.is_empty(),
+            Self::FileAttachment { path, .. } => path.as_os_str().is_empty(),
+            Self::Caret { rect, .. } => rect.width() <= 0.0 || rect.height() <= 0.0,
+            Self::Callout { text, rect, .. } => {
+                text.trim().is_empty() || rect.width() < 3.0 || rect.height() < 3.0
+            }
             Self::Redact { rects, .. } => rects.iter().all(|r| r.width() < 2.0 || r.height() < 2.0),
             Self::Note { text, .. } => text.trim().is_empty(),
             Self::Ink { strokes, .. } => strokes.iter().all(|s| s.len() < 2),
@@ -374,6 +461,13 @@ impl NewAnnot {
                 rect.width() < 3.0 || rect.height() < 3.0
             }
             Self::Line { a, b, .. } => (b.0 - a.0).hypot(b.1 - a.1) < 3.0,
+            // polígono e nuvem pedem 3 vértices; linhas conectadas, 2
+            Self::Polygon {
+                vertices,
+                closed,
+                cloud,
+                ..
+            } => vertices.len() < if *closed || *cloud { 3 } else { 2 },
         }
     }
 }
@@ -654,6 +748,28 @@ pub enum AnnotOp {
         model: StateModel,
         state: String,
     },
+    /// Borracha: apaga dos desenhos `ids` os trechos a menos de `radius` do caminho `path` (uma
+    /// passada, uma etapa do desfazer).
+    Erase {
+        page: i32,
+        ids: Vec<i32>,
+        path: Vec<(f32, f32)>,
+        radius: f32,
+    },
+    /// Texto explicativo: leva o joelho e a ponta da linha de chamada.
+    MoveCallout {
+        page: i32,
+        id: i32,
+        knee: (f32, f32),
+        tip: (f32, f32),
+    },
+    /// Leva o vértice `index` (polígono, linhas conectadas, nuvem) para `to`.
+    MoveVertex {
+        page: i32,
+        id: i32,
+        index: usize,
+        to: (f32, f32),
+    },
     /// Leva uma ponta da linha/seta para `to`.
     MoveLinePoint {
         page: i32,
@@ -673,6 +789,12 @@ pub enum AnnotOp {
         id: i32,
         size: f32,
         color: [f32; 3],
+    },
+    /// Intensidade da borda de nuvem (só nuvens; 0 a 2).
+    Cloud {
+        page: i32,
+        id: i32,
+        intensity: f32,
     },
 }
 

@@ -33,6 +33,12 @@ pub(crate) fn kind_label(kind: AnnotKind) -> &'static str {
         AnnotKind::Line => "Linha",
         AnnotKind::Stamp => "Carimbo",
         AnnotKind::Redact => "Marca de redação",
+        AnnotKind::Polygon => "Polígono",
+        AnnotKind::PolyLine => "Linhas conectadas",
+        AnnotKind::Cloud => "Nuvem",
+        AnnotKind::Caret => "Inserir texto",
+        AnnotKind::Callout => "Texto explicativo",
+        AnnotKind::FileAttachment => "Anexo",
         AnnotKind::Other => "Anotação",
     }
 }
