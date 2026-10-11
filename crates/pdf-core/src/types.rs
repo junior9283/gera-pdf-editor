@@ -156,6 +156,30 @@ pub enum LineEnd {
 }
 
 impl AnnotKind {
+    /// Nome do tipo como o Acrobat o mostra (painel Comentários, resumo).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Highlight => "Destaque",
+            Self::Underline => "Sublinhado",
+            Self::Note => "Nota",
+            Self::Ink => "Desenho",
+            Self::StrikeOut => "Riscado",
+            Self::TextBox => "Caixa de texto",
+            Self::Rect => "Retângulo",
+            Self::Ellipse => "Elipse",
+            Self::Line => "Linha",
+            Self::Stamp => "Carimbo",
+            Self::Redact => "Marca de redação",
+            Self::Polygon => "Polígono",
+            Self::PolyLine => "Linhas conectadas",
+            Self::Cloud => "Nuvem",
+            Self::Caret => "Inserir texto",
+            Self::Callout => "Texto explicativo",
+            Self::FileAttachment => "Anexo",
+            Self::Other => "Anotação",
+        }
+    }
+
     /// Tem traço/borda com espessura editável.
     pub fn has_border(self) -> bool {
         matches!(

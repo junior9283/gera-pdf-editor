@@ -21,26 +21,7 @@ pub(crate) fn label_of(a: &AnnotInfo) -> &'static str {
 }
 
 pub(crate) fn kind_label(kind: AnnotKind) -> &'static str {
-    match kind {
-        AnnotKind::Highlight => "Destaque",
-        AnnotKind::Underline => "Sublinhado",
-        AnnotKind::Note => "Nota",
-        AnnotKind::Ink => "Desenho",
-        AnnotKind::StrikeOut => "Riscado",
-        AnnotKind::TextBox => "Caixa de texto",
-        AnnotKind::Rect => "Retângulo",
-        AnnotKind::Ellipse => "Elipse",
-        AnnotKind::Line => "Linha",
-        AnnotKind::Stamp => "Carimbo",
-        AnnotKind::Redact => "Marca de redação",
-        AnnotKind::Polygon => "Polígono",
-        AnnotKind::PolyLine => "Linhas conectadas",
-        AnnotKind::Cloud => "Nuvem",
-        AnnotKind::Caret => "Inserir texto",
-        AnnotKind::Callout => "Texto explicativo",
-        AnnotKind::FileAttachment => "Anexo",
-        AnnotKind::Other => "Anotação",
-    }
+    kind.label()
 }
 
 fn annot_label(a: &AnnotInfo) -> String {

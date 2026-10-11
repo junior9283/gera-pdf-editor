@@ -52,7 +52,7 @@ fn refuse_inputs_as_dest(opts: &CompareOptions, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-fn file_name(path: &Path) -> String {
+pub(crate) fn file_name(path: &Path) -> String {
     let name = path
         .file_name()
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
@@ -62,12 +62,12 @@ fn file_name(path: &Path) -> String {
     }
 }
 
-fn plural(n: usize, one: &str, many: &str) -> String {
+pub(crate) fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// Texto numa posição (Helvetica `/F1` ou negrito `/F2`), na cor `gray`.
-fn text_at(font: &str, size: f32, gray: f32, x: f32, y: f32, s: &str) -> String {
+pub(crate) fn text_at(font: &str, size: f32, gray: f32, x: f32, y: f32, s: &str) -> String {
     format!(
         "q BT /{font} {} Tf {} g {} {} Td ({}) Tj ET Q\n",
         num(size),
@@ -84,7 +84,7 @@ fn rect_ops(x: f32, y: f32, w: f32, h: f32) -> String {
 
 /// Retângulo preenchido com `color`, entre `q`/`Q`: a cor não vaza para o que vem depois (a página
 /// copiada escreve na cor padrão).
-fn fill_rect(color: [f32; 3], x: f32, y: f32, w: f32, h: f32) -> String {
+pub(crate) fn fill_rect(color: [f32; 3], x: f32, y: f32, w: f32, h: f32) -> String {
     format!(
         "q {} {} f Q\n",
         rgb_ops(color.map(|c| (c * 255.0).round() as u8)),
@@ -93,7 +93,7 @@ fn fill_rect(color: [f32; 3], x: f32, y: f32, w: f32, h: f32) -> String {
 }
 
 /// Contorno de retângulo com `color` e espessura `width`.
-fn stroke_rect(color: [f32; 3], width: f32, x: f32, y: f32, w: f32, h: f32) -> String {
+pub(crate) fn stroke_rect(color: [f32; 3], width: f32, x: f32, y: f32, w: f32, h: f32) -> String {
     let [r, g, b] = color.map(num);
     format!(
         "q {r} {g} {b} RG {} w {} S Q\n",
@@ -103,7 +103,7 @@ fn stroke_rect(color: [f32; 3], width: f32, x: f32, y: f32, w: f32, h: f32) -> S
 }
 
 /// Página nova com os recursos e o conteúdo.
-fn content_page(
+pub(crate) fn content_page(
     out: &mut PdfDocument,
     size: Size,
     resources: PdfObject,
