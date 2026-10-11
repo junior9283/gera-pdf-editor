@@ -385,6 +385,15 @@ pub struct OutlineItem {
     pub depth: usize,
 }
 
+/// Opções do Localizar (como no Acrobat). Todas desligadas por padrão.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SearchOptions {
+    pub whole_words: bool,
+    pub match_case: bool,
+    pub bookmarks: bool,
+    pub comments: bool,
+}
+
 /// Link de uma página (`/Subtype /Link`), já classificado pelo que o clique faz.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LinkInfo {

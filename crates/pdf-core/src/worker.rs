@@ -1,5 +1,5 @@
 use crate::error::PdfError;
-use crate::types::{
+use crate::types::{SearchOptions, 
     AnnotInfo, AnnotOp, Changed, DocProperties, DocSummary, HistoryState, PageOp, PdfRect,
     RenderedPage, Rotation, TextSelection,
 };
@@ -56,6 +56,7 @@ pub enum Request {
     Search {
         id: u64,
         needle: String,
+        options: SearchOptions,
         cancel: CancelToken,
     },
     /// Grava o documento em memória (com as edições) em `dest`.
@@ -368,9 +369,12 @@ impl Worker {
 struct SearchJob {
     id: u64,
     needle: String,
+    options: SearchOptions,
     cancel: CancelToken,
     next: i32,
     pages: i32,
+    /// Marcadores que casam (página, topo): entram no lote da página deles, antes do texto.
+    bookmarks: Vec<(i32, PdfRect)>,
 }
 
 #[derive(Default)]
@@ -448,16 +452,24 @@ impl State {
                     send(Response::ContentBox { page, rect });
                 }
             }
-            Request::Search { id, needle, cancel } => {
-                let pages = self.doc.as_ref().and_then(|d| d.page_count().ok());
-                match pages {
-                    Some(pages) => {
+            Request::Search {
+                id,
+                needle,
+                options,
+                cancel,
+            } => {
+                let doc = self.doc.as_ref();
+                match doc.and_then(|d| Some((d, d.page_count().ok()?))) {
+                    Some((d, pages)) => {
+                        let bookmarks = d.search_bookmarks(&needle, &options);
                         self.search = Some(SearchJob {
                             id,
                             needle,
+                            options,
                             cancel,
                             next: 0,
                             pages,
+                            bookmarks,
                         })
                     }
                     None => send(Response::SearchDone { id }),
@@ -756,7 +768,14 @@ impl State {
         } else {
             let page = job.next;
             job.next += 1;
-            if let Ok(rects) = doc.search(page, &job.needle) {
+            if let Ok(found) = doc.search_with(page, &job.needle, &job.options) {
+                let rects: Vec<PdfRect> = job
+                    .bookmarks
+                    .iter()
+                    .filter(|(p, _)| *p == page)
+                    .map(|&(_, r)| r)
+                    .chain(found)
+                    .collect();
                 if !rects.is_empty() {
                     send(Response::SearchHits {
                         id: job.id,

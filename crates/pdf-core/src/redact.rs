@@ -495,7 +495,7 @@ impl PdfDoc {
     }
 
     /// Padrões numa página: cada linha do texto estruturado, com a caixa de cada letra.
-    fn find_patterns(
+    pub(crate) fn find_patterns(
         &self,
         page: i32,
         regexes: &[(Option<RedactPattern>, Regex)],

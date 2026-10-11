@@ -65,6 +65,7 @@ fn search_streams_hits_then_done() {
     w.send(Request::Search {
         id: 7,
         needle: "Hello".into(),
+        options: Default::default(),
         cancel: CancelToken::new(),
     });
     let mut pages = vec![];
@@ -150,6 +151,7 @@ fn render_is_served_while_a_long_search_is_running() {
     w.send(Request::Search {
         id: 1,
         needle: "Hello".into(),
+        options: Default::default(),
         cancel: CancelToken::new(),
     });
     w.send(Request::Render {

@@ -1,10 +1,12 @@
-use pdf_core::{CancelToken, PdfRect, Request, Worker};
+use pdf_core::{CancelToken, PdfRect, Request, SearchOptions, Worker};
 
 /// Estado da busca de texto: resultados chegam em lotes, por página (em ordem crescente),
 /// de uma busca identificada por `id`.
 #[derive(Default)]
 pub struct SearchState {
     pub text: String,
+    /// Palavras inteiras, maiúsculas, marcadores e comentários (⏷ ao lado do campo).
+    pub options: SearchOptions,
     id: u64,
     /// `Some` enquanto a busca atual está em andamento.
     cancel: Option<CancelToken>,
@@ -29,6 +31,7 @@ impl SearchState {
         worker.send(Request::Search {
             id: self.id,
             needle: self.text.clone(),
+            options: self.options,
             cancel,
         });
     }
