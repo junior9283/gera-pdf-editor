@@ -1,5 +1,11 @@
 use pdf_core::{CancelToken, PdfRect, Request, SearchOptions, Worker};
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum EnterAction {
+    Search,
+    Step(bool),
+}
+
 /// Estado da busca de texto: resultados chegam em lotes, por página (em ordem crescente),
 /// de uma busca identificada por `id`.
 #[derive(Default)]
@@ -7,6 +13,8 @@ pub struct SearchState {
     pub text: String,
     /// Palavras inteiras, maiúsculas, marcadores e comentários (⏷ ao lado do campo).
     pub options: SearchOptions,
+    /// Texto da última busca iniciada (Enter de novo com o mesmo texto vai ao próximo).
+    pub searched: String,
     id: u64,
     /// `Some` enquanto a busca atual está em andamento.
     cancel: Option<CancelToken>,
@@ -23,6 +31,7 @@ impl SearchState {
         self.id += 1;
         self.hits.clear();
         self.current = 0;
+        self.searched = self.text.clone();
         if self.text.trim().is_empty() {
             return;
         }
@@ -78,6 +87,17 @@ impl SearchState {
             (self.current + n - 1) % n
         };
         self.current()
+    }
+
+    /// Enter no campo: busca da primeira vez (ou com texto novo); depois vai ao próximo
+    /// (`Shift+Enter`, ao anterior), como no Acrobat.
+    pub fn enter_action(&self, forward: bool) -> EnterAction {
+        let same = !self.searched.trim().is_empty() && self.searched.trim() == self.text.trim();
+        if same {
+            EnterAction::Step(forward)
+        } else {
+            EnterAction::Search
+        }
     }
 
     pub fn summary(&self) -> String {
@@ -163,5 +183,28 @@ mod tests {
         s.text.clear();
         assert_eq!(s.summary(), "", "busca vazia não mostra mensagem");
         assert!(s.current().is_none() && s.step(true).is_none());
+    }
+
+    #[test]
+    fn enter_in_the_search_box_steps_after_the_first_search() {
+        let mut s = state(); // "id 5": três resultados, texto vazio
+        s.searched = "gera".into();
+        s.text = "gera".into();
+        assert_eq!(
+            s.enter_action(true),
+            EnterAction::Step(true),
+            "mesmo texto: próximo"
+        );
+        assert_eq!(
+            s.enter_action(false),
+            EnterAction::Step(false),
+            "Shift+Enter: anterior"
+        );
+        s.text = "outra".into();
+        assert_eq!(
+            s.enter_action(true),
+            EnterAction::Search,
+            "texto novo: busca"
+        );
     }
 }

@@ -72,6 +72,11 @@ pub enum DocCommand {
     Cut,
     /// Desmarcar tudo (Ctrl+Shift+A): seleção de texto e de comentário.
     DeselectAll,
+    /// Próximo e anterior resultado da busca (F3 / Shift+F3, Ctrl+G / Ctrl+Shift+G).
+    FindNext,
+    FindPrev,
+    /// Arquivo → Reverter (pergunta antes).
+    Revert,
     /// Histórico de vistas (Alt+← / Alt+→).
     ViewBack,
     ViewForward,
@@ -97,6 +102,8 @@ pub enum DocEvent {
     OpenLink(pdf_core::LinkTarget),
     /// O arquivo pede para abrir em tela cheia (`/PageMode /FullScreen`).
     FullScreen,
+    /// Um comando da casca escolhido na página (menu de contexto: Imprimir, Propriedades).
+    Run(Command),
 }
 
 /// Impressão esperando a cópia temporária: opções, página atual no clique e o arquivo pedido.
@@ -130,6 +137,8 @@ pub struct DocTab {
     paste_rx: Option<std::sync::mpsc::Receiver<crate::clipboard::SystemClip>>,
     /// Imagens coladas gravadas na pasta temporária (apagadas ao fechar a aba).
     pasted_files: Vec<std::path::PathBuf>,
+    /// Arquivo → Reverter: a pergunta está aberta.
+    pub(crate) revert_ask: bool,
     /// Depois de colar, seleciona o comentário mais novo desta página.
     select_newest_on: Option<i32>,
     /// Como abrir: padrão das Preferências e a última vista do arquivo (dados pela casca).
@@ -289,6 +298,7 @@ impl DocTab {
             paste_rx: None,
             pasted_files: Vec::new(),
             select_newest_on: None,
+            revert_ask: false,
             marquee: None,
             focus_zoom: false,
             zoom_text: None,
@@ -480,7 +490,10 @@ impl DocTab {
             | DocCommand::LastPage
             | DocCommand::GoToPage
             | DocCommand::ViewBack
-            | DocCommand::ViewForward => {} // já tratados no começo
+            | DocCommand::ViewForward
+            | DocCommand::FindNext
+            | DocCommand::FindPrev
+            | DocCommand::Revert => {} // já tratados no começo
             DocCommand::Mode(mode) => {
                 view.set_mode(mode, page);
                 self.jump_to = view.go_to(page as i32, None);
@@ -506,7 +519,13 @@ impl DocTab {
     fn navigate(&mut self, cmd: DocCommand) -> bool {
         let page = self.last.current_page;
         let Some(view) = self.view.as_ref() else {
-            return matches!(cmd, DocCommand::GoToPage);
+            return matches!(
+                cmd,
+                DocCommand::GoToPage
+                    | DocCommand::FindNext
+                    | DocCommand::FindPrev
+                    | DocCommand::Revert
+            );
         };
         let last = view.layout.page_count().saturating_sub(1);
         match cmd {
@@ -519,6 +538,10 @@ impl DocTab {
             DocCommand::FirstPage => self.jump(0, None),
             DocCommand::LastPage => self.jump(last as i32, None),
             DocCommand::GoToPage => self.focus_page = true,
+            DocCommand::FindNext | DocCommand::FindPrev => {
+                self.search_step(cmd == DocCommand::FindNext)
+            }
+            DocCommand::Revert => self.revert_ask = self.is_dirty(),
             DocCommand::ViewBack | DocCommand::ViewForward => {
                 let current = view.view_entry(self.last.scroll_y, page);
                 let to = if cmd == DocCommand::ViewBack {
@@ -2079,6 +2102,7 @@ impl DocTab {
             self.status = msg;
         }
         self.field_props_window(ui.ctx());
+        self.revert_window(ui.ctx());
         self.protect_windows(ui.ctx());
         self.pagination_windows(ui.ctx());
         self.redact_windows(ui.ctx());
@@ -2180,17 +2204,64 @@ impl DocTab {
             edit.request_focus();
         }
         if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            self.search.start(&self.worker);
+            let back = ui.input(|i| i.modifiers.shift);
+            match self.search.enter_action(!back) {
+                crate::search::EnterAction::Search => self.search.start(&self.worker),
+                crate::search::EnterAction::Step(forward) => self.search_step(forward),
+            }
             edit.request_focus();
         }
         ui.label(self.search.summary());
         let prev = ui.button("⏶").clicked();
         let next = ui.button("⏷").clicked();
         if prev || next {
-            if let Some((page, rect)) = self.search.step(next) {
-                self.jump(page, Some((rect.x0, rect.y0)));
-            }
+            self.search_step(next);
         }
+        // opções do Localizar, como no Acrobat
+        let before = self.search.options;
+        ui.menu_button("⚙", |ui| {
+            let o = &mut self.search.options;
+            ui.checkbox(&mut o.whole_words, "Somente palavras inteiras");
+            ui.checkbox(&mut o.match_case, "Diferenciar maiúsculas e minúsculas");
+            ui.checkbox(&mut o.bookmarks, "Incluir marcadores");
+            ui.checkbox(&mut o.comments, "Incluir comentários");
+        })
+        .response
+        .on_hover_text("Opções de busca");
+        if self.search.options != before && !self.search.text.trim().is_empty() {
+            self.search.start(&self.worker);
+        }
+    }
+
+    /// Vai ao resultado seguinte (ou anterior) da busca; o salto entra no histórico.
+    fn search_step(&mut self, forward: bool) {
+        if let Some((page, rect)) = self.search.step(forward) {
+            self.jump(page, Some((rect.x0, rect.y0)));
+        }
+    }
+
+    /// Arquivo → Reverter: pergunta antes de descartar as alterações.
+    fn revert_window(&mut self, ctx: &egui::Context) {
+        if !self.revert_ask {
+            return;
+        }
+        egui::Window::new("Reverter")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label("Reverter para a versão salva? As alterações serão perdidas.");
+                ui.horizontal(|ui| {
+                    if ui.button("Reverter").clicked() {
+                        self.revert_ask = false;
+                        self.worker.send(Request::Revert);
+                        self.status = "Revertido para a versão salva.".into();
+                    }
+                    if ui.button("Cancelar").clicked() {
+                        self.revert_ask = false;
+                    }
+                });
+            });
     }
 
     /// Campo de zoom editável ("150" e Enter) e a lista ⏷ com os níveis e os ajustes, como no
@@ -2582,6 +2653,7 @@ impl DocTab {
         let links = &self.links;
         let mut link_clicked = None;
         let mut screen_action = None;
+        let mut page_cmd = None;
         let marquee = &mut self.marquee;
         let presenting = self.presentation.is_some();
         let mut turn = None;
@@ -2643,6 +2715,13 @@ impl DocTab {
                             screen_gesture(ui, &response, edit.tool, marquee, page, map)
                         {
                             screen_action = Some(a);
+                        }
+                        if edit.tool.is_screen_tool() && edit.page_menu_allowed(page as i32) {
+                            response.context_menu(|ui| {
+                                if let Some(c) = page_menu(ui, edit.tool) {
+                                    page_cmd = Some(c);
+                                }
+                            });
                         }
                         if matches!(edit.tool, Tool::Select | Tool::Hand) {
                             let hit = link_gesture(ui, &response, links, annots, page as i32, map);
@@ -2735,6 +2814,11 @@ impl DocTab {
         if let Some(action) = screen_action {
             self.screen_action(action);
         }
+        match page_cmd {
+            Some(Command::Doc(c)) => self.run(ui.ctx(), c),
+            Some(c) => self.events.push(DocEvent::Run(c)),
+            None => {}
+        }
     }
 
     /// Mão (rola pelo arraste) e Zoom com marca (amplia até o retângulo, ou um nível no clique).
@@ -2764,6 +2848,52 @@ impl DocTab {
             self.jump_to = Some(y);
         }
     }
+}
+
+/// Itens do menu de contexto da página (`None`: separador), com a ferramenta atual marcada.
+fn page_menu_items(tool: app_state::tools::Tool) -> Vec<(Option<Command>, bool)> {
+    use app_state::tools::Tool;
+    let doc = |c| Some(Command::Doc(c));
+    let mut items: Vec<(Option<Command>, bool)> = Tool::SCREEN
+        .into_iter()
+        .map(|t| (doc(DocCommand::Tool(t)), t == tool))
+        .collect();
+    items.extend(
+        [
+            None,
+            doc(DocCommand::PrevPage),
+            doc(DocCommand::NextPage),
+            doc(DocCommand::ViewBack),
+            None,
+            doc(DocCommand::Rotate { clockwise: true }),
+            None,
+            Some(Command::Print),
+            doc(DocCommand::Find),
+            Some(Command::Properties),
+        ]
+        .into_iter()
+        .map(|c| (c, false)),
+    );
+    items
+}
+
+/// Menu de contexto da página (fora de comentário e de seleção); devolve o item escolhido.
+fn page_menu(ui: &mut egui::Ui, tool: app_state::tools::Tool) -> Option<Command> {
+    let mut picked = None;
+    for (cmd, checked) in page_menu_items(tool) {
+        let Some(cmd) = cmd else {
+            ui.separator();
+            continue;
+        };
+        if ui
+            .add(egui::Button::selectable(checked, cmd.label()))
+            .clicked()
+        {
+            picked = Some(cmd);
+            ui.close();
+        }
+    }
+    picked
 }
 
 /// Vista de abertura vinda das Preferências.
@@ -3081,6 +3211,45 @@ mod tests {
         assert_eq!(tab.edit.tool, Tool::Underline);
         tab.run(&ctx, DocCommand::Tool(Tool::Hand));
         assert_eq!(tab.edit.tool, Tool::Hand);
+    }
+
+    #[test]
+    fn page_menu_has_the_acrobat_items() {
+        use app_state::tools::Tool;
+        let items = page_menu_items(Tool::Hand);
+        let has = |c: Command| items.iter().any(|(x, _)| *x == Some(c.clone()));
+        for c in [
+            Command::Doc(DocCommand::Tool(Tool::Select)),
+            Command::Doc(DocCommand::Tool(Tool::Hand)),
+            Command::Doc(DocCommand::Tool(Tool::Zoom)),
+            Command::Doc(DocCommand::PrevPage),
+            Command::Doc(DocCommand::NextPage),
+            Command::Doc(DocCommand::ViewBack),
+            Command::Doc(DocCommand::Rotate { clockwise: true }),
+            Command::Print,
+            Command::Doc(DocCommand::Find),
+            Command::Properties,
+        ] {
+            assert!(has(c.clone()), "{c:?}");
+        }
+        // a ferramenta atual vem marcada
+        let checked: Vec<_> = items.iter().filter(|(_, on)| *on).collect();
+        assert_eq!(checked.len(), 1);
+        assert_eq!(
+            checked[0].0,
+            Some(Command::Doc(DocCommand::Tool(Tool::Hand)))
+        );
+    }
+
+    #[test]
+    fn revert_only_with_unsaved_changes() {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_pages(1);
+        tab.run(&ctx, DocCommand::Revert);
+        assert!(!tab.revert_ask, "sem alterações, nada a reverter");
+        tab.history.dirty = true;
+        tab.run(&ctx, DocCommand::Revert);
+        assert!(tab.revert_ask, "pergunta antes");
     }
 
     #[test]

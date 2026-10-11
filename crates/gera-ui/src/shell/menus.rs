@@ -13,6 +13,8 @@ pub struct MenuState<'a> {
     pub doc_mode: Option<ViewMode>,
     /// "Mostrar capa sozinha" ligado no documento ativo.
     pub doc_cover: bool,
+    /// O documento ativo tem alterações não salvas (Reverter).
+    pub doc_dirty: bool,
     pub dark: bool,
     /// Painel esquerdo aberto e painel de ferramentas visível.
     pub left: Option<LeftPanel>,
@@ -66,7 +68,11 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
             ui.separator();
             item(ui, &mut out, doc(DocCommand::Save), has_doc);
             item(ui, &mut out, Command::SaveAs, has_doc);
+            item(ui, &mut out, doc(DocCommand::Revert), s.doc_dirty);
+            ui.separator();
+            item(ui, &mut out, Command::Tool(tools_catalog::CREATE), true);
             item(ui, &mut out, Command::Tool(tools_catalog::EXPORT), has_doc);
+            item(ui, &mut out, Command::Tool(tools_catalog::PROTECT), has_doc);
             ui.separator();
             item(ui, &mut out, Command::Properties, has_doc);
             item(ui, &mut out, Command::Print, has_doc);
@@ -194,6 +200,7 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
             item(ui, &mut out, Command::CloseAll, s.tabs.len() > FIXED);
         });
         ui.menu_button("Ajuda", |ui| {
+            item(ui, &mut out, Command::Help, true);
             item(ui, &mut out, Command::Shortcuts, true);
             item(ui, &mut out, Command::About, true);
         });

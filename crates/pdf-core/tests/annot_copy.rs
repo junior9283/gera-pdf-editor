@@ -108,3 +108,13 @@ fn duplicate_is_an_annotation_op() {
     assert_eq!(pages, vec![1]);
     assert_eq!(d.annotations(1).unwrap().len(), 1);
 }
+
+#[test]
+fn revert_goes_back_to_the_saved_file() {
+    let (_t, _p, mut d) = doc();
+    shape(&mut d);
+    assert!(d.is_dirty());
+    d.revert().unwrap();
+    assert!(d.annotations(0).unwrap().is_empty());
+    assert!(!d.is_dirty() && !d.can_undo());
+}

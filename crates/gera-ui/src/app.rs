@@ -304,6 +304,7 @@ impl GeraApp {
         // arquivos a abrir em abas novas (depois do laço: abrir mexe na lista de abas)
         let mut to_open = Vec::new();
         let mut full_screen = false;
+        let mut to_run = Vec::new();
         for tab in (FIXED..self.tabs.len()).rev() {
             let Some(i) = self.tabs.doc_index(tab) else {
                 continue;
@@ -339,6 +340,7 @@ impl GeraApp {
                     DocEvent::OpenFile(path) => to_open.push(path),
                     DocEvent::NeedSaveAs => self.dialogs.save_as(ctx, self.docs[i].path.clone()),
                     DocEvent::FullScreen => full_screen |= tab == active && !self.fullscreen,
+                    DocEvent::Run(cmd) => to_run.push(cmd),
                     DocEvent::OpenLink(target) => {
                         use crate::links::Outcome;
                         match crate::links::outcome(&target, &self.prefs.link_sites) {
@@ -355,6 +357,9 @@ impl GeraApp {
         }
         for path in to_open {
             self.open_path(ctx, path);
+        }
+        for cmd in to_run {
+            self.run(ctx, cmd);
         }
         if full_screen {
             // o arquivo pediu (/PageMode /FullScreen): pergunta antes, como o Acrobat
@@ -454,6 +459,7 @@ impl GeraApp {
                     doc.paste(text);
                 }
             }
+            Command::Help => ctx.open_url(egui::OpenUrl::new_tab(commands::HELP_URL)),
             Command::Preferences => {
                 self.preferences = Some(crate::shell::preferences::PrefsDraft::new(&self.prefs))
             }
@@ -675,6 +681,10 @@ impl GeraApp {
         MenuState {
             doc_mode: view.map(|v| v.mode),
             doc_cover: view.is_some_and(|v| v.cover),
+            doc_dirty: self
+                .tabs
+                .doc_index(self.tabs.active())
+                .is_some_and(|i| self.docs[i].is_dirty()),
             dark: self.prefs.dark,
             left: self.prefs.left_panel,
             tools_panel: self.prefs.tools_panel,

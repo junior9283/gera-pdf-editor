@@ -40,6 +40,8 @@ pub enum Request {
         rotation: Rotation,
         cancel: CancelToken,
     },
+    /// Arquivo → Reverter: relê o arquivo salvo (responde `PagesChanged`).
+    Revert,
     /// Ladrilho de `TILE` px da página (zoom acima do teto da página inteira).
     RenderTile {
         page: i32,
@@ -446,6 +448,10 @@ impl State {
                     });
                 }
             }
+            Request::Revert => self.edit(send, |d| {
+                d.revert()?;
+                Ok(Changed::Document)
+            }),
             Request::ContentBox { page } => {
                 if let Some(d) = self.doc.as_ref() {
                     let rect = d.content_box(page).ok().flatten();

@@ -344,6 +344,14 @@ impl EditState {
         self.ops.push(op);
     }
 
+    /// O menu de contexto da página vale aqui (o clique direito não caiu num comentário nem na
+    /// seleção de texto desta página, que têm menu próprio).
+    pub(crate) fn page_menu_allowed(&self, page: i32) -> bool {
+        let on_annot = self.menu_on_annot && self.selected.is_some_and(|(p, _)| p == page);
+        let on_text = self.selection.as_ref().and_then(|s| s.page) == Some(page);
+        !on_annot && !on_text
+    }
+
     /// Apaga a anotação selecionada (tecla Delete ou menu).
     pub fn delete_selected(&mut self) {
         if let Some((page, id)) = self.selected.take() {

@@ -874,6 +874,11 @@ impl PdfDoc {
     }
 
     /// Volta ao arquivo do disco (com a mesma senha), sem as edições em memória.
+    /// Arquivo → Reverter: volta à versão salva no disco (as edições e o histórico se perdem).
+    pub fn revert(&mut self) -> Result<()> {
+        self.discard_changes()
+    }
+
     pub(crate) fn discard_changes(&mut self) -> Result<()> {
         self.inner = open_authenticated(&self.path, self.password.as_deref())?;
         self.history = History::default();

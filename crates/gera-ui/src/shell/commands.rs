@@ -30,6 +30,8 @@ pub enum Command {
     Compare,
     /// Editar → Preferências… (Ctrl+K).
     Preferences,
+    /// Ajuda → Ajuda do Gera PDF Editor (F1).
+    Help,
     /// Colar (Ctrl+V): o texto da área de transferência que veio no evento, ou `None` (menu),
     /// e então a aba lê a área do sistema (também imagens).
     Paste(Option<String>),
@@ -60,6 +62,7 @@ impl Command {
             Command::Print => "Imprimir…",
             Command::Compare => "Comparar arquivos…",
             Command::Preferences => "Preferências…",
+            Command::Help => "Ajuda do Gera PDF Editor",
             Command::Paste(_) => "Colar",
             Command::Tool(id) => {
                 return app_state::tools_catalog::find(id)
@@ -97,6 +100,9 @@ impl Command {
                 DocCommand::Tool(t) => return t.label().into(),
                 DocCommand::CycleMarkup => "Alternar destacar e sublinhar",
                 DocCommand::Cut => "Recortar",
+                DocCommand::FindNext => "Próximo resultado",
+                DocCommand::FindPrev => "Resultado anterior",
+                DocCommand::Revert => "Reverter",
                 DocCommand::DeselectAll => "Desmarcar tudo",
                 DocCommand::ViewBack => "Vista anterior",
                 DocCommand::ViewForward => "Vista seguinte",
@@ -105,6 +111,9 @@ impl Command {
         s.into()
     }
 }
+
+/// Ajuda do app: o README do projeto (endereço fixo, não vem de PDF).
+pub const HELP_URL: &str = "https://github.com/junior9283/gera-pdf-editor#readme";
 
 /// Atalhos de teclado. Os com Shift vêm antes dos sem: o egui aceita Shift a mais num atalho
 /// que não o pede, e testar `Ctrl+Z` antes consumiria `Ctrl+Shift+Z`.
@@ -116,6 +125,20 @@ pub fn shortcuts() -> Vec<(KeyboardShortcut, Command)> {
     vec![
         (cmd_shift(Key::S), Command::SaveAs),
         (cmd_shift(Key::A), doc(DocCommand::DeselectAll)),
+        (
+            KeyboardShortcut::new(Modifiers::SHIFT, Key::F3),
+            doc(DocCommand::FindPrev),
+        ),
+        (cmd_shift(Key::G), doc(DocCommand::FindPrev)),
+        (
+            KeyboardShortcut::new(Modifiers::NONE, Key::F3),
+            doc(DocCommand::FindNext),
+        ),
+        (cmd(Key::G), doc(DocCommand::FindNext)),
+        (
+            KeyboardShortcut::new(Modifiers::NONE, Key::F1),
+            Command::Help,
+        ),
         // navegação de páginas: os do Acrobat
         (cmd_shift(Key::N), doc(DocCommand::GoToPage)),
         (cmd_shift(Key::PageUp), doc(DocCommand::FirstPage)),
@@ -408,6 +431,26 @@ mod tests {
             && *c == Command::Doc(DocCommand::CycleMarkup)));
         let k = shortcut_of(&Command::Preferences).unwrap();
         assert_eq!(shortcut_text(&k), "Ctrl+K");
+    }
+
+    #[test]
+    fn search_and_help_keys_match_acrobat() {
+        let text = |c: Command| shortcut_text(&shortcut_of(&c).unwrap());
+        assert_eq!(text(Command::Doc(DocCommand::FindNext)), "F3");
+        assert_eq!(text(Command::Doc(DocCommand::FindPrev)), "Shift+F3");
+        let all = shortcuts();
+        let has = |m: Modifiers, k: Key, c: DocCommand| {
+            all.iter()
+                .any(|(s, x)| s.modifiers == m && s.logical_key == k && *x == Command::Doc(c))
+        };
+        assert!(has(Modifiers::COMMAND, Key::G, DocCommand::FindNext));
+        assert!(has(
+            Modifiers::COMMAND | Modifiers::SHIFT,
+            Key::G,
+            DocCommand::FindPrev
+        ));
+        assert_eq!(text(Command::Help), "F1");
+        assert!(HELP_URL.starts_with("https://github.com/junior9283/gera-pdf-editor"));
     }
 
     #[test]
