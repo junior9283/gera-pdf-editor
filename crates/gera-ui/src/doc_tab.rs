@@ -163,6 +163,10 @@ pub struct DocTab {
     pub(crate) thumbs: crate::thumbnails::ThumbnailsPanel,
     /// Cópia de páginas para outra aba em andamento: (arquivo temporário, aba de destino).
     pub(crate) copy_pending: Option<(PathBuf, PathBuf)>,
+    /// Painel Destinos (ordem, seleção, renomeação).
+    destinations_panel: crate::destinations_panel::DestinationsPanel,
+    /// Painel Camadas (recolhidos e Propriedades da camada).
+    layers_panel: crate::layers_panel::LayersPanel,
     /// Diálogo Rótulos de página aberto.
     labels_dialog: Option<crate::page_labels_dialog::PageLabelsDialog>,
     /// Usar números lógicos de página (preferência; o app atualiza).
@@ -357,6 +361,8 @@ impl DocTab {
             thumbs: Default::default(),
             copy_pending: None,
             labels_dialog: None,
+            destinations_panel: Default::default(),
+            layers_panel: Default::default(),
             logical_pages: true,
             page_input: None,
             copy_targets: Vec::new(),
@@ -1373,11 +1379,15 @@ impl DocTab {
                 }
                 Response::DestinationsChanged {
                     destinations,
-                    created: _,
+                    created,
                     history,
                 } => {
                     self.destinations = destinations;
                     self.history = history;
+                    // destino novo: o nome vem pronto para editar (como no Acrobat)
+                    if let Some(name) = created {
+                        self.destinations_panel.rename(name);
+                    }
                 }
                 Response::AttachmentWritten { dest, open: true } => {
                     self.events.push(DocEvent::OpenAttachment(dest))
@@ -2430,6 +2440,46 @@ impl DocTab {
             }
             return;
         }
+        if panel == LeftPanel::Destinations {
+            let can_edit = self.bookmarks_editable();
+            let actions = ui
+                .push_id(self.id, |ui| {
+                    ui.strong(panel.label());
+                    self.destinations_panel
+                        .show(ui, &self.destinations, can_edit)
+                })
+                .inner;
+            for action in actions {
+                self.destination_action(action);
+            }
+            return;
+        }
+        if panel == LeftPanel::Layers {
+            let can_edit = self.bookmarks_editable();
+            let actions = ui
+                .push_id(self.id, |ui| {
+                    ui.strong(panel.label());
+                    self.layers_panel.show(ui, &self.layers, can_edit)
+                })
+                .inner;
+            for action in actions {
+                use crate::layers_panel::LayerAction;
+                self.worker.send(match action {
+                    LayerAction::View { id, on } => Request::LayerView { id, on },
+                    LayerAction::Reset => Request::ResetLayers,
+                    LayerAction::Edit {
+                        id,
+                        name,
+                        default_on,
+                    } => Request::EditLayer {
+                        id,
+                        name,
+                        default_on,
+                    },
+                });
+            }
+            return;
+        }
         if panel == LeftPanel::Thumbnails {
             let Some(view) = self.view.as_mut() else {
                 return;
@@ -2525,6 +2575,33 @@ impl DocTab {
     fn forget_received_copies(&mut self) {
         for file in self.received_copies.drain(..) {
             let _ = std::fs::remove_file(file);
+        }
+    }
+
+    fn destination_action(&mut self, action: crate::destinations_panel::DestAction) {
+        use crate::destinations_panel::DestAction;
+        use pdf_core::DestOp;
+        let op = match action {
+            DestAction::Go { page, at } => return self.jump(page, at),
+            DestAction::New => {
+                let (page, at) = self.view_target();
+                DestOp::Add {
+                    name: "Sem título".into(),
+                    page,
+                    at,
+                }
+            }
+            DestAction::SetHere(name) => {
+                let (page, at) = self.view_target();
+                DestOp::Set { name, page, at }
+            }
+            DestAction::Rename { name, to } => DestOp::Rename { name, to },
+            DestAction::Remove(name) => DestOp::Remove { name },
+        };
+        if self.bookmarks_editable() {
+            self.worker.send(Request::Destination(op));
+        } else {
+            self.deny("alterar os destinos");
         }
     }
 

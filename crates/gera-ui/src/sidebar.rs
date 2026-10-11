@@ -54,7 +54,10 @@ pub fn show(ui: &mut egui::Ui, panel: LeftPanel, annots: &[AnnotInfo]) -> Sideba
         LeftPanel::Annotations => annotation_list(ui, annots),
         // desenhado pela aba (precisa das assinaturas validadas)
         // assinaturas e anexos têm painel próprio
-        LeftPanel::Signatures | LeftPanel::Attachments => SidebarAction::None,
+        LeftPanel::Signatures
+        | LeftPanel::Attachments
+        | LeftPanel::Layers
+        | LeftPanel::Destinations => SidebarAction::None,
     }
 }
 
