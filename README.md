@@ -88,7 +88,8 @@ interface) e revisão de código independente antes de entrar na `main`.
 | v2c | Marca d'água, cabeçalho e rodapé, Bates | ✅ 0.10.0 |
 | v5e | Redigir e limpar documento | ✅ 0.11.2 |
 | v5f | Comparar arquivos | ✅ 0.12.0 |
-| — | Avaliação para a 1.0.0 | 🚧 próxima |
+| v6a | Navegar e exibir: links, histórico, tela cheia, modo leitura, zoom até 6400 % | ✅ 0.13.0 |
+| v6b–v6n | Avaliação para a 1.0.0: as lacunas restantes em relação ao Acrobat Pro | 🚧 próxima |
 
 O histórico de cada versão está no [CHANGELOG](CHANGELOG.md) e o plano detalhado no [ROADMAP](ROADMAP.md).
 As especificações e os planos de cada etapa ficam em [`docs/superpowers`](docs/superpowers).

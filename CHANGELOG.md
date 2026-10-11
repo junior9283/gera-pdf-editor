@@ -6,7 +6,42 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 ## [Não lançado]
 
-- Avaliação para a 1.0.0.
+- v6b — ferramentas Mão e Zoom, Preferências, Recortar/Colar, busca com opções.
+
+## [0.13.0] — 2026-10-10 · Navegar e exibir (v6a)
+
+Primeira etapa da avaliação para a 1.0.0, que comparou o app com o Acrobat Pro
+([análise](docs/superpowers/specs/2026-10-10-gera-pdf-editor-avaliacao-1.0.md)).
+
+### Adicionado
+- **Links** funcionam: o cursor vira a mão e a dica mostra o destino.
+  - Link interno: vai à página e ao ponto.
+  - Endereço web: abre o **Aviso de segurança** (Permitir/Bloquear), com "Lembrar desta ação para
+    este site" e o site real em destaque.
+  - Outro PDF: pergunta antes e abre na página pedida.
+  - Programas e endereços não permitidos são bloqueados.
+- **Vista anterior/seguinte** (`Alt+←` / `Alt+→`) e **Ir para página** (`Ctrl+Shift+N`).
+- Menu **Exibir → Navegação de páginas**; `←`/`→`, `Ctrl+PgUp/PgDn` e `Ctrl+Shift+PgUp/PgDn` em
+  qualquer modo.
+- **Tela cheia** como no Acrobat (`Ctrl+L`): uma página por vez, clique avança, botão direito volta,
+  barra que some, `Esc` sai e o modo de antes volta.
+- **Modo leitura** (`Ctrl+H`): só as páginas, com uma barra flutuante.
+- **Zoom**:
+  - campo editável ("150" e Enter) e lista de níveis de 8,33 % a 6400 %;
+  - Ajustar à altura, Ajustar ao conteúdo visível (`Ctrl+3`) e Zoom para (`Ctrl+Y`);
+  - acima do teto da GPU, a página é desenhada em ladrilhos nítidos.
+- **Visualização inicial** do arquivo: painel, modo de página, página e zoom de abertura. A tela
+  cheia pedida pelo arquivo pergunta antes.
+
+### Corrigido
+- Arquivo → Exportar PDF e Assinar → Preencher e assinar / Certificados apareciam desativados.
+
+### Segurança
+- Os botões do aviso só aceitam clique depois de um instante (o clique que abriu o aviso não cai em
+  Permitir).
+- Endereço ambíguo nunca é lembrado.
+- Marcas de direção e controles são escondidos.
+- Endereços e caminhos gigantes são recusados.
 
 ## [0.12.0] — 2026-10-10 · Comparar arquivos (v5f)
 

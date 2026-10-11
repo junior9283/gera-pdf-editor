@@ -17,12 +17,14 @@ A meta da versão **1.0.0**: todas as ferramentas do Adobe Acrobat Pro, com qual
 - [x] v2c — marca d'água, cabeçalho e rodapé, Bates (0.10.0)
 - [x] v5e — redigir e limpar documento (0.11.0)
 - [x] v5f — comparar arquivos (0.12.0)
+- [x] v6a — navegar e exibir: links, histórico de vistas, tela cheia, modo leitura, zoom até 6400 % (0.13.0)
 
 ## Em andamento
 
 - Avaliação para a 1.0.0 concluída: 32 lacunas P1 e 71 P2 em relação ao Acrobat Pro
   ([análise](docs/superpowers/specs/2026-10-10-gera-pdf-editor-avaliacao-1.0.md)).
-- [ ] v6a — navegar e exibir: links, Ir para página, Vista anterior/seguinte, modo leitura, níveis de zoom
+- [x] v6a — navegar e exibir (0.13.0)
+- [ ] v6b — próxima
 
 ## Planejado
 
