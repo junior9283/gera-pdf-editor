@@ -14,6 +14,9 @@ const MAX_NODES: usize = 50_000;
 const MAX_DEPTH: usize = 64;
 const MAX_TITLE_CHARS: usize = 512;
 
+/// Página e ponto de um destino.
+type Target = (Option<i32>, Option<(f32, f32)>);
+
 /// Item da árvore em memória.
 struct Item {
     obj: PdfObject,
@@ -230,7 +233,7 @@ impl PdfDoc {
     }
 
     /// Página e ponto (coordenadas do MuPDF) do destino do marcador: `/Dest` ou `/A` GoTo.
-    fn destination(&self, item: &PdfObject) -> Option<(Option<i32>, Option<(f32, f32)>)> {
+    fn destination(&self, item: &PdfObject) -> Option<Target> {
         let dest = match get(item, "Dest") {
             Some(d) => d,
             None => {
