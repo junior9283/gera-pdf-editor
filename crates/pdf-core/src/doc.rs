@@ -980,7 +980,8 @@ impl PdfDoc {
                 .object()
                 .resolve()?
                 .ok_or_else(|| PdfError::InvalidAnnotation("anotação sem dicionário".into()))?;
-            deep_copy(&self.inner, &dict, 0)?
+            let mut budget = MAX_COPIED_OBJECTS;
+            deep_copy(&self.inner, &dict, 0, &mut budget)?
         };
         // ligações com o original e a página de origem saem; o MuPDF dá um nome novo. A chave da
         // estrutura (PDF marcado) também: duas anotações não podem ter a mesma.
@@ -1386,6 +1387,9 @@ impl PdfDoc {
     }
 }
 
+/// Teto de objetos copiados ao colar um comentário (um comum usa algumas dezenas).
+const MAX_COPIED_OBJECTS: usize = 2000;
+
 /// Chaves cujo valor fica compartilhado na cópia: apontam para outras partes do documento
 /// (página, árvore, ação, destino), que a edição da anotação nunca altera.
 const SHARED_KEYS: [&str; 7] = ["P", "Parent", "Popup", "IRT", "A", "AA", "Dest"];
@@ -1393,14 +1397,23 @@ const SHARED_KEYS: [&str; 7] = ["P", "Parent", "Popup", "IRT", "A", "AA", "Dest"
 /// Cópia de um objeto com os dicionários e arrays (diretos ou indiretos) também copiados: uma
 /// cópia rasa compartilharia, por exemplo, a borda `/BS`, e mudar a cópia mudaria o original.
 /// Streams continuam compartilhados (a aparência é trocada à parte, em `own_appearance`).
-fn deep_copy(doc: &PdfDocument, obj: &PdfObject, depth: u32) -> Result<PdfObject> {
+fn deep_copy(
+    doc: &PdfDocument,
+    obj: &PdfObject,
+    depth: u32,
+    budget: &mut usize,
+) -> Result<PdfObject> {
     if depth > 16 {
         return Ok(obj.clone());
     }
+    // objetos compartilhados em vários níveis multiplicariam a cópia (PDF malicioso)
+    *budget = budget
+        .checked_sub(1)
+        .ok_or_else(|| crate::error::refused("comentário complexo demais para copiar"))?;
     if obj.is_indirect()? {
         return match obj.resolve()? {
             Some(r) if !r.is_stream()? && (r.is_dict()? || r.is_array()?) => {
-                deep_copy(doc, &r, depth + 1)
+                deep_copy(doc, &r, depth + 1, budget)
             }
             _ => Ok(obj.clone()),
         };
@@ -1412,7 +1425,11 @@ fn deep_copy(doc: &PdfDocument, obj: &PdfObject, depth: u32) -> Result<PdfObject
                 let shared = k
                     .as_name()
                     .is_ok_and(|n| SHARED_KEYS.iter().any(|s| s.as_bytes() == n.as_slice()));
-                let v = if shared { v } else { deep_copy(doc, &v, depth + 1)? };
+                let v = if shared {
+                    v
+                } else {
+                    deep_copy(doc, &v, depth + 1, budget)?
+                };
                 out.dict_put(k, v)?;
             }
         }
@@ -1422,7 +1439,7 @@ fn deep_copy(doc: &PdfDocument, obj: &PdfObject, depth: u32) -> Result<PdfObject
         let mut out = doc.new_array()?;
         for i in 0..obj.len()? as i32 {
             if let Some(v) = obj.get_array(i)? {
-                out.array_push(deep_copy(doc, &v, depth + 1)?)?;
+                out.array_push(deep_copy(doc, &v, depth + 1, budget)?)?;
             }
         }
         return Ok(out);
@@ -1445,7 +1462,11 @@ fn own_appearance(doc: &mut PdfDocument, ap: &PdfObject) -> Result<PdfObject> {
             let mut states = doc.new_dict()?;
             for j in 0..v.dict_len()? as i32 {
                 if let (Some(sk), Some(sv)) = (v.get_dict_key(j)?, v.get_dict_val(j)?) {
-                    let sv = if sv.is_stream()? { own_stream(doc, &sv)? } else { sv };
+                    let sv = if sv.is_stream()? {
+                        own_stream(doc, &sv)?
+                    } else {
+                        sv
+                    };
                     states.dict_put(sk, sv)?;
                 }
             }

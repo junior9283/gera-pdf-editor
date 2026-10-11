@@ -126,12 +126,22 @@ fn cut_then_paste_gives_a_visible_comment_also_after_saving() {
     // Recortar: o original fica escondido (apagado até salvar)
     d.apply(AnnotOp::Delete { page: 0, id }).unwrap();
     let new = d.duplicate_annot(0, id, 1, 0.0, 0.0).unwrap();
-    assert!(d.annotations(1).unwrap().iter().any(|a| a.id == new), "a cópia aparece");
+    assert!(
+        d.annotations(1).unwrap().iter().any(|a| a.id == new),
+        "a cópia aparece"
+    );
     let out = dir.path().join("salvo.pdf");
     d.save(&out).unwrap();
     let reopened = PdfDoc::open(&out, None).unwrap();
-    assert_eq!(reopened.annotations(1).unwrap().len(), 1, "e continua visível no arquivo");
-    assert!(reopened.annotations(0).unwrap().is_empty(), "o recortado saiu");
+    assert_eq!(
+        reopened.annotations(1).unwrap().len(),
+        1,
+        "e continua visível no arquivo"
+    );
+    assert!(
+        reopened.annotations(0).unwrap().is_empty(),
+        "o recortado saiu"
+    );
 }
 
 #[test]
@@ -142,7 +152,8 @@ fn indirect_border_is_not_shared_with_the_copy() {
         "<</Type/Catalog/Pages 2 0 R>>".to_string(),
         "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
         "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[4 0 R]>>".to_string(),
-        "<</Type/Annot/Subtype/Square/Rect[100 100 200 200]/C[1 0 0]/BS 5 0 R/StructParent 3>>".to_string(),
+        "<</Type/Annot/Subtype/Square/Rect[100 100 200 200]/C[1 0 0]/BS 5 0 R/StructParent 3>>"
+            .to_string(),
         "<</W 1/S/S>>".to_string(),
     ];
     let path = dir.path().join("bs.pdf");
@@ -158,7 +169,12 @@ fn indirect_border_is_not_shared_with_the_copy() {
         width: Some(6.0),
     })
     .unwrap();
-    let orig = d.annotations(0).unwrap().into_iter().find(|a| a.id == id).unwrap();
+    let orig = d
+        .annotations(0)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.id == id)
+        .unwrap();
     assert_eq!(orig.width, Some(1.0), "a borda do original não mudou");
 }
 
@@ -177,5 +193,32 @@ fn revert_drops_a_pending_password() {
     shape(&mut d);
     let out = dir.path().join("depois.pdf");
     d.save(&out).unwrap();
-    assert!(PdfDoc::open(&out, None).is_ok(), "salvo sem a senha revertida");
+    assert!(
+        PdfDoc::open(&out, None).is_ok(),
+        "salvo sem a senha revertida"
+    );
+}
+
+#[test]
+fn copying_a_bomb_of_shared_objects_stops_quickly() {
+    // cada nível aponta 40 vezes para o seguinte: copiar tudo daria 40^5 objetos
+    let dir = tempfile::tempdir().unwrap();
+    let mut objs = vec![
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[4 0 R]>>".to_string(),
+        "<</Type/Annot/Subtype/Square/Rect[100 100 200 200]/Bomba 5 0 R>>".to_string(),
+    ];
+    for level in 0..5 {
+        let next = 6 + level;
+        objs.push(format!("[{}]", vec![format!("{next} 0 R"); 40].join(" ")));
+    }
+    objs.push("[1 2 3]".to_string());
+    let path = dir.path().join("bomba.pdf");
+    std::fs::write(&path, pdf_core::sample::pdf_from_objects(&objs)).unwrap();
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let id = d.annotations(0).unwrap()[0].id;
+    let t = std::time::Instant::now();
+    let _ = d.duplicate_annot(0, id, 0, 0.0, 0.0); // recusar é aceitável; travar não
+    assert!(t.elapsed().as_secs_f32() < 2.0, "{:?}", t.elapsed());
 }
