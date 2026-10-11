@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="packaging/gera-pdf-editor.svg" width="96" alt="">
+  <img src="packaging/icons/gera-pdf-editor-256.png" width="96" alt="">
 </p>
 
 <h1 align="center">Gera PDF Editor</h1>

@@ -10,6 +10,7 @@ mod edit;
 mod edit_pdf;
 mod fields;
 mod fill_sign;
+mod icon;
 mod links;
 mod open_dialog;
 mod organize;
@@ -36,12 +37,16 @@ fn main() -> eframe::Result {
             _ => paths.push(PathBuf::from(arg)),
         }
     }
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1100.0, 800.0])
+        .with_title("Gera PDF Editor")
+        .with_app_id("gera-pdf-editor");
+    if let Some(icon) = icon::app_icon() {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    }
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 800.0])
-            .with_title("Gera PDF Editor")
-            .with_app_id("gera-pdf-editor"),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
