@@ -320,7 +320,7 @@ mod tests {
             readonly: false,
             required: false,
             tooltip: String::new(),
-            display: String::new(),
+            keystroke: Default::default(),
             format: Default::default(),
             validate: Default::default(),
             calc: Default::default(),

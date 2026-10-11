@@ -41,6 +41,13 @@ pub enum FieldKind {
     },
 }
 
+impl FieldKind {
+    /// Texto ou caixa de combinação: os tipos com valor digitado (Formatar, Validar, Calcular).
+    pub fn is_textual(&self) -> bool {
+        matches!(self, Self::Text { .. } | Self::Combo { .. })
+    }
+}
+
 /// O que o formulário tem e o app não executa: a barra avisa (o Acrobat roda ambos).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FormNotes {
@@ -64,10 +71,9 @@ pub struct FieldInfo {
     pub required: bool,
     /// Dica (/TU), quando houver.
     pub tooltip: String,
-    /// O valor como o Formatar o mostra (igual a `value` sem formato).
-    pub display: String,
-    /// Formatar, Validar e Calcular (/AA /F, /V e /C).
+    /// Formatar, Tecla, Validar e Calcular (/AA /F, /K, /V e /C). A Tecla filtra a digitação.
     pub format: FieldFormat,
+    pub keystroke: FieldFormat,
     pub validate: FieldValidate,
     pub calc: FieldCalc,
 }
@@ -272,8 +278,8 @@ fn info(w: &PdfWidget, page: i32) -> Result<FieldInfo> {
         },
     };
     let head = field_head(&obj)?;
-    let text = matches!(kind, FieldKind::Text { .. } | FieldKind::Combo { .. });
-    let (format, validate, calc) = if text {
+    let keystroke = parse_format(&aa_script(&head, "K")?);
+    let (format, validate, calc) = if kind.is_textual() {
         (
             parse_format(&aa_script(&head, "F")?),
             parse_validate(&aa_script(&head, "V")?),
@@ -283,7 +289,6 @@ fn info(w: &PdfWidget, page: i32) -> Result<FieldInfo> {
         Default::default()
     };
     let value = w.value()?.unwrap_or_default();
-    let display = format_value(&format, &value).map_or_else(|_| value.clone(), |f| f.text);
     Ok(FieldInfo {
         id: annot_id(w.annotation())?,
         page,
@@ -291,8 +296,8 @@ fn info(w: &PdfWidget, page: i32) -> Result<FieldInfo> {
         kind,
         rect: w.annotation().rect()?.into(),
         value,
-        display,
         format,
+        keystroke,
         validate,
         calc,
         readonly: flags.contains(FieldFlags::READ_ONLY),
@@ -309,7 +314,17 @@ impl PdfDoc {
     /// Campos de formulário da página (cada botão de opção aparece separado, com o seu estado), na
     /// ordem de tabulação da página: por linha, por coluna ou pela estrutura (/Annots).
     pub fn fields(&self, page: i32) -> Result<Vec<FieldInfo>> {
-        let mut out = self.fields_in_annots_order(page)?;
+        self.check_page(page)?;
+        let page_ref = self.inner.load_pdf_page(page)?;
+        let mut out = Vec::new();
+        for w in page_ref.widgets() {
+            // campo defeituoso (ex.: ciclo de /Parent) fica de fora; os outros continuam
+            if !hidden(&w.annotation().object())? {
+                if let Ok(f) = info(&w, page) {
+                    out.push(f);
+                }
+            }
+        }
         let by = |column: bool| {
             move |a: &FieldInfo, b: &FieldInfo| {
                 let key = |f: &FieldInfo| {
@@ -324,26 +339,10 @@ impl PdfDoc {
                     .unwrap_or(std::cmp::Ordering::Equal)
             }
         };
-        match self.tab_order_kind(page)? {
+        match crate::prepare::tab_order_of(&page_ref.object())? {
             crate::prepare::TabOrder::Row => out.sort_by(by(false)),
             crate::prepare::TabOrder::Column => out.sort_by(by(true)),
             _ => {}
-        }
-        Ok(out)
-    }
-
-    /// Os campos da página na ordem de /Annots.
-    fn fields_in_annots_order(&self, page: i32) -> Result<Vec<FieldInfo>> {
-        self.check_page(page)?;
-        let page_ref = self.inner.load_pdf_page(page)?;
-        let mut out = Vec::new();
-        for w in page_ref.widgets() {
-            // campo defeituoso (ex.: ciclo de /Parent) fica de fora; os outros continuam
-            if !hidden(&w.annotation().object())? {
-                if let Ok(f) = info(&w, page) {
-                    out.push(f);
-                }
-            }
         }
         Ok(out)
     }
@@ -358,31 +357,23 @@ impl PdfDoc {
 
     /// Avisos sobre o formulário (XFA, scripts de campo).
     pub fn form_notes(&self) -> Result<FormNotes> {
+        self.form_notes_of(&self.all_fields()?)
+    }
+
+    /// Os avisos a partir dos campos já lidos.
+    pub(crate) fn form_notes_of(&self, fields: &[FieldInfo]) -> Result<FormNotes> {
         let acro = self.inner.catalog()?.get_dict("AcroForm")?;
         let xfa = match &acro {
             Some(a) => a.get_dict("XFA")?.is_some(),
             None => false,
         };
         // só os scripts que o app não executa (as chamadas AF do Acrobat ele executa)
-        let scripts = self.all_fields()?.iter().any(|f| {
-            matches!(f.format, FieldFormat::Custom)
-                || matches!(f.validate, FieldValidate::Custom)
-                || matches!(f.calc, FieldCalc::Custom)
-        }) || self.has_custom_keystroke()?;
+        let scripts = fields.iter().any(|f| {
+            [&f.format, &f.keystroke].contains(&&FieldFormat::Custom)
+                || f.validate == FieldValidate::Custom
+                || f.calc == FieldCalc::Custom
+        });
         Ok(FormNotes { xfa, scripts })
-    }
-
-    /// Algum campo com Tecla (/AA /K) que não é uma chamada AF?
-    fn has_custom_keystroke(&self) -> Result<bool> {
-        for p in 0..self.page_count()? {
-            for w in self.inner.load_pdf_page(p)?.widgets() {
-                let k = aa_script(&field_head(&w.annotation().object())?, "K")?;
-                if matches!(parse_format(&k), FieldFormat::Custom) {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
     }
 
     /// Grava o valor no campo e devolve o anterior. Botão de opção: `value` = estado dele.
@@ -394,6 +385,7 @@ impl PdfDoc {
         id: i32,
         value: &str,
         force: bool,
+        format: Option<&FieldFormat>,
     ) -> Result<String> {
         self.check_page(page)?;
         let page_ref = self.inner.load_pdf_page(page)?;
@@ -417,8 +409,15 @@ impl PdfDoc {
                 ));
             }
             let mut head = field_head(&widget.annotation().object())?;
-            let format = parse_format(&aa_script(&head, "F")?);
-            let shown = format_value(&format, value).ok().map(|f| f.text);
+            let parsed;
+            let format = match format {
+                Some(f) => f,
+                None => {
+                    parsed = parse_format(&aa_script(&head, "F")?);
+                    &parsed
+                }
+            };
+            let shown = format_value(format, value).ok().map(|f| f.text);
             if let Some(shown) = shown.filter(|s| s != value) {
                 // a aparência é desenhada com o formatado; o /V volta ao cru
                 if widget.set_value(&mut self.inner, &shown, true)? {
@@ -445,42 +444,15 @@ impl PdfDoc {
                 out.push(f.clone());
             }
         };
-        let co = self
-            .inner
-            .catalog()?
-            .get_dict("AcroForm")?
-            .and_then(|a| a.get_dict("CO").ok().flatten());
-        if let Some(co) = co.filter(|c| c.is_array().unwrap_or(false)) {
-            // nome de cada nó de campo, lido numa passada pelas páginas
-            let heads = self.field_heads()?;
-            let by_name: std::collections::HashMap<&str, &FieldInfo> =
-                calculated.iter().map(|f| (f.name.as_str(), *f)).collect();
-            for k in 0..co.len()?.min(10_000) as i32 {
-                let name = co
-                    .get_array(k)?
-                    .and_then(|o| o.as_indirect().ok())
-                    .and_then(|num| heads.get(&num));
-                if let Some(f) = name.and_then(|n| by_name.get(n.as_str())) {
-                    push(f, &mut out);
-                }
+        let by_name: std::collections::HashMap<&str, &FieldInfo> =
+            calculated.iter().map(|f| (f.name.as_str(), *f)).collect();
+        for name in self.calc_order_names()? {
+            if let Some(f) = by_name.get(name.as_str()) {
+                push(f, &mut out);
             }
         }
         for f in calculated {
             push(f, &mut out);
-        }
-        Ok(out)
-    }
-
-    /// Número do objeto do nó de cada campo → nome completo.
-    fn field_heads(&self) -> Result<std::collections::HashMap<i32, String>> {
-        let mut out = std::collections::HashMap::new();
-        for p in 0..self.page_count()? {
-            for w in self.inner.load_pdf_page(p)?.widgets() {
-                if let Ok(num) = field_head(&w.annotation().object())?.as_indirect() {
-                    out.entry(num)
-                        .or_insert_with(|| w.name().ok().flatten().unwrap_or_default());
-                }
-            }
         }
         Ok(out)
     }
@@ -493,12 +465,8 @@ impl PdfDoc {
         if order.is_empty() {
             return Ok(changes);
         }
-        let mut values: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
         let mut raws: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         for f in &fields {
-            values
-                .entry(f.name.clone())
-                .or_insert_with(|| number_of(&f.value));
             raws.entry(f.name.clone())
                 .or_insert_with(|| f.value.clone());
         }
@@ -508,13 +476,14 @@ impl PdfDoc {
                 if changes.len() >= MAX_CALC_WRITES {
                     return Ok(changes);
                 }
-                let raw = evaluate(&f.calc, &|n: &str| values.get(n).copied().unwrap_or(0.0))
-                    .map(calc_raw)
-                    .unwrap_or_default();
+                let raw = evaluate(&f.calc, &|n: &str| {
+                    raws.get(n).map_or(0.0, |v| number_of(v))
+                })
+                .map(calc_raw)
+                .unwrap_or_default();
                 if raws.get(&f.name) != Some(&raw) {
-                    let old = self.write_field(f.page, f.id, &raw, true)?;
+                    let old = self.write_field(f.page, f.id, &raw, true, Some(&f.format))?;
                     changes.push((f.page, f.id, old));
-                    values.insert(f.name.clone(), number_of(&raw));
                     raws.insert(f.name.clone(), raw);
                     changed = true;
                 }
@@ -540,12 +509,8 @@ impl PdfDoc {
     /// recusado, com o aviso do Acrobat) e os cálculos que dependem dele. Desfazer volta tudo
     /// numa etapa.
     pub fn set_field(&mut self, page: i32, id: i32, value: &str) -> Result<()> {
-        let field = self
-            .fields(page)?
-            .into_iter()
-            .find(|f| f.id == id)
-            .ok_or_else(|| PdfError::InvalidAnnotation("campo não encontrado".into()))?;
-        let raw = if matches!(field.kind, FieldKind::Text { .. } | FieldKind::Combo { .. }) {
+        let field = info(&self.widget(page, id)?, page)?;
+        let raw = if field.kind.is_textual() {
             let named = |msg: String| {
                 crate::error::refused(format!("{} [ {} ]", msg.trim_end_matches('.'), field.name))
             };
@@ -555,7 +520,11 @@ impl PdfDoc {
         } else {
             value.to_string()
         };
-        let mut steps = vec![(page, id, self.write_field(page, id, &raw, false)?)];
+        let mut steps = vec![(
+            page,
+            id,
+            self.write_field(page, id, &raw, false, Some(&field.format))?,
+        )];
         steps.extend(self.recalculate()?);
         self.history.record_step(Step::Fields(steps));
         Ok(())

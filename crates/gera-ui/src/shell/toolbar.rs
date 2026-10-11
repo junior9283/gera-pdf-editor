@@ -197,20 +197,23 @@ fn tab_order_menu(ui: &mut egui::Ui, doc: &mut DocTab) {
         }
     }
     ui.separator();
-    let selected = doc.prepare.selected;
+    // os campos da página do selecionado, já na ordem de tabulação
+    let selected = doc.prepare.selected.map(|(p, id)| {
+        let ids: Vec<i32> = doc
+            .fields
+            .iter()
+            .filter(|f| f.page == p)
+            .map(|f| f.id)
+            .collect();
+        (p, id, ids)
+    });
     for (up, label) in [
         (true, "Mover o campo para cima na ordem"),
         (false, "Mover o campo para baixo na ordem"),
     ] {
-        let order = selected.and_then(|(p, id)| {
-            let ids: Vec<i32> = doc
-                .fields
-                .iter()
-                .filter(|f| f.page == p)
-                .map(|f| f.id)
-                .collect();
-            crate::prepare::moved(&ids, id, up).map(|ids| (p, ids))
-        });
+        let order = selected
+            .as_ref()
+            .and_then(|(p, id, ids)| crate::prepare::moved(ids, *id, up).map(|ids| (*p, ids)));
         if ui
             .add_enabled(order.is_some(), egui::Button::new(label))
             .clicked()

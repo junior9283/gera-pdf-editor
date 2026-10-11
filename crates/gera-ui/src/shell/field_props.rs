@@ -311,7 +311,6 @@ const DATE_PRESETS: [&str; 9] = [
     "dd/mm/yyyy HH:MM",
     "mmmm yyyy",
 ];
-const TIME_PRESETS: [&str; 4] = ["HH:MM", "h:MM tt", "HH:MM:ss", "h:MM:ss tt"];
 /// Máscaras prontas do Especial (as do Brasil e as do Acrobat).
 pub(crate) const SPECIAL_PRESETS: [(&str, &str); 8] = [
     ("CEP", "99999-999"),
@@ -396,32 +395,31 @@ impl FormatDraft {
     }
 }
 
+/// Modo da aba Validar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ValidateMode {
+    None,
+    Range,
+    Custom,
+}
+
 /// Rascunho da aba Validar.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ValidateDraft {
-    pub range: bool,
+    pub mode: ValidateMode,
     pub min: String,
     pub max: String,
-    pub custom: bool,
 }
 
 impl ValidateDraft {
     pub fn from(v: &FieldValidate) -> Self {
         let text = |n: &Option<f64>| n.map_or_else(String::new, |n| n.to_string());
-        match v {
-            FieldValidate::Range { min, max } => Self {
-                range: true,
-                min: text(min),
-                max: text(max),
-                custom: false,
-            },
-            other => Self {
-                range: false,
-                min: String::new(),
-                max: String::new(),
-                custom: *other == FieldValidate::Custom,
-            },
-        }
+        let (mode, min, max) = match v {
+            FieldValidate::Range { min, max } => (ValidateMode::Range, text(min), text(max)),
+            FieldValidate::Custom => (ValidateMode::Custom, String::new(), String::new()),
+            FieldValidate::None => (ValidateMode::None, String::new(), String::new()),
+        };
+        Self { mode, min, max }
     }
 
     pub fn validate(&self) -> FieldValidate {
@@ -432,15 +430,13 @@ impl ValidateDraft {
                 .ok()
                 .filter(|v| v.is_finite())
         };
-        if self.range {
-            FieldValidate::Range {
+        match self.mode {
+            ValidateMode::Range => FieldValidate::Range {
                 min: num(&self.min),
                 max: num(&self.max),
-            }
-        } else if self.custom {
-            FieldValidate::Custom
-        } else {
-            FieldValidate::None
+            },
+            ValidateMode::Custom => FieldValidate::Custom,
+            ValidateMode::None => FieldValidate::None,
         }
     }
 }
@@ -563,7 +559,7 @@ impl FormatDraft {
             Category::Date => {
                 presets(ui, "formato-data", &mut self.date, &DATE_PRESETS);
             }
-            Category::Time => combo(ui, "formato-hora", &mut self.time, &TIME_PRESETS),
+            Category::Time => combo(ui, "formato-hora", &mut self.time, &pdf_core::TIME_FORMATS),
             Category::Special => {
                 ui.horizontal(|ui| {
                     ui.label("Máscara");
@@ -620,23 +616,20 @@ fn presets(ui: &mut egui::Ui, id: &str, value: &mut String, list: &[&str]) {
 
 impl ValidateDraft {
     fn ui(&mut self, ui: &mut egui::Ui) {
-        if self.custom && !self.range {
+        if self.mode == ValidateMode::Custom {
             ui.label("O campo tem um script de validação que o app mantém, mas não executa.");
         }
-        let mut none = !self.range && !self.custom;
-        if ui
-            .radio_value(&mut none, true, "O valor do campo não é validado")
-            .clicked()
-        {
-            (self.range, self.custom) = (false, false);
-        }
-        if ui
-            .radio(self.range, "O valor do campo está no intervalo:")
-            .clicked()
-        {
-            (self.range, self.custom) = (true, false);
-        }
-        ui.add_enabled_ui(self.range, |ui| {
+        ui.radio_value(
+            &mut self.mode,
+            ValidateMode::None,
+            "O valor do campo não é validado",
+        );
+        ui.radio_value(
+            &mut self.mode,
+            ValidateMode::Range,
+            "O valor do campo está no intervalo:",
+        );
+        ui.add_enabled_ui(self.mode == ValidateMode::Range, |ui| {
             ui.horizontal(|ui| {
                 ui.label("De");
                 ui.add(egui::TextEdit::singleline(&mut self.min).desired_width(70.0));
@@ -747,7 +740,7 @@ mod draft_tests {
         );
 
         let mut v = ValidateDraft::from(&FieldValidate::None);
-        v.range = true;
+        v.mode = ValidateMode::Range;
         v.min = "0".into();
         assert_eq!(
             v.validate(),

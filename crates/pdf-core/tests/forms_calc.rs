@@ -2,6 +2,11 @@ use pdf_core::{FieldCalc, FieldFormat, FieldInfo, FieldValidate, PdfDoc};
 
 /// Formulário como o Acrobat grava: Preço (moeda), Quantidade (1 a 10), Total = Preço × Qtd
 /// (somente leitura, na ordem de cálculo) e Desconto = Total × 0,1.
+/// O valor como o Formatar do campo o mostra.
+fn shown(f: &pdf_core::FieldInfo) -> String {
+    pdf_core::format_value(&f.format, &f.value).map_or_else(|_| f.value.clone(), |f| f.text)
+}
+
 fn order_form(dir: &tempfile::TempDir, total: &str) -> std::path::PathBuf {
     let field = |n: usize, name: &str, y: i32, aa: &str, more: &str| {
         format!(
@@ -89,7 +94,7 @@ fn acrobat_made_form_is_read() {
         preco.format,
         FieldFormat::Number { dec: 2, sep: 2, .. }
     ));
-    assert_eq!(preco.display, "R$ 1.500,00");
+    assert_eq!(shown(&preco), "R$ 1.500,00");
     assert_eq!(preco.value, "1500");
     assert!(matches!(
         field(&d, "Qtd").validate,
@@ -113,7 +118,7 @@ fn formatted_appearance_keeps_raw_value() {
     d.set_field(0, id, "1.234,5").unwrap();
     let preco = field(&d, "Preco");
     assert_eq!(preco.value, "1234.5", "/V cru");
-    assert_eq!(preco.display, "R$ 1.234,50");
+    assert_eq!(shown(&preco), "R$ 1.234,50");
     d.save(&path).unwrap();
     assert!(
         appearance(&path, "Preco").contains("(R$ 1.234,50)"),
@@ -145,7 +150,7 @@ fn total_recalculates_in_one_undo_step() {
     d.set_field(0, qtd, "3").unwrap();
     let total = field(&d, "Total");
     assert_eq!(total.value, "4500");
-    assert_eq!(total.display, "R$ 4.500,00");
+    assert_eq!(shown(&total), "R$ 4.500,00");
     assert_eq!(
         field(&d, "Desconto").value,
         "450",

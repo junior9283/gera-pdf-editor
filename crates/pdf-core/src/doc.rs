@@ -1605,18 +1605,14 @@ impl PdfDoc {
             Step::Fields(list) => {
                 // de trás para a frente; o contrário, aplicado também de trás para a frente,
                 // refaz na ordem original
-                let mut inverse = Vec::new();
-                let mut result = Ok(());
-                for (page, id, value) in list.iter().rev() {
-                    match self.write_field(*page, *id, value, true) {
-                        Ok(old) => inverse.push((*page, *id, old)),
-                        Err(e) => {
-                            result = Err(e);
-                            break;
-                        }
-                    }
-                }
-                result.map(|()| (Step::Fields(inverse), Changed::Fields))
+                list.iter()
+                    .rev()
+                    .map(|(page, id, value)| {
+                        let old = self.write_field(*page, *id, value, true, None)?;
+                        Ok((*page, *id, old))
+                    })
+                    .collect::<Result<Vec<_>>>()
+                    .map(|inverse| (Step::Fields(inverse), Changed::Fields))
             }
         };
         let (from, to) = if back {
@@ -1832,6 +1828,7 @@ impl PdfDoc {
             .map(|p| self.page_size(p))
             .collect::<Result<Vec<_>>>()?;
         let (annots, links, attachments) = self.annotations_links_attachments().unwrap_or_default();
+        let fields = self.all_fields().unwrap_or_default();
         Ok(DocSummary {
             path: self.path.clone(),
             sizes,
@@ -1843,8 +1840,8 @@ impl PdfDoc {
             display_title: self.display_title(),
             labels: self.labels(),
             layers: self.layers(),
-            fields: self.all_fields().unwrap_or_default(),
-            form_notes: self.form_notes().unwrap_or_default(),
+            form_notes: self.form_notes_of(&fields).unwrap_or_default(),
+            fields,
             security: self.security()?,
             is_comparison: self.is_comparison(),
         })

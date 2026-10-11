@@ -11,8 +11,6 @@ struct TextDraft {
     text: String,
     original: String,
     focused: bool,
-    /// Último texto aceito pelo filtro de teclas do Formatar.
-    last_ok: String,
     /// Calendário aberto (campo de data): (ano, mês) mostrado.
     calendar: Option<(i32, u32)>,
 }
@@ -57,13 +55,19 @@ pub struct FormState {
     pub alert: Option<String>,
 }
 
-/// O texto digitado, se o Formatar o aceita; senão o último aceito (a tecla não entra).
-pub fn keep_typed(fmt: &pdf_core::FieldFormat, last_ok: &str, now: &str) -> String {
-    if pdf_core::keystroke_ok(fmt, now) {
+/// O texto digitado, se a Tecla do campo o aceita; senão o de antes (a tecla não entra).
+pub fn keep_typed(keystroke: &pdf_core::FieldFormat, before: &str, now: &str) -> String {
+    if pdf_core::keystroke_ok(keystroke, now) {
         now.to_string()
     } else {
-        last_ok.to_string()
+        before.to_string()
     }
+}
+
+/// O mês `delta` meses depois de (`year`, `month`).
+fn shift_month(year: i32, month: u32, delta: i32) -> (i32, u32) {
+    let k = year * 12 + month as i32 - 1 + delta;
+    (k.div_euclid(12), k.rem_euclid(12) as u32 + 1)
 }
 
 /// Dias do mês numa grade que começa no domingo (casas vazias antes do dia 1).
@@ -72,12 +76,7 @@ pub fn month_cells(year: i32, month: u32) -> Vec<Option<u32>> {
     let Some(first) = chrono::NaiveDate::from_ymd_opt(year, month, 1) else {
         return Vec::new();
     };
-    let next = if month == 12 {
-        chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1)
-    } else {
-        chrono::NaiveDate::from_ymd_opt(year, month + 1, 1)
-    };
-    let days = next.map_or(31, |n| (n - first).num_days() as u32);
+    let days = u32::from(first.num_days_in_month());
     let blank = first.weekday().num_days_from_sunday() as usize;
     std::iter::repeat_n(None, blank)
         .chain((1..=days).map(Some))
@@ -89,21 +88,6 @@ pub fn picked_date(fmt: &pdf_core::FieldFormat, year: i32, month: u32, day: u32)
     let iso = format!("{year:04}-{month:02}-{day:02}");
     pdf_core::format_value(fmt, &iso).map_or(iso, |f| f.text)
 }
-
-const MONTH_NAMES: [&str; 12] = [
-    "Janeiro",
-    "Fevereiro",
-    "Março",
-    "Abril",
-    "Maio",
-    "Junho",
-    "Julho",
-    "Agosto",
-    "Setembro",
-    "Outubro",
-    "Novembro",
-    "Dezembro",
-];
 
 impl Default for FormState {
     fn default() -> Self {
@@ -353,7 +337,6 @@ fn open(st: &mut FormState, f: &FieldInfo, out: &mut Vec<FieldAction>) {
                 text: f.value.clone(),
                 original: f.value.clone(),
                 focused: false,
-                last_ok: f.value.clone(),
                 calendar: None,
             })
         }
@@ -398,6 +381,7 @@ fn text_overlay(
     let r = screen_rect(&f.rect, map);
     ui.painter().rect_filled(r, 0.0, egui::Color32::WHITE);
     let size = (r.height() * 0.6).clamp(8.0, 18.0 * map.zoom);
+    let before = d.text.clone();
     let mut field = if multiline {
         egui::TextEdit::multiline(&mut d.text)
     } else {
@@ -413,16 +397,14 @@ fn text_overlay(
         field = field.char_limit(n);
     }
     let resp = ui.put(r, field);
-    // filtro de teclas do Formatar (com Número, letras não entram)
+    // filtro da Tecla do campo (com Número, letras não entram)
     if resp.changed() {
-        d.text = keep_typed(&f.format, &d.last_ok, &d.text);
-        d.last_ok = d.text.clone();
+        d.text = keep_typed(&f.keystroke, &before, &d.text);
     }
     // campo de data: o seletor de calendário ao lado (como no Acrobat)
     if matches!(f.format, pdf_core::FieldFormat::Date(_)) {
         if let Some(value) = calendar(ui, d, &f.format, r) {
             d.text = value;
-            d.last_ok = d.text.clone();
             let d = st.draft.take().expect("rascunho existe");
             out.push(FieldAction::Set {
                 page: d.page,
@@ -505,19 +487,18 @@ fn calendar(
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if ui.small_button("◀").clicked() {
-                        shown = if month == 1 {
-                            (year - 1, 12)
-                        } else {
-                            (year, month - 1)
-                        };
+                        shown = shift_month(year, month, -1);
                     }
-                    ui.label(format!("{} de {year}", MONTH_NAMES[(month - 1) as usize]));
+                    let name = pdf_core::MONTHS[(month - 1) as usize];
+                    let mut chars = name.chars();
+                    let first = chars.next().map(|c| c.to_uppercase().to_string());
+                    ui.label(format!(
+                        "{}{} de {year}",
+                        first.unwrap_or_default(),
+                        chars.as_str()
+                    ));
                     if ui.small_button("▶").clicked() {
-                        shown = if month == 12 {
-                            (year + 1, 1)
-                        } else {
-                            (year, month + 1)
-                        };
+                        shown = shift_month(year, month, 1);
                     }
                 });
                 egui::Grid::new(("dias", d.page, d.id)).show(ui, |ui| {
@@ -730,7 +711,7 @@ mod tests {
             readonly: false,
             required: false,
             tooltip: String::new(),
-            display: String::new(),
+            keystroke: Default::default(),
             format: Default::default(),
             validate: Default::default(),
             calc: Default::default(),

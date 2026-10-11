@@ -224,22 +224,8 @@ fn acroform(doc: &mut PdfDocument) -> Result<PdfObject> {
     if acro.get_dict("DA")?.is_none() {
         acro.dict_put("DA", PdfObject::new_string("/Helv 0 Tf 0 g")?)?;
     }
-    let mut dr = match acro.get_dict("DR")? {
-        Some(dr) => dr,
-        None => {
-            acro.dict_put("DR", doc.new_dict()?)?;
-            acro.get_dict("DR")?
-                .ok_or_else(|| invalid("/AcroForm inválido"))?
-        }
-    };
-    let mut fonts = match dr.get_dict("Font")? {
-        Some(f) => f,
-        None => {
-            dr.dict_put("Font", doc.new_dict()?)?;
-            dr.get_dict("Font")?
-                .ok_or_else(|| invalid("/DR inválido"))?
-        }
-    };
+    let mut dr = child_or_new(doc, &mut acro, "DR", false)?;
+    let mut fonts = child_or_new(doc, &mut dr, "Font", false)?;
     for (key, base, enc) in [
         ("Helv", "Helvetica", "/Encoding/WinAnsiEncoding"),
         ("ZaDb", "ZapfDingbats", ""),
@@ -254,17 +240,36 @@ fn acroform(doc: &mut PdfDocument) -> Result<PdfObject> {
     Ok(acro)
 }
 
+/// O dicionário (ou array) `key` de `obj`, criado vazio se faltar ou for de outro tipo.
+fn child_or_new(
+    doc: &PdfDocument,
+    obj: &mut PdfObject,
+    key: &str,
+    array: bool,
+) -> Result<PdfObject> {
+    if let Some(c) = obj.get_dict(key)? {
+        if if array { c.is_array()? } else { c.is_dict()? } {
+            return Ok(c);
+        }
+    }
+    obj.dict_put(
+        key,
+        if array {
+            doc.new_array()?
+        } else {
+            doc.new_dict()?
+        },
+    )?;
+    obj.get_dict(key)?
+        .ok_or_else(|| invalid(&format!("/{key} inválido")))
+}
+
 /// Põe (ou tira, com `js` vazio) a ação JavaScript `key` de /AA do campo.
 fn set_aa(doc: &mut PdfDocument, head: &mut PdfObject, key: &str, js: &str) -> Result<()> {
-    let mut aa = match head.get_dict("AA")? {
-        Some(aa) => aa,
-        None if js.is_empty() => return Ok(()),
-        None => {
-            head.dict_put("AA", doc.new_dict()?)?;
-            head.get_dict("AA")?
-                .ok_or_else(|| invalid("/AA inválido"))?
-        }
-    };
+    if js.is_empty() && head.get_dict("AA")?.is_none() {
+        return Ok(());
+    }
+    let mut aa = child_or_new(doc, head, "AA", false)?;
     if js.is_empty() {
         aa.dict_delete(key)?;
         if aa.dict_len()? == 0 {
@@ -277,6 +282,16 @@ fn set_aa(doc: &mut PdfDocument, head: &mut PdfObject, key: &str, js: &str) -> R
     action.dict_put("JS", PdfObject::new_string(js)?)?;
     aa.dict_put(key, action)?;
     Ok(())
+}
+
+/// A ordem de tabulação gravada no /Tabs da página.
+pub(crate) fn tab_order_of(page: &PdfObject) -> Result<TabOrder> {
+    let tabs = page.get_dict("Tabs")?.and_then(|t| t.as_name().ok());
+    Ok(match tabs.as_deref() {
+        Some(b"R") => TabOrder::Row,
+        Some(b"C") => TabOrder::Column,
+        _ => TabOrder::Structure,
+    })
 }
 
 /// Nome completo do campo (os /T do nó e dos pais, com ponto).
@@ -414,7 +429,7 @@ impl PdfDoc {
         Ok(None)
     }
 
-    fn widget(&self, page: i32, id: i32) -> Result<PdfWidget> {
+    pub(crate) fn widget(&self, page: i32, id: i32) -> Result<PdfWidget> {
         self.check_page(page)?;
         self.inner
             .load_pdf_page(page)?
@@ -482,7 +497,6 @@ impl PdfDoc {
         let mut w = annot.object();
         w.dict_put("F", int(4)?)?; // imprimir
         let font = match kind {
-            NewFieldKind::Button => "Helv",
             NewFieldKind::Checkbox | NewFieldKind::Radio => "ZaDb",
             _ => "Helv",
         };
@@ -586,17 +600,7 @@ impl PdfDoc {
 
     /// A ordem de tabulação da página (pelo /Tabs).
     pub fn tab_order_kind(&self, page: i32) -> Result<TabOrder> {
-        let tabs = self
-            .inner
-            .load_pdf_page(page)?
-            .object()
-            .get_dict("Tabs")?
-            .and_then(|t| t.as_name().ok());
-        Ok(match tabs.as_deref() {
-            Some(b"R") => TabOrder::Row,
-            Some(b"C") => TabOrder::Column,
-            _ => TabOrder::Structure,
-        })
+        tab_order_of(&self.inner.load_pdf_page(page)?.object())
     }
 
     fn write_tab_order(&mut self, page: i32, order: &TabOrder) -> Result<()> {
@@ -668,9 +672,22 @@ impl PdfDoc {
 
     /// Grava /CO com os campos nomeados (os que não existem ficam de fora).
     fn write_calc_order(&mut self, names: &[String]) -> Result<()> {
+        // nome → nó, numa passada pelas páginas
+        let mut heads = std::collections::HashMap::new();
+        for p in 0..self.page_count()? {
+            for w in self.inner.load_pdf_page(p)?.widgets() {
+                // campo defeituoso (ex.: ciclo de /Parent) não impede os outros
+                if let (Some(name), Ok(head)) = (
+                    w.name().ok().flatten(),
+                    field_head(&w.annotation().object()),
+                ) {
+                    heads.entry(name).or_insert(head);
+                }
+            }
+        }
         let mut co = self.inner.new_array()?;
         for name in names {
-            if let Some(head) = self.field_named(name)? {
+            if let Some(head) = heads.remove(name) {
                 co.array_push(head)?;
             }
         }
@@ -698,14 +715,7 @@ impl PdfDoc {
             set_aa(&mut self.inner, head, "C", &calc_script(&p.calc))?;
             let num = head.as_indirect()?;
             let mut acro = acroform(&mut self.inner)?;
-            let mut co = match acro.get_dict("CO")? {
-                Some(co) if co.is_array()? => co,
-                _ => {
-                    acro.dict_put("CO", self.inner.new_array()?)?;
-                    acro.get_dict("CO")?
-                        .ok_or_else(|| invalid("/AcroForm inválido"))?
-                }
-            };
+            let mut co = child_or_new(&self.inner, &mut acro, "CO", true)?;
             remove_ref(&mut co, num)?;
             if p.calc != FieldCalc::None {
                 co.array_push(head.clone())?;
@@ -716,13 +726,7 @@ impl PdfDoc {
 
     /// Botão de ação: rótulo e a ação Redefinir formulário.
     fn write_button(&mut self, obj: &mut PdfObject, p: &FieldProps) -> Result<()> {
-        let mut mk = match obj.get_dict("MK")? {
-            Some(mk) => mk,
-            None => {
-                obj.dict_put("MK", self.inner.new_dict()?)?;
-                obj.get_dict("MK")?.ok_or_else(|| invalid("/MK inválido"))?
-            }
-        };
+        let mut mk = child_or_new(&self.inner, obj, "MK", false)?;
         mk.dict_put("CA", PdfObject::new_string(&p.button_label)?)?;
         if p.reset_action {
             obj.dict_put("A", self.inner.new_object_from_str("<</S/ResetForm>>")?)?;

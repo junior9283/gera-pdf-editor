@@ -61,8 +61,9 @@ pub use edit_text::{PageTextBlock, MIN_TEXT_WIDTH, NEW_TEXT_SIZE, TEXT_MARGIN};
 pub use error::{PdfError, Result};
 pub use form_scripts::{
     calc_fields, calc_script, commit_value, evaluate, format_scripts, format_value, keystroke_ok,
-    number_of, parse_calc, parse_format, parse_validate, validate as validate_field,
-    validate_script, CalcOp, FieldCalc, FieldFormat, FieldValidate, Formatted,
+    loose_number, number_of, parse_calc, parse_format, parse_validate, validate as validate_field,
+    validate_script, CalcOp, FieldCalc, FieldFormat, FieldValidate, Formatted, MONTHS,
+    TIME_FORMATS,
 };
 pub use forms::{FieldInfo, FieldKind, FormNotes};
 pub use layers::LayerNode;

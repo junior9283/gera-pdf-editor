@@ -676,20 +676,15 @@ impl State {
                 });
             }
             Request::Annot(op) => self.edit(send, |d| d.apply(op).map(Changed::Pages)),
-            Request::SetField { page, id, value } => {
+            Request::SetField { page, id, value } => self.edit_or(
+                send,
+                |d| d.set_field(page, id, &value).map(|()| Changed::Fields),
                 // valor recusado pelo Formatar ou pelo Validar: o aviso do Acrobat, numa janela
-                let refused = std::cell::RefCell::new(None);
-                self.edit(
-                    &|r| match r {
-                        Response::EditFailed(msg) => *refused.borrow_mut() = Some(msg),
-                        other => send(other),
-                    },
-                    |d| d.set_field(page, id, &value).map(|()| Changed::Fields),
-                );
-                if let Some(msg) = refused.into_inner() {
-                    send(Response::FieldRefused(msg));
-                }
-            }
+                |e| match e {
+                    crate::PdfError::Refused(msg) => Response::FieldRefused(msg),
+                    e => Response::EditFailed(e.to_string()),
+                },
+            ),
             Request::ResetForm => self.edit(send, |d| d.reset_form().map(|()| Changed::Document)),
             Request::SignDigitally {
                 place,
@@ -914,6 +909,16 @@ impl State {
         send: &dyn Fn(Response),
         f: impl FnOnce(&mut PdfDoc) -> crate::Result<Changed>,
     ) {
+        self.edit_or(send, f, |e| Response::EditFailed(e.to_string()));
+    }
+
+    /// Como `edit`, com a resposta de erro escolhida por quem pede.
+    fn edit_or(
+        &mut self,
+        send: &dyn Fn(Response),
+        f: impl FnOnce(&mut PdfDoc) -> crate::Result<Changed>,
+        failed: impl FnOnce(crate::PdfError) -> Response,
+    ) {
         let Some(d) = self.doc.as_mut() else {
             send(Response::EditFailed(NO_DOC.into()));
             return;
@@ -956,7 +961,7 @@ impl State {
                 pages,
                 history: d.history_state(),
             }),
-            Err(e) => send(Response::EditFailed(e.to_string())),
+            Err(e) => send(failed(e)),
         }
     }
 

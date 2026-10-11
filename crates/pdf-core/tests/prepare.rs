@@ -556,7 +556,14 @@ fn format_validate_calc_props_round_trip() {
     // preencher A recalcula o Total
     let a = by_name(&d.fields(0).unwrap(), "A").id;
     d.set_field(0, a, "7").unwrap();
-    assert_eq!(by_name(&d.fields(0).unwrap(), "Total").display, "R$ 7,00");
+    let fields = d.fields(0).unwrap();
+    let total = by_name(&fields, "Total");
+    assert_eq!(
+        pdf_core::format_value(&total.format, &total.value)
+            .unwrap()
+            .text,
+        "R$ 7,00"
+    );
     let mut none = back.clone();
     none.calc = pdf_core::FieldCalc::None;
     d.set_field_props(0, id, &none).unwrap();

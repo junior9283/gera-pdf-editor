@@ -127,7 +127,10 @@ const OLD_DATES: [&str; 14] = [
     "m/d/yy h:MM tt",
     "m/d/yy HH:MM",
 ];
-const MONTHS: [&str; 12] = [
+/// Os formatos de hora do Acrobat (AFTime_Format 0 a 3).
+pub const TIME_FORMATS: [&str; 4] = ["HH:MM", "h:MM tt", "HH:MM:ss", "h:MM:ss tt"];
+/// Os meses em português (minúsculos, como nas datas por extenso).
+pub const MONTHS: [&str; 12] = [
     "janeiro",
     "fevereiro",
     "março",
@@ -379,7 +382,12 @@ fn js_str(s: &str) -> String {
 
 /// Os scripts de Formatar (/F) e Tecla (/K) que o Acrobat grava; vazios para Nenhum.
 pub fn format_scripts(fmt: &FieldFormat) -> (String, String) {
-    let both = |f: String, k: String| (f, k);
+    let pair = |prefix: &str, args: String| {
+        (
+            format!("{prefix}_Format({args});"),
+            format!("{prefix}_Keystroke({args});"),
+        )
+    };
     match fmt {
         FieldFormat::None | FieldFormat::Custom => (String::new(), String::new()),
         FieldFormat::Number {
@@ -388,33 +396,21 @@ pub fn format_scripts(fmt: &FieldFormat) -> (String, String) {
             neg,
             currency,
             prepend,
-        } => {
-            let args = format!("{dec}, {sep}, {neg}, 0, {}, {prepend}", js_str(currency));
-            both(
-                format!("AFNumber_Format({args});"),
-                format!("AFNumber_Keystroke({args});"),
-            )
-        }
-        FieldFormat::Percent { dec, sep } => both(
-            format!("AFPercent_Format({dec}, {sep});"),
-            format!("AFPercent_Keystroke({dec}, {sep});"),
+        } => pair(
+            "AFNumber",
+            format!("{dec}, {sep}, {neg}, 0, {}, {prepend}", js_str(currency)),
         ),
-        FieldFormat::Date(f) => both(
+        FieldFormat::Percent { dec, sep } => pair("AFPercent", format!("{dec}, {sep}")),
+        FieldFormat::Date(f) => (
             format!("AFDate_FormatEx({});", js_str(f)),
             format!("AFDate_KeystrokeEx({});", js_str(f)),
         ),
-        FieldFormat::Time(n) => both(
-            format!("AFTime_Format({n});"),
-            format!("AFTime_Keystroke({n});"),
-        ),
+        FieldFormat::Time(n) => pair("AFTime", n.to_string()),
         FieldFormat::Special(m) => match SPECIAL_MASKS.iter().position(|s| s == m) {
-            Some(n) => both(
-                format!("AFSpecial_Format({n});"),
-                format!("AFSpecial_Keystroke({n});"),
-            ),
+            Some(n) => pair("AFSpecial", n.to_string()),
             None => {
                 let js = format!("AFSpecial_KeystrokeEx({});", js_str(m));
-                both(js.clone(), js)
+                (js.clone(), js)
             }
         },
     }
@@ -524,7 +520,7 @@ pub fn format_value(fmt: &FieldFormat, raw: &str) -> Result<Formatted, String> {
         }
         FieldFormat::Time(n) => {
             let t = parse_time(raw).ok_or_else(mismatch)?;
-            let f = ["HH:MM", "h:MM tt", "HH:MM:ss", "h:MM:ss tt"][(*n).min(3) as usize];
+            let f = TIME_FORMATS[(*n).min(3) as usize];
             Ok(plain(print_date(f, NaiveDate::default(), t)))
         }
         FieldFormat::Special(mask) => apply_mask(mask, raw, false).map(plain),
@@ -818,7 +814,7 @@ pub fn validate(v: &FieldValidate, raw: &str) -> Result<(), String> {
         return Ok(());
     }
     // texto que não é número não passa por um intervalo numérico (falha fechada)
-    let Some(x) = parse_number(raw, 0).or_else(|| parse_number(raw, 2)) else {
+    let Some(x) = loose_number(raw) else {
         return Err("O valor inserido deve ser um número.".into());
     };
     if min.is_some_and(|m| x < m) || max.is_some_and(|m| x > m) {
@@ -952,14 +948,8 @@ pub fn parse_calc(js: &str) -> FieldCalc {
     }
     if let (Some(a), Some(b)) = (js_t.find("BVCALC"), js_t.find("EVCALC")) {
         let expr = js_t.get(a + 6..b).unwrap_or("").trim();
-        let ok = tokens(expr).is_some_and(|t| {
-            let mut e = Expr {
-                toks: &t,
-                at: 0,
-                lookup: &|_: &str| 1.0,
-            };
-            !t.is_empty() && e.sum().is_some() && e.at == t.len()
-        });
+        let ok = tokens(expr)
+            .is_some_and(|t| !t.is_empty() && eval_tokens(&t, &|_: &str| 1.0).is_some());
         // só vale se o código depois do comentário é a tradução que o Acrobat grava para a
         // expressão: senão o comentário poderia dizer uma conta e o código fazer outra
         let squash = |s: &str| -> String {
@@ -1042,6 +1032,17 @@ pub fn calc_fields(c: &FieldCalc) -> Vec<String> {
     }
 }
 
+/// O valor da expressão inteira (`None` se sobrar símbolo ou a conta não fechar).
+fn eval_tokens(toks: &[Tok], lookup: &impl Fn(&str) -> f64) -> Option<f64> {
+    let mut e = Expr {
+        toks,
+        at: 0,
+        lookup,
+    };
+    let v = e.sum()?;
+    (e.at == toks.len()).then_some(v)
+}
+
 /// Calcula com os valores dos campos (`lookup`: o número de cada campo, 0 se vazio).
 pub fn evaluate(c: &FieldCalc, lookup: &impl Fn(&str) -> f64) -> Option<f64> {
     let v = match c {
@@ -1058,29 +1059,20 @@ pub fn evaluate(c: &FieldCalc, lookup: &impl Fn(&str) -> f64) -> Option<f64> {
                 CalcOp::Max => vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
             }
         }
-        FieldCalc::Sfn(expr) => {
-            let toks = tokens(expr)?;
-            let mut e = Expr {
-                toks: &toks,
-                at: 0,
-                lookup,
-            };
-            let v = e.sum()?;
-            if e.at != toks.len() {
-                return None;
-            }
-            v
-        }
+        FieldCalc::Sfn(expr) => eval_tokens(&tokens(expr)?, lookup)?,
         _ => return None,
     };
     v.is_finite().then_some(v)
 }
 
+/// O número de um valor digitado, com ponto ou vírgula decimal (`None` se não for número).
+pub fn loose_number(raw: &str) -> Option<f64> {
+    parse_number(raw, 0).or_else(|| parse_number(raw, 2))
+}
+
 /// O número de um valor cru (para Calcular): vazio ou não numérico vale 0.
 pub fn number_of(raw: &str) -> f64 {
-    parse_number(raw, 0)
-        .or_else(|| parse_number(raw, 2))
-        .unwrap_or(0.0)
+    loose_number(raw).unwrap_or(0.0)
 }
 
 #[cfg(test)]

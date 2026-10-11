@@ -3431,7 +3431,7 @@ impl DocTab {
 
     /// Aviso de valor recusado pelo campo (Formatar ou Validar), como o alerta do Acrobat.
     fn field_alert_window(&mut self, ctx: &egui::Context) {
-        let Some(msg) = self.form.alert.clone() else {
+        let Some(msg) = self.form.alert.as_deref() else {
             return;
         };
         let mut open = true;
@@ -3442,7 +3442,7 @@ impl DocTab {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                ui.label(crate::links::safe_display(&msg));
+                ui.label(crate::links::safe_display(msg));
                 ok = ui.button("OK").clicked();
             });
         if ok || !open {
