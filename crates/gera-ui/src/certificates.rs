@@ -286,11 +286,15 @@ mod tests {
             readonly: false,
             required: false,
             tooltip: String::new(),
+            keystroke: Default::default(),
+            format: Default::default(),
+            validate: Default::default(),
+            calc: Default::default(),
         };
         let fields = [field(1, FieldKind::Signature)];
         assert_eq!(empty_sig_field(&fields, &[], 0, (10.0, 10.0)), Some(1));
         assert_eq!(empty_sig_field(&fields, &[], 0, (200.0, 10.0)), None);
-        let text = [field(2, FieldKind::Button)];
+        let text = [field(2, FieldKind::Button { reset: false })];
         assert_eq!(empty_sig_field(&text, &[], 0, (10.0, 10.0)), None);
     }
 }

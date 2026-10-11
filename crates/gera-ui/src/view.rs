@@ -7,8 +7,9 @@ use pdf_core::{CancelToken, PageSize, RenderedPage, Request, Rotation, Worker};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-/// (página, escala quantizada, invertido, rotação)
-pub type RenderKey = (i32, u32, bool, Rotation);
+/// (página, escala quantizada, rotação). As páginas nunca são invertidas: ficam brancas em
+/// qualquer tema.
+pub type RenderKey = (i32, u32, Rotation);
 
 /// Orçamento de pixels de uma página renderizada na tela (16 Mpx = 64 MB em RGBA); além disso a
 /// página é só ampliada a partir de uma imagem com menos detalhe, em vez de gastar memória.
@@ -30,8 +31,8 @@ const _: () = assert!(
 );
 const _: () = assert!(app_state::tiles::MAX_TILES >= 9 * 6);
 
-/// (página, escala quantizada, invertido, rotação, coluna, linha)
-pub type TileKey = (i32, u32, bool, Rotation, u32, u32);
+/// (página, escala quantizada, rotação, coluna, linha)
+pub type TileKey = (i32, u32, Rotation, u32, u32);
 
 struct CachedTexture {
     handle: egui::TextureHandle,
@@ -60,6 +61,7 @@ pub struct DocView {
     /// Largura e altura da maior linha com zoom 1 (base dos ajustes).
     base: (f32, f32),
     pub layout: Layout,
+    /// Tema escuro: só o fundo em volta das páginas escurece (as páginas ficam brancas).
     pub dark: bool,
     ppp: f32,
     /// Maior lado de textura aceito pela GPU (em pixels).
@@ -309,7 +311,7 @@ impl DocView {
     }
 
     fn key(&self, page: i32, scale: f32) -> RenderKey {
-        (page, zoom::quantize(scale), self.dark, self.rotation)
+        (page, zoom::quantize(scale), self.rotation)
     }
 
     /// Posição de rolagem que mostra a página `page` (no ponto `at` dela, ou no topo), com folga
@@ -396,14 +398,7 @@ impl DocView {
         tile: (u32, u32),
     ) -> Option<(egui::TextureId, egui::Vec2, egui::Vec2)> {
         let scale = self.page_scale();
-        let key = (
-            page,
-            zoom::quantize(scale),
-            self.dark,
-            self.rotation,
-            tile.0,
-            tile.1,
-        );
+        let key = (page, zoom::quantize(scale), self.rotation, tile.0, tile.1);
         self.wanted_tiles.insert(key);
         if let Some(t) = self.tiles.get(&key) {
             let side = pdf_core::TILE as f32 / self.ppp;
@@ -415,7 +410,7 @@ impl DocView {
             worker.send(Request::RenderTile {
                 page,
                 scale,
-                invert: self.dark,
+                invert: false,
                 rotation: self.rotation,
                 tile,
                 cancel,
@@ -435,19 +430,9 @@ impl DocView {
         tile: (u32, u32),
         img: RenderedPage,
     ) {
-        let key = (
-            page,
-            zoom::quantize(scale),
-            invert,
-            rotation,
-            tile.0,
-            tile.1,
-        );
+        let key = (page, zoom::quantize(scale), rotation, tile.0, tile.1);
         // como em `on_rendered`: só o que ainda está sendo esperado
-        if self.requested_tiles.remove(&key).is_none()
-            || invert != self.dark
-            || rotation != self.rotation
-        {
+        if self.requested_tiles.remove(&key).is_none() || invert || rotation != self.rotation {
             return;
         }
         let name = format!("t{page}-{}-{}-{}", key.1, tile.0, tile.1);
@@ -473,11 +458,10 @@ impl DocView {
 
     /// Qualquer textura da página (de outra escala): serve de placeholder enquanto a nítida não chega.
     pub fn any_texture(&self, page: i32) -> Option<egui::TextureId> {
-        let (dark, rotation) = (self.dark, self.rotation);
         let key = self
             .cache
             .keys()
-            .find(|k| k.0 == page && k.2 == dark && k.3 == rotation)?;
+            .find(|k| k.0 == page && k.2 == self.rotation)?;
         self.cache.peek(key).map(|t| t.handle.id())
     }
 
@@ -492,7 +476,7 @@ impl DocView {
         worker.send(Request::Render {
             page,
             scale,
-            invert: self.dark,
+            invert: false,
             rotation: self.rotation,
             cancel,
         });
@@ -507,11 +491,10 @@ impl DocView {
         rotation: Rotation,
         img: RenderedPage,
     ) {
-        let key = (page, zoom::quantize(scale), invert, rotation);
+        let key = (page, zoom::quantize(scale), rotation);
         // Só entra no cache o que ainda está sendo esperado: respostas de pedidos cancelados
-        // (outra rotação, outro tema, aba suspensa) seriam memória desperdiçada.
-        if self.requested.remove(&key).is_none() || invert != self.dark || rotation != self.rotation
-        {
+        // (outra rotação, aba suspensa) seriam memória desperdiçada.
+        if self.requested.remove(&key).is_none() || invert || rotation != self.rotation {
             return;
         }
         let name = format!("p{}-{}", key.0, key.1);
@@ -569,6 +552,17 @@ mod tests {
             3
         ];
         DocView::new(PathBuf::from("x.pdf"), sizes)
+    }
+
+    #[test]
+    fn dark_theme_keeps_pages_white() {
+        let mut v = view();
+        v.dark = true;
+        assert_eq!(
+            v.key(0, 1.0),
+            view().key(0, 1.0),
+            "o tema escuro não muda as páginas"
+        );
     }
 
     #[test]

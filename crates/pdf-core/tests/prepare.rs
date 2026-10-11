@@ -485,3 +485,163 @@ fn editing_one_radio_keeps_the_group_default() {
         "o padrão do grupo continua"
     );
 }
+
+fn props(d: &PdfDoc, name: &str) -> (i32, FieldProps) {
+    let f = d.fields(0).unwrap();
+    let id = by_name(&f, name).id;
+    (id, d.field_props(0, id).unwrap())
+}
+
+#[test]
+fn button_and_date_fields_are_created() {
+    let (_d, path, mut d) = doc();
+    d.add_field(0, r(100.0), NewFieldKind::Button, "Botão1")
+        .unwrap();
+    d.add_field(0, r(150.0), NewFieldKind::Date, "Data1")
+        .unwrap();
+    let (id, mut p) = props(&d, "Botão1");
+    assert_eq!(p.button_label, "Botão1");
+    p.button_label = "Limpar".into();
+    p.reset_action = true;
+    d.set_field_props(0, id, &p).unwrap();
+    d.save(&path).unwrap();
+    let d = PdfDoc::open(&path, None).unwrap();
+    let f = d.fields(0).unwrap();
+    assert_eq!(
+        by_name(&f, "Botão1").kind,
+        FieldKind::Button { reset: true }
+    );
+    let (_, p) = props(&d, "Botão1");
+    assert_eq!((p.button_label.as_str(), p.reset_action), ("Limpar", true));
+    let data = by_name(&f, "Data1");
+    assert!(matches!(data.kind, FieldKind::Text { .. }));
+    assert_eq!(
+        data.format,
+        pdf_core::FieldFormat::Date("dd/mm/yyyy".into())
+    );
+}
+
+#[test]
+fn format_validate_calc_props_round_trip() {
+    let (_d, path, mut d) = doc();
+    for (k, name) in ["A", "B", "Total"].into_iter().enumerate() {
+        d.add_field(0, r(100.0 + 40.0 * k as f32), NewFieldKind::Text, name)
+            .unwrap();
+    }
+    let (id, mut p) = props(&d, "Total");
+    p.format = pdf_core::FieldFormat::Number {
+        dec: 2,
+        sep: 2,
+        neg: 0,
+        currency: "R$ ".into(),
+        prepend: true,
+    };
+    p.validate = pdf_core::FieldValidate::Range {
+        min: Some(0.0),
+        max: None,
+    };
+    p.calc = pdf_core::FieldCalc::Simple {
+        op: pdf_core::CalcOp::Sum,
+        fields: vec!["A".into(), "B".into()],
+    };
+    d.set_field_props(0, id, &p).unwrap();
+    d.save(&path).unwrap();
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let (id, back) = props(&d, "Total");
+    assert_eq!(
+        (&back.format, &back.validate, &back.calc),
+        (&p.format, &p.validate, &p.calc)
+    );
+    assert_eq!(d.calc_order_names().unwrap(), ["Total"]);
+    // preencher A recalcula o Total
+    let a = by_name(&d.fields(0).unwrap(), "A").id;
+    d.set_field(0, a, "7").unwrap();
+    let fields = d.fields(0).unwrap();
+    let total = by_name(&fields, "Total");
+    assert_eq!(
+        pdf_core::format_value(&total.format, &total.value)
+            .unwrap()
+            .text,
+        "R$ 7,00"
+    );
+    let mut none = back.clone();
+    none.calc = pdf_core::FieldCalc::None;
+    d.set_field_props(0, id, &none).unwrap();
+    assert!(
+        d.calc_order_names().unwrap().is_empty(),
+        "sai da ordem de cálculo"
+    );
+}
+
+#[test]
+fn calc_order_is_saved() {
+    let (_d, _p, mut d) = doc();
+    for (k, name) in ["X", "S1", "S2"].into_iter().enumerate() {
+        d.add_field(0, r(100.0 + 40.0 * k as f32), NewFieldKind::Text, name)
+            .unwrap();
+    }
+    for name in ["S1", "S2"] {
+        let (id, mut p) = props(&d, name);
+        p.calc = pdf_core::FieldCalc::Sfn("X * 2".into());
+        d.set_field_props(0, id, &p).unwrap();
+    }
+    assert_eq!(d.calc_order_names().unwrap(), ["S1", "S2"]);
+    d.prepare(pdf_core::PrepareOp::SetCalcOrder {
+        names: vec!["S2".into(), "S1".into()],
+    })
+    .unwrap();
+    assert_eq!(d.calc_order_names().unwrap(), ["S2", "S1"]);
+    d.undo().unwrap();
+    assert_eq!(d.calc_order_names().unwrap(), ["S1", "S2"]);
+}
+
+#[test]
+fn row_column_and_manual_orders() {
+    let (_d, path, mut d) = doc();
+    // A à direita na primeira linha, B à esquerda dela, C embaixo de B
+    for (name, x, y) in [
+        ("A", 300.0, 100.0),
+        ("B", 100.0, 100.0),
+        ("C", 100.0, 300.0),
+    ] {
+        d.add_field(
+            0,
+            PdfRect::new(x, y, x + 120.0, y + 22.0),
+            NewFieldKind::Text,
+            name,
+        )
+        .unwrap();
+    }
+    let names =
+        |d: &PdfDoc| -> Vec<String> { d.fields(0).unwrap().into_iter().map(|f| f.name).collect() };
+    assert_eq!(
+        names(&d),
+        ["A", "B", "C"],
+        "pela estrutura: a ordem de criação"
+    );
+    let set = |d: &mut PdfDoc, order| {
+        d.prepare(pdf_core::PrepareOp::SetTabOrder { page: 0, order })
+            .unwrap()
+    };
+    set(&mut d, pdf_core::TabOrder::Row);
+    assert_eq!(names(&d), ["B", "A", "C"]);
+    set(&mut d, pdf_core::TabOrder::Column);
+    assert_eq!(names(&d), ["B", "C", "A"]);
+    let ids: Vec<i32> = d.fields(0).unwrap().iter().map(|f| f.id).collect();
+    set(
+        &mut d,
+        pdf_core::TabOrder::Manual(vec![ids[1], ids[2], ids[0]]),
+    );
+    assert_eq!(names(&d), ["C", "A", "B"]);
+    d.save(&path).unwrap();
+    let back = PdfDoc::open(&path, None).unwrap();
+    assert_eq!(names(&back), ["C", "A", "B"]);
+    assert_eq!(
+        back.tab_order_kind(0).unwrap(),
+        pdf_core::TabOrder::Structure
+    );
+    let mut d = back;
+    set(&mut d, pdf_core::TabOrder::Row);
+    d.undo().unwrap();
+    assert_eq!(names(&d), ["C", "A", "B"], "desfazer volta a ordem");
+}

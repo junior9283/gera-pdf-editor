@@ -1090,11 +1090,11 @@ impl DocTab {
         }
     }
 
+    /// Tema escuro: escurece o fundo em volta das páginas; as páginas continuam brancas.
     pub fn set_dark(&mut self, dark: bool) {
         self.dark = dark;
         if let Some(view) = self.view.as_mut() {
             view.dark = dark;
-            view.clear_cache();
         }
     }
 
@@ -1628,6 +1628,12 @@ impl DocTab {
                         pages.into_iter().for_each(|p| view.invalidate_page(p));
                     }
                 }
+                Response::FieldRefused(msg) => self.form.alert = Some(msg),
+                Response::CalcOrder(names) => {
+                    if self.prepare.calc_order.is_some() {
+                        self.prepare.calc_order = Some(names);
+                    }
+                }
                 Response::FieldProps { page, id, props } => {
                     if self.prepare.props_for.take() == Some((page, id)) {
                         let kind = self.fields.iter().find(|f| f.page == page && f.id == id);
@@ -1635,7 +1641,11 @@ impl DocTab {
                             (Ok(props), Some(f)) => {
                                 self.prepare.props =
                                     Some(crate::shell::field_props::FieldPropsWindow::new(
-                                        page, id, &f.kind, props,
+                                        page,
+                                        id,
+                                        &f.kind,
+                                        props,
+                                        self.field_names(),
                                     ));
                             }
                             (Err(e), _) => {
@@ -1717,6 +1727,7 @@ impl DocTab {
         }
         if !typing {
             self.nudge_selected(ctx);
+            self.prepare_keys(ctx);
             let nav = [
                 (NavKey::PageUp, egui::Key::PageUp),
                 (NavKey::PageDown, egui::Key::PageDown),
@@ -2180,7 +2191,7 @@ impl DocTab {
                     .send(Request::Prepare(pdf_core::PrepareOp::SetProps {
                         page,
                         id,
-                        props,
+                        props: Box::new(props),
                     }));
             }
         }
@@ -2448,6 +2459,8 @@ impl DocTab {
         self.ocr_window(ui.ctx());
         self.sign_window(ui.ctx());
         self.split_window(ui);
+        self.calc_order_window(ui.ctx());
+        self.field_alert_window(ui.ctx());
         self.stamp_windows(ui.ctx());
         self.poll_files();
         self.identity_window(ui);
@@ -3386,6 +3399,120 @@ impl DocTab {
         }
     }
 
+    /// Manda uma alteração do Preparar formulário ao worker.
+    pub(crate) fn send_prepare(&self, op: pdf_core::PrepareOp) {
+        self.worker.send(Request::Prepare(op));
+    }
+
+    /// Abre a janela Ordem de cálculo (os nomes vêm do worker).
+    pub(crate) fn open_calc_order(&mut self) {
+        self.prepare.calc_order = Some(Vec::new());
+        self.worker.send(Request::CalcOrder);
+    }
+
+    /// Atalhos do Preparar formulário: `Shift+N` mostra e esconde a ordem de tabulação. Ao
+    /// preencher, `Shift+L` liga e desliga Realçar campos.
+    fn prepare_keys(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        if !self.prepare_tools {
+            if !self.fields.is_empty()
+                && ctx.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::L))
+            {
+                self.form.highlight = !self.form.highlight;
+            }
+            return;
+        }
+        if ctx.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::N)) {
+            self.prepare.show_order = !self.prepare.show_order;
+        }
+    }
+
+    /// Aviso de valor recusado pelo campo (Formatar ou Validar), como o alerta do Acrobat.
+    fn field_alert_window(&mut self, ctx: &egui::Context) {
+        let Some(msg) = self.form.alert.as_deref() else {
+            return;
+        };
+        let mut open = true;
+        let mut ok = false;
+        egui::Window::new("Aviso")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(crate::links::safe_display(msg));
+                ok = ui.button("OK").clicked();
+            });
+        if ok || !open {
+            self.form.alert = None;
+        }
+    }
+
+    /// Janela Ordem de cálculo: os campos calculados, com subir e descer.
+    fn calc_order_window(&mut self, ctx: &egui::Context) {
+        let Some(names) = self.prepare.calc_order.as_mut() else {
+            return;
+        };
+        let mut open = true;
+        let mut done = None;
+        egui::Window::new("Ordem de cálculo")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                if names.is_empty() {
+                    ui.label("Nenhum campo calculado.");
+                }
+                let mut swap = None;
+                let n = names.len();
+                for (k, name) in names.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{}. {}", k + 1, crate::links::safe_display(name)));
+                        if ui.add_enabled(k > 0, egui::Button::new("▲")).clicked() {
+                            swap = Some((k, k - 1));
+                        }
+                        if ui.add_enabled(k + 1 < n, egui::Button::new("▼")).clicked() {
+                            swap = Some((k, k + 1));
+                        }
+                    });
+                }
+                if let Some((a, b)) = swap {
+                    names.swap(a, b);
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() {
+                        done = Some(Some(names.clone()));
+                    }
+                    if ui.button("Cancelar").clicked() {
+                        done = Some(None);
+                    }
+                });
+            });
+        if !open {
+            done = Some(None);
+        }
+        if let Some(choice) = done {
+            self.prepare.calc_order = None;
+            if let Some(names) = choice.filter(|n| !n.is_empty()) {
+                self.send_prepare(pdf_core::PrepareOp::SetCalcOrder { names });
+            }
+        }
+    }
+
+    /// Nomes dos campos do documento, sem repetir (um grupo de botões aparece uma vez).
+    fn field_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for f in &self.fields {
+            if !names.contains(&f.name) {
+                names.push(f.name.clone());
+            }
+        }
+        names
+    }
+
     /// Janela Resumir comentários: o resumo vai para a pasta privada e abre numa aba nova, sem
     /// lugar escolhido (Salvar pergunta onde gravar), como o PDF novo do Acrobat.
     fn summary_window(&mut self, ctx: &egui::Context) {
@@ -3628,6 +3755,10 @@ impl DocTab {
             match action {
                 crate::fields::FieldAction::Set { page, id, value } => {
                     self.worker.send(Request::SetField { page, id, value })
+                }
+                // botão Redefinir formulário: limpa na hora (como o Acrobat; o desfazer volta)
+                crate::fields::FieldAction::Reset { page, id } => {
+                    self.worker.send(Request::PressReset { page, id })
                 }
                 // como no Acrobat: com Preencher e assinar ativo, o campo recebe a assinatura
                 // manuscrita; senão, o campo vazio abre a assinatura com ID digital

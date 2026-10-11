@@ -15,6 +15,7 @@ mod doc;
 mod edit_images;
 mod edit_text;
 mod error;
+mod form_scripts;
 mod forms;
 mod layers;
 mod links;
@@ -58,6 +59,12 @@ pub use doc::{max_render_scale, PdfDoc};
 pub use edit_images::{ImageEdit, PageImage};
 pub use edit_text::{PageTextBlock, MIN_TEXT_WIDTH, NEW_TEXT_SIZE, TEXT_MARGIN};
 pub use error::{PdfError, Result};
+pub use form_scripts::{
+    calc_fields, calc_script, commit_value, edit_text, evaluate, format_scripts, format_value,
+    keystroke_ok, loose_number, number_of, parse_calc, parse_format, parse_validate, sfn_ok,
+    validate as validate_field, validate_script, CalcOp, FieldCalc, FieldFormat, FieldValidate,
+    Formatted, MONTHS, TIME_FORMATS,
+};
 pub use forms::{FieldInfo, FieldKind, FormNotes};
 pub use layers::LayerNode;
 pub use ocr::{tessdata_dir, OcrLanguage, OcrReport};
@@ -66,7 +73,7 @@ pub use pagination::{
     parse_ranges, Align, Bates, DateFormat, HeaderFooter, PageSet, Pagination, PaginationConfig,
     StdFont, TextLook, Watermark, WatermarkSource,
 };
-pub use prepare::{FieldProps, NewFieldKind, PrepareOp};
+pub use prepare::{FieldProps, NewFieldKind, PrepareOp, TabOrder};
 pub use properties_edit::valid_custom_name;
 pub use redact::{RedactHit, RedactLook, RedactPattern, RedactQuery, SanitizeOptions};
 pub use security::{Permissions, Protection, SecurityInfo};

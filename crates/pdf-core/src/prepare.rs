@@ -2,7 +2,11 @@
 //! alteração entra no histórico como instantâneo, como Limpar formulário.
 use crate::doc::{annot_id, PdfDoc};
 use crate::error::{PdfError, Result};
-use crate::forms::{field_head, kids_of, on_state, options_of};
+use crate::form_scripts::{
+    calc_script, format_scripts, parse_calc, parse_format, parse_validate, validate_script,
+    FieldCalc, FieldFormat, FieldValidate,
+};
+use crate::forms::{aa_script, field_head, kids_of, on_state, options_of, resets_form};
 use crate::types::PdfRect;
 use mupdf::pdf::{PdfAnnotationType, PdfDocument, PdfObject, PdfWidget};
 use mupdf::{Buffer, Rect};
@@ -16,6 +20,10 @@ pub enum NewFieldKind {
     Combo,
     List,
     Signature,
+    /// Botão de ação (rótulo; ação Redefinir formulário).
+    Button,
+    /// Campo de texto com Formatar = Data (`dd/mm/aaaa`) e o seletor de data ao preencher.
+    Date,
 }
 
 impl NewFieldKind {
@@ -28,6 +36,8 @@ impl NewFieldKind {
             Self::Combo => "Lista suspensa",
             Self::List => "Lista",
             Self::Signature => "Assinatura",
+            Self::Button => "Botão",
+            Self::Date => "Data",
         }
     }
 }
@@ -44,7 +54,7 @@ pub enum PrepareOp {
     SetProps {
         page: i32,
         id: i32,
-        props: FieldProps,
+        props: Box<FieldProps>,
     },
     Move {
         page: i32,
@@ -55,6 +65,28 @@ pub enum PrepareOp {
         page: i32,
         id: i32,
     },
+    /// Ordem dos cálculos (/AcroForm /CO), pelos nomes dos campos.
+    SetCalcOrder {
+        names: Vec<String>,
+    },
+    /// Ordem de tabulação da página (/Tabs; a manual reordena /Annots).
+    SetTabOrder {
+        page: i32,
+        order: TabOrder,
+    },
+}
+
+/// Ordem de tabulação, como no menu do Acrobat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TabOrder {
+    /// Por linha (/Tabs /R): de cima para baixo, da esquerda para a direita.
+    Row,
+    /// Por coluna (/Tabs /C).
+    Column,
+    /// Pela estrutura (/Tabs /S, ou sem /Tabs): a ordem de /Annots.
+    Structure,
+    /// Manual: os widgets nesta ordem (grava /Annots e /Tabs /S).
+    Manual(Vec<i32>),
 }
 
 /// Propriedades editáveis de um campo (a janela Propriedades do Acrobat). Os itens que não se
@@ -80,7 +112,17 @@ pub struct FieldProps {
     /// Valor de exportação da caixa ou do botão de opção.
     pub export: String,
     pub checked_default: bool,
+    /// Formatar, Validar e Calcular (campos de texto). `Custom` = script do arquivo, mantido.
+    pub format: FieldFormat,
+    pub validate: FieldValidate,
+    pub calc: FieldCalc,
+    /// Botão: rótulo (/MK /CA) e a ação Redefinir formulário.
+    pub button_label: String,
+    pub reset_action: bool,
 }
+
+/// Formato do campo Data novo, como o Acrobat em português.
+const DATE_FORMAT: &str = "dd/mm/yyyy";
 
 const READ_ONLY: i32 = 1;
 const REQUIRED: i32 = 1 << 1;
@@ -90,6 +132,7 @@ const NO_TOGGLE_TO_OFF: i32 = 1 << 14;
 const RADIO: i32 = 1 << 15;
 const COMBO: i32 = 1 << 17;
 const EDIT: i32 = 1 << 18;
+const PUSHBUTTON: i32 = 1 << 16;
 
 /// Valor de exportação padrão da caixa de seleção nova.
 const CHECK_ON: &str = "Sim";
@@ -181,22 +224,8 @@ fn acroform(doc: &mut PdfDocument) -> Result<PdfObject> {
     if acro.get_dict("DA")?.is_none() {
         acro.dict_put("DA", PdfObject::new_string("/Helv 0 Tf 0 g")?)?;
     }
-    let mut dr = match acro.get_dict("DR")? {
-        Some(dr) => dr,
-        None => {
-            acro.dict_put("DR", doc.new_dict()?)?;
-            acro.get_dict("DR")?
-                .ok_or_else(|| invalid("/AcroForm inválido"))?
-        }
-    };
-    let mut fonts = match dr.get_dict("Font")? {
-        Some(f) => f,
-        None => {
-            dr.dict_put("Font", doc.new_dict()?)?;
-            dr.get_dict("Font")?
-                .ok_or_else(|| invalid("/DR inválido"))?
-        }
-    };
+    let mut dr = child_or_new(doc, &mut acro, "DR", false)?;
+    let mut fonts = child_or_new(doc, &mut dr, "Font", false)?;
     for (key, base, enc) in [
         ("Helv", "Helvetica", "/Encoding/WinAnsiEncoding"),
         ("ZaDb", "ZapfDingbats", ""),
@@ -209,6 +238,75 @@ fn acroform(doc: &mut PdfDocument) -> Result<PdfObject> {
         }
     }
     Ok(acro)
+}
+
+/// O dicionário (ou array) `key` de `obj`, criado vazio se faltar ou for de outro tipo.
+fn child_or_new(
+    doc: &PdfDocument,
+    obj: &mut PdfObject,
+    key: &str,
+    array: bool,
+) -> Result<PdfObject> {
+    if let Some(c) = obj.get_dict(key)? {
+        if if array { c.is_array()? } else { c.is_dict()? } {
+            return Ok(c);
+        }
+    }
+    obj.dict_put(
+        key,
+        if array {
+            doc.new_array()?
+        } else {
+            doc.new_dict()?
+        },
+    )?;
+    obj.get_dict(key)?
+        .ok_or_else(|| invalid(&format!("/{key} inválido")))
+}
+
+/// Põe (ou tira, com `js` vazio) a ação JavaScript `key` de /AA do campo.
+fn set_aa(doc: &mut PdfDocument, head: &mut PdfObject, key: &str, js: &str) -> Result<()> {
+    if js.is_empty() && head.get_dict("AA")?.is_none() {
+        return Ok(());
+    }
+    let mut aa = child_or_new(doc, head, "AA", false)?;
+    if js.is_empty() {
+        aa.dict_delete(key)?;
+        if aa.dict_len()? == 0 {
+            head.dict_delete("AA")?;
+        }
+        return Ok(());
+    }
+    let mut action = doc.new_dict()?;
+    action.dict_put("S", name_obj("JavaScript")?)?;
+    action.dict_put("JS", PdfObject::new_string(js)?)?;
+    aa.dict_put(key, action)?;
+    Ok(())
+}
+
+/// A ordem de tabulação gravada no /Tabs da página.
+pub(crate) fn tab_order_of(page: &PdfObject) -> Result<TabOrder> {
+    let tabs = page.get_dict("Tabs")?.and_then(|t| t.as_name().ok());
+    Ok(match tabs.as_deref() {
+        Some(b"R") => TabOrder::Row,
+        Some(b"C") => TabOrder::Column,
+        _ => TabOrder::Structure,
+    })
+}
+
+/// Nome completo do campo (os /T do nó e dos pais, com ponto).
+pub(crate) fn full_name(head: &PdfObject) -> Result<String> {
+    let mut parts = Vec::new();
+    let mut node = Some(head.try_clone()?);
+    for _ in 0..32 {
+        let Some(n) = node else { break };
+        if let Some(t) = n.get_dict("T")? {
+            parts.push(t.as_string().unwrap_or_default());
+        }
+        node = n.get_dict("Parent")?;
+    }
+    parts.reverse();
+    Ok(parts.join("."))
 }
 
 /// /AP com os nomes dos estados ("ligado" e "Off") de uma caixa ou botão de opção. O desenho é do
@@ -331,7 +429,7 @@ impl PdfDoc {
         Ok(None)
     }
 
-    fn widget(&self, page: i32, id: i32) -> Result<PdfWidget> {
+    pub(crate) fn widget(&self, page: i32, id: i32) -> Result<PdfWidget> {
         self.check_page(page)?;
         self.inner
             .load_pdf_page(page)?
@@ -341,12 +439,14 @@ impl PdfDoc {
     }
 
     /// Redesenha os campos da página (aparências geradas pelo MuPDF).
-    fn refresh_widgets(&self, page: i32) -> Result<()> {
+    /// `plain`: o widget cujo Formatar acabou de mudar (redesenhado mesmo sem Formatar).
+    fn refresh_widgets(&mut self, page: i32, plain: Option<i32>) -> Result<()> {
         for mut w in self.inner.load_pdf_page(page)?.widgets() {
             // um campo defeituoso de outro programa fica como está; os nossos são redesenhados
             let _ = w.update();
         }
-        Ok(())
+        // o MuPDF redesenha com o /V cru: os campos com Formatar voltam a mostrar o formatado
+        self.redraw_values(Some(page), plain)
     }
 
     /// Cria um campo `kind` chamado `name` no retângulo; devolve o id. Botões de opção com o nome
@@ -414,6 +514,20 @@ impl PdfDoc {
                 w.dict_put("FT", name_obj("Tx")?)?;
                 w.dict_put("V", PdfObject::new_string("")?)?;
             }
+            NewFieldKind::Date => {
+                w.dict_put("FT", name_obj("Tx")?)?;
+                w.dict_put("V", PdfObject::new_string("")?)?;
+                let (f, k) = format_scripts(&FieldFormat::Date(DATE_FORMAT.into()));
+                set_aa(&mut self.inner, &mut w, "F", &f)?;
+                set_aa(&mut self.inner, &mut w, "K", &k)?;
+            }
+            NewFieldKind::Button => {
+                w.dict_put("FT", name_obj("Btn")?)?;
+                w.dict_put("Ff", int(PUSHBUTTON)?)?;
+                mk.dict_put("CA", PdfObject::new_string(name)?)?;
+                mk.dict_put("BG", self.inner.new_object_from_str("[0.8]")?)?;
+                mk.dict_put("BC", self.inner.new_object_from_str("[0.5]")?)?;
+            }
             NewFieldKind::Checkbox => {
                 w.dict_put("FT", name_obj("Btn")?)?;
                 w.dict_put("V", name_obj("Off")?)?;
@@ -450,7 +564,7 @@ impl PdfDoc {
         }
         annot.update()?;
         page_ref.update()?;
-        self.refresh_widgets(page)?;
+        self.refresh_widgets(page, None)?;
         Ok(id)
     }
 
@@ -478,7 +592,157 @@ impl PdfDoc {
             PrepareOp::SetProps { page, id, props } => self.set_field_props(page, id, &props),
             PrepareOp::Move { page, id, rect } => self.move_field(page, id, rect),
             PrepareOp::Delete { page, id } => self.delete_field(page, id),
+            PrepareOp::SetCalcOrder { names } => self.with_snapshot(|d| d.write_calc_order(&names)),
+            PrepareOp::SetTabOrder { page, order } => {
+                self.check_page(page)?;
+                self.with_snapshot(|d| d.write_tab_order(page, &order))
+            }
         }
+    }
+
+    /// A ordem de tabulação da página (pelo /Tabs).
+    pub fn tab_order_kind(&self, page: i32) -> Result<TabOrder> {
+        tab_order_of(&self.inner.load_pdf_page(page)?.object())
+    }
+
+    fn write_tab_order(&mut self, page: i32, order: &TabOrder) -> Result<()> {
+        let mut page_obj = self.inner.load_pdf_page(page)?.object();
+        let tabs = match order {
+            TabOrder::Row => "R",
+            TabOrder::Column => "C",
+            TabOrder::Structure => "S",
+            TabOrder::Manual(ids) => {
+                // os widgets citados entram juntos, na ordem pedida, onde estava o primeiro deles
+                let Some(annots) = page_obj
+                    .get_dict("Annots")?
+                    .filter(|a| a.is_array().unwrap_or(false))
+                else {
+                    return Ok(());
+                };
+                let items: Vec<PdfObject> = (0..annots.len()? as i32)
+                    .filter_map(|k| annots.get_array(k).ok().flatten())
+                    .collect();
+                let num = |o: &PdfObject| o.as_indirect().ok();
+                let listed: Vec<PdfObject> = ids
+                    .iter()
+                    .filter_map(|id| items.iter().find(|o| num(o) == Some(*id)).cloned())
+                    .collect();
+                let mut out = self.inner.new_array()?;
+                let mut placed = false;
+                for item in &items {
+                    if num(item).is_some_and(|n| ids.contains(&n)) {
+                        if !placed {
+                            for l in &listed {
+                                out.array_push(l.clone())?;
+                            }
+                            placed = true;
+                        }
+                    } else {
+                        out.array_push(item.clone())?;
+                    }
+                }
+                page_obj.dict_put("Annots", out)?;
+                "S"
+            }
+        };
+        page_obj.dict_put("Tabs", name_obj(tabs)?)?;
+        Ok(())
+    }
+
+    /// Nomes dos campos na ordem de cálculo (/AcroForm /CO).
+    pub fn calc_order_names(&self) -> Result<Vec<String>> {
+        let Some(co) = self
+            .inner
+            .catalog()?
+            .get_dict("AcroForm")?
+            .and_then(|a| a.get_dict("CO").ok().flatten())
+            .filter(|c| c.is_array().unwrap_or(false))
+        else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for k in 0..co.len()?.min(10_000) as i32 {
+            if let Some(head) = co.get_array(k)? {
+                let name = full_name(&head)?;
+                if !name.is_empty() {
+                    out.push(name);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Grava /CO com os campos nomeados (os que não existem ficam de fora).
+    fn write_calc_order(&mut self, names: &[String]) -> Result<()> {
+        // nome → nó, numa passada pelas páginas
+        let mut heads = std::collections::HashMap::new();
+        for p in 0..self.page_count()? {
+            for w in self.inner.load_pdf_page(p)?.widgets() {
+                // campo defeituoso (ex.: ciclo de /Parent) não impede os outros
+                if let (Some(name), Ok(head)) = (
+                    w.name().ok().flatten(),
+                    field_head(&w.annotation().object()),
+                ) {
+                    heads.entry(name).or_insert(head);
+                }
+            }
+        }
+        let mut co = self.inner.new_array()?;
+        for name in names {
+            if let Some(head) = heads.remove(name) {
+                co.array_push(head)?;
+            }
+        }
+        acroform(&mut self.inner)?.dict_put("CO", co)?;
+        Ok(())
+    }
+
+    /// Formatar, Validar e Calcular: só o que mudou é regravado (script do arquivo que o app não
+    /// entende continua intacto). O campo calculado entra no fim de /CO, e sai ao deixar de ser.
+    fn write_scripts(
+        &mut self,
+        head: &mut PdfObject,
+        p: &FieldProps,
+        before: &FieldProps,
+    ) -> Result<()> {
+        if p.format != before.format && p.format != FieldFormat::Custom {
+            let (f, k) = format_scripts(&p.format);
+            set_aa(&mut self.inner, head, "F", &f)?;
+            set_aa(&mut self.inner, head, "K", &k)?;
+        }
+        if p.validate != before.validate && p.validate != FieldValidate::Custom {
+            set_aa(&mut self.inner, head, "V", &validate_script(&p.validate))?;
+        }
+        if let FieldCalc::Sfn(expr) = &p.calc {
+            if p.calc != before.calc && !crate::form_scripts::sfn_ok(expr) {
+                return Err(crate::error::refused(
+                    "A expressão de cálculo não é válida.",
+                ));
+            }
+        }
+        if p.calc != before.calc && p.calc != FieldCalc::Custom {
+            set_aa(&mut self.inner, head, "C", &calc_script(&p.calc))?;
+            let num = head.as_indirect()?;
+            let mut acro = acroform(&mut self.inner)?;
+            let mut co = child_or_new(&self.inner, &mut acro, "CO", true)?;
+            remove_ref(&mut co, num)?;
+            if p.calc != FieldCalc::None {
+                co.array_push(head.clone())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Botão de ação: rótulo e a ação Redefinir formulário.
+    fn write_button(&mut self, obj: &mut PdfObject, p: &FieldProps) -> Result<()> {
+        let mut mk = child_or_new(&self.inner, obj, "MK", false)?;
+        mk.dict_put("CA", PdfObject::new_string(&p.button_label)?)?;
+        if p.reset_action {
+            obj.dict_put("A", self.inner.new_object_from_str("<</S/ResetForm>>")?)?;
+        } else if resets_form(obj)? {
+            obj.dict_delete("A")?;
+        }
+        Ok(())
     }
 
     /// Propriedades do campo `id`.
@@ -505,7 +769,15 @@ impl PdfDoc {
             String::new()
         };
         let default = text(head.get_dict("DV")?)?;
+        let label = obj
+            .get_dict("MK")?
+            .and_then(|mk| mk.get_dict("CA").ok().flatten());
         Ok(FieldProps {
+            format: parse_format(&aa_script(&head, "F")?),
+            validate: parse_validate(&aa_script(&head, "V")?),
+            calc: parse_calc(&aa_script(&head, "C")?),
+            button_label: text(label)?,
+            reset_action: is_button && flags & PUSHBUTTON != 0 && resets_form(&obj)?,
             name: partial_name(&head)?,
             tooltip: text(head.get_dict("TU")?)?,
             required: flags & REQUIRED != 0,
@@ -617,6 +889,7 @@ impl PdfDoc {
                     head.dict_put("DV", PdfObject::new_string(&p.default)?)?;
                     head.dict_put("V", PdfObject::new_string(&p.default)?)?;
                 }
+                self.write_scripts(&mut head, p, &before)?;
             }
             b"Ch" => {
                 if flags & COMBO != 0 {
@@ -626,11 +899,12 @@ impl PdfDoc {
                     self.write_options(&mut head, &p.options)?;
                 }
             }
+            b"Btn" if flags & PUSHBUTTON != 0 => self.write_button(&mut obj, p)?,
             b"Btn" => self.write_export(&mut obj, &mut head, p)?,
             _ => {}
         }
         head.dict_put("Ff", int(flags)?)?;
-        self.refresh_widgets(page)
+        self.refresh_widgets(page, Some(id))
     }
 
     /// Botão de opção `id` sai do grupo atual (que some se ficar vazio; o valor dele deixa de
@@ -775,7 +1049,7 @@ impl PdfDoc {
             let mut a = d.widget(page, id)?.into_annotation();
             a.set_rect(Rect::from(rect))?;
             a.update()?;
-            d.refresh_widgets(page)
+            d.refresh_widgets(page, None)
         })
     }
 

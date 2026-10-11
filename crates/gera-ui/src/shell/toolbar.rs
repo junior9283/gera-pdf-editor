@@ -161,10 +161,72 @@ pub fn prepare_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
             }
         }
         ui.separator();
+        ui.menu_button("Ordem", |ui| {
+            tab_order_menu(ui, doc);
+            ui.separator();
+            if ui.button("Ordem de cálculo…").clicked() {
+                doc.open_calc_order();
+                ui.close();
+            }
+        });
+        ui.separator();
         undo_redo(ui, doc, &mut out);
         close_row(ui, doc);
     });
     out
+}
+
+/// Menu Ordem de tabulação do Preparar formulário (como o do Acrobat).
+fn tab_order_menu(ui: &mut egui::Ui, doc: &mut DocTab) {
+    use pdf_core::{PrepareOp, TabOrder};
+    ui.checkbox(
+        &mut doc.prepare.show_order,
+        "Mostrar ordem de tabulação (Shift+N)",
+    );
+    ui.separator();
+    let page = doc.last.current_page as i32;
+    for (order, label) in [
+        (TabOrder::Row, "Ordenar por linha"),
+        (TabOrder::Column, "Ordenar por coluna"),
+        (TabOrder::Structure, "Ordenar pela estrutura"),
+    ] {
+        if ui.button(label).clicked() {
+            doc.prepare.show_order = true;
+            doc.send_prepare(PrepareOp::SetTabOrder { page, order });
+            ui.close();
+        }
+    }
+    ui.separator();
+    // os campos da página do selecionado, já na ordem de tabulação
+    let selected = doc.prepare.selected.map(|(p, id)| {
+        let ids: Vec<i32> = doc
+            .fields
+            .iter()
+            .filter(|f| f.page == p)
+            .map(|f| f.id)
+            .collect();
+        (p, id, ids)
+    });
+    for (up, label) in [
+        (true, "Mover o campo para cima na ordem"),
+        (false, "Mover o campo para baixo na ordem"),
+    ] {
+        let order = selected
+            .as_ref()
+            .and_then(|(p, id, ids)| crate::prepare::moved(ids, *id, up).map(|ids| (*p, ids)));
+        if ui
+            .add_enabled(order.is_some(), egui::Button::new(label))
+            .clicked()
+        {
+            if let Some((page, ids)) = order {
+                doc.prepare.show_order = true;
+                doc.send_prepare(PrepareOp::SetTabOrder {
+                    page,
+                    order: TabOrder::Manual(ids),
+                });
+            }
+        }
+    }
 }
 
 /// Linha do Editar PDF: acrescentar texto e imagens, girar, substituir e excluir imagens,

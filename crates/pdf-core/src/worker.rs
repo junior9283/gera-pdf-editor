@@ -126,6 +126,11 @@ pub enum Request {
     },
     /// Limpar formulário (valores padrão).
     ResetForm,
+    /// Clique num botão com a ação Redefinir formulário (só os campos da ação).
+    PressReset {
+        page: i32,
+        id: i32,
+    },
     /// Preparar formulário: criar, editar, mover ou excluir um campo.
     Prepare(crate::PrepareOp),
     /// Assina digitalmente e grava o arquivo (Certificados).
@@ -164,6 +169,8 @@ pub enum Request {
         page: i32,
         id: i32,
     },
+    /// Nomes dos campos na ordem de cálculo (responde `CalcOrder`).
+    CalcOrder,
     /// Imagens da página (Editar PDF).
     PageImages {
         page: i32,
@@ -445,6 +452,10 @@ pub enum Response {
         id: i32,
         props: Result<crate::FieldProps, String>,
     },
+    /// Nomes dos campos na ordem de cálculo (/CO).
+    CalcOrder(Vec<String>),
+    /// O valor não foi aceito pelo campo (formato ou validação): o aviso a mostrar.
+    FieldRefused(String),
 }
 
 const NO_DOC: &str = "nenhum documento aberto";
@@ -670,10 +681,19 @@ impl State {
                 });
             }
             Request::Annot(op) => self.edit(send, |d| d.apply(op).map(Changed::Pages)),
-            Request::SetField { page, id, value } => self.edit(send, |d| {
-                d.set_field(page, id, &value).map(|()| Changed::Fields)
-            }),
+            Request::SetField { page, id, value } => self.edit_or(
+                send,
+                |d| d.set_field(page, id, &value).map(|()| Changed::Fields),
+                // valor recusado pelo Formatar ou pelo Validar: o aviso do Acrobat, numa janela
+                |e| match e {
+                    crate::PdfError::Refused(msg) => Response::FieldRefused(msg),
+                    e => Response::EditFailed(e.to_string()),
+                },
+            ),
             Request::ResetForm => self.edit(send, |d| d.reset_form().map(|()| Changed::Document)),
+            Request::PressReset { page, id } => self.edit(send, |d| {
+                d.press_reset(page, id).map(|()| Changed::Document)
+            }),
             Request::SignDigitally {
                 place,
                 id,
@@ -733,6 +753,9 @@ impl State {
                     .with_doc(|d| d.field_props(page, id))
                     .map_err(|e| e.to_string()),
             }),
+            Request::CalcOrder => send(Response::CalcOrder(
+                self.with_doc(|d| d.calc_order_names()).unwrap_or_default(),
+            )),
             Request::Prepare(op) => self.edit(send, |d| d.prepare(op).map(|()| Changed::Fields)),
             Request::PageImages { page } => send(Response::PageImages {
                 page,
@@ -894,6 +917,16 @@ impl State {
         send: &dyn Fn(Response),
         f: impl FnOnce(&mut PdfDoc) -> crate::Result<Changed>,
     ) {
+        self.edit_or(send, f, |e| Response::EditFailed(e.to_string()));
+    }
+
+    /// Como `edit`, com a resposta de erro escolhida por quem pede.
+    fn edit_or(
+        &mut self,
+        send: &dyn Fn(Response),
+        f: impl FnOnce(&mut PdfDoc) -> crate::Result<Changed>,
+        failed: impl FnOnce(crate::PdfError) -> Response,
+    ) {
         let Some(d) = self.doc.as_mut() else {
             send(Response::EditFailed(NO_DOC.into()));
             return;
@@ -936,7 +969,7 @@ impl State {
                 pages,
                 history: d.history_state(),
             }),
-            Err(e) => send(Response::EditFailed(e.to_string())),
+            Err(e) => send(failed(e)),
         }
     }
 
