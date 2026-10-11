@@ -1,5 +1,6 @@
 mod app;
 mod bench;
+mod bookmarks;
 mod canvas;
 mod certificates;
 mod clipboard;

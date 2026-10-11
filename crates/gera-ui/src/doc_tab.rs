@@ -59,6 +59,8 @@ pub enum DocCommand {
     LastPage,
     /// Leva o foco ao campo da página.
     GoToPage,
+    /// Novo marcador (Ctrl+B).
+    NewBookmark,
     /// Zoom para…: leva o foco ao campo de zoom.
     ZoomTo,
     /// Escolhe a ferramenta (Selecionar, Mão, Zoom com marca; teclas únicas).
@@ -138,8 +140,10 @@ pub struct DocTab {
     pub(crate) display_title: Option<String>,
     /// Anexos do documento e dos comentários (painel Anexos).
     pub(crate) attachments: Vec<pdf_core::AttachmentInfo>,
-    /// Marcador recém-criado (o painel o seleciona e abre a renomeação).
-    pub(crate) bookmark_created: Option<i32>,
+    /// Painel Marcadores (seleção, renomeação, arraste, foco do teclado).
+    pub(crate) bookmarks: crate::bookmarks::BookmarksPanel,
+    /// Documento que não permite alterar: expandir e recolher só na tela (marcador → aberto).
+    bookmarks_open: std::collections::HashMap<i32, bool>,
     /// Arquivo → Reverter: a pergunta está aberta.
     pub(crate) revert_ask: bool,
     /// Depois de colar, seleciona o comentário mais novo desta página.
@@ -302,7 +306,8 @@ impl DocTab {
             pasted_files: Vec::new(),
             select_newest_on: None,
             revert_ask: false,
-            bookmark_created: None,
+            bookmarks: Default::default(),
+            bookmarks_open: Default::default(),
             attachments: Vec::new(),
             display_title: None,
             marquee: None,
@@ -413,6 +418,7 @@ impl DocTab {
                 self.revert_ask = self.can_revert();
                 return;
             }
+            DocCommand::NewBookmark => return self.new_bookmark(),
             _ => {}
         }
         if self.navigate(cmd) {
@@ -526,7 +532,8 @@ impl DocTab {
             | DocCommand::ViewForward
             | DocCommand::FindNext
             | DocCommand::FindPrev
-            | DocCommand::Revert => {} // já tratados no começo
+            | DocCommand::Revert
+            | DocCommand::NewBookmark => {} // já tratados no começo
             DocCommand::Mode(mode) => {
                 view.set_mode(mode, page);
                 self.jump_to = view.go_to(page as i32, None);
@@ -1293,7 +1300,9 @@ impl DocTab {
                 } => {
                     self.outline = outline;
                     self.history = history;
-                    self.bookmark_created = created;
+                    if let Some(id) = created {
+                        self.bookmarks.created(id, &self.outline);
+                    }
                 }
                 Response::ContentBox { page, rect } => {
                     if let Some(view) = self.view.as_mut().filter(|v| v.fit == Fit::Visible) {
@@ -1520,6 +1529,12 @@ impl DocTab {
             } else if !self.form.escape() {
                 self.edit.escape();
             }
+        }
+        if !typing && self.bookmarks.focused {
+            // painel Marcadores focado: setas, Enter, Delete e F2 são dele
+            let nodes = self.outline_shown();
+            let actions = self.bookmarks.keys(ctx, &nodes);
+            self.bookmark_actions(actions);
         }
         if !typing {
             self.nudge_selected(ctx);
@@ -2254,6 +2269,18 @@ impl DocTab {
 
     /// Conteúdo do painel esquerdo; clicar leva à página.
     pub fn side_panel(&mut self, ui: &mut egui::Ui, panel: LeftPanel) {
+        if panel == LeftPanel::Outline {
+            let can_edit = self.security.permissions.modify;
+            let nodes = self.outline_shown();
+            let actions = ui
+                .push_id(self.id, |ui| {
+                    ui.strong(panel.label());
+                    self.bookmarks.show(ui, &nodes, can_edit)
+                })
+                .inner;
+            self.bookmark_actions(actions);
+            return;
+        }
         if panel == LeftPanel::Signatures {
             match crate::certificates::panel(ui, &self.cert.signatures, &self.fields) {
                 Some(crate::certificates::PanelAction::Validate) => {
@@ -2272,7 +2299,7 @@ impl DocTab {
         // cada aba com seu id: as listas guardam a própria rolagem
         let action = ui
             .push_id(self.id, |ui| {
-                sidebar::show(ui, panel, view, &self.worker, &self.outline, &self.annots)
+                sidebar::show(ui, panel, view, &self.worker, &self.annots)
             })
             .inner;
         let target = match action {
@@ -2284,6 +2311,73 @@ impl DocTab {
             }
         };
         self.jump(target.0, target.1);
+    }
+
+    /// Marcadores como aparecem: com expandir e recolher locais quando o documento não permite
+    /// alterar.
+    fn outline_shown(&self) -> Vec<pdf_core::OutlineNode> {
+        let mut nodes = self.outline.clone();
+        for n in &mut nodes {
+            if let Some(&open) = self.bookmarks_open.get(&n.id) {
+                n.open = open;
+            }
+        }
+        nodes
+    }
+
+    /// Executa o que o painel Marcadores pediu.
+    fn bookmark_actions(&mut self, actions: Vec<crate::bookmarks::BookmarkAction>) {
+        use crate::bookmarks::BookmarkAction;
+        for action in actions {
+            match action {
+                BookmarkAction::Go { page, at } => self.jump(page, at),
+                BookmarkAction::New => self.new_bookmark(),
+                BookmarkAction::DestinationHere(id) => {
+                    let (page, at) = self.view_target();
+                    self.outline_op(pdf_core::OutlineOp::SetDest { id, page, at });
+                }
+                BookmarkAction::Op(op) => self.outline_op(op),
+            }
+        }
+    }
+
+    /// Página e ponto do topo da vista atual (destino de marcador novo).
+    fn view_target(&self) -> (i32, Option<(f32, f32)>) {
+        let page = self.last.current_page;
+        let y = self
+            .view
+            .as_ref()
+            .map(|v| v.view_entry(self.last.scroll_y, page).y.max(0.0))
+            .unwrap_or(0.0);
+        (page as i32, Some((0.0, y)))
+    }
+
+    /// Ctrl+B: marcador novo depois do selecionado, com o texto selecionado como título.
+    fn new_bookmark(&mut self) {
+        let text = self
+            .edit
+            .selection
+            .as_ref()
+            .map(|s| s.text.clone())
+            .unwrap_or_default();
+        let (page, at) = self.view_target();
+        let op =
+            crate::bookmarks::new_bookmark(&self.outline, self.bookmarks.selected, &text, page, at);
+        self.events.push(DocEvent::ShowPanel(LeftPanel::Outline));
+        self.outline_op(op);
+    }
+
+    fn outline_op(&mut self, op: pdf_core::OutlineOp) {
+        if let pdf_core::OutlineOp::SetOpen { id, open } = op {
+            if !self.security.permissions.modify {
+                self.bookmarks_open.insert(id, open); // só na tela
+                return;
+            }
+        }
+        if !self.security.permissions.modify {
+            return self.deny("alterar os marcadores");
+        }
+        self.worker.send(Request::Outline(op));
     }
 
     /// ◀ campo da página / total ▶
@@ -2953,6 +3047,10 @@ impl DocTab {
         }
         if let Some(cmd) = turn {
             self.run(ui.ctx(), cmd);
+        }
+        // clique nas páginas: o teclado volta para o documento
+        if ui.input(|i| i.pointer.any_pressed()) && ui.rect_contains_pointer(ui.max_rect()) {
+            self.bookmarks.focused = false;
         }
         if let Some(action) = screen_action {
             self.screen_action(action);

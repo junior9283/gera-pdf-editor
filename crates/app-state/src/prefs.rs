@@ -31,7 +31,7 @@ impl LeftPanel {
     pub fn label(self) -> &'static str {
         match self {
             LeftPanel::Thumbnails => "Miniaturas",
-            LeftPanel::Outline => "Índice",
+            LeftPanel::Outline => "Marcadores",
             LeftPanel::Annotations => "Anotações",
             LeftPanel::Signatures => "Assinaturas",
         }

@@ -1,7 +1,7 @@
 use crate::view::DocView;
 use app_state::prefs::LeftPanel;
 use app_state::transform;
-use pdf_core::{AnnotInfo, AnnotKind, OutlineNode, PageSize, Rotation, Worker};
+use pdf_core::{AnnotInfo, AnnotKind, PageSize, Rotation, Worker};
 
 pub enum SidebarAction {
     None,
@@ -70,14 +70,14 @@ pub fn show(
     panel: LeftPanel,
     view: &mut DocView,
     worker: &Worker,
-    outline: &[OutlineNode],
     annots: &[AnnotInfo],
 ) -> SidebarAction {
     ui.strong(panel.label());
     ui.separator();
     match panel {
         LeftPanel::Thumbnails => thumbnails(ui, view, worker),
-        LeftPanel::Outline => outline_list(ui, outline),
+        // os marcadores têm painel próprio (bookmarks.rs)
+        LeftPanel::Outline => SidebarAction::None,
         LeftPanel::Annotations => annotation_list(ui, annots),
         // desenhado pela aba (precisa das assinaturas validadas)
         LeftPanel::Signatures => SidebarAction::None,
@@ -125,35 +125,6 @@ fn thumbnails(ui: &mut egui::Ui, view: &mut DocView, worker: &Worker) -> Sidebar
                 if response.clicked() {
                     action = SidebarAction::JumpToPage(i);
                 }
-            }
-        },
-    );
-    action
-}
-
-fn outline_list(ui: &mut egui::Ui, outline: &[OutlineNode]) -> SidebarAction {
-    if outline.is_empty() {
-        ui.label("Este documento não tem índice.");
-        return SidebarAction::None;
-    }
-    let row_h = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
-    let mut action = SidebarAction::None;
-    egui::ScrollArea::vertical().auto_shrink(false).show_rows(
-        ui,
-        row_h,
-        outline.len(),
-        |ui, rows| {
-            for item in &outline[rows] {
-                ui.horizontal(|ui| {
-                    ui.add_space(12.0 * item.depth as f32);
-                    let button = egui::Button::new(&item.title).frame(false);
-                    if let (true, Some(page)) = (
-                        ui.add_enabled(item.page.is_some(), button).clicked(),
-                        item.page,
-                    ) {
-                        action = SidebarAction::JumpToPage(page.max(0) as usize);
-                    }
-                });
             }
         },
     );

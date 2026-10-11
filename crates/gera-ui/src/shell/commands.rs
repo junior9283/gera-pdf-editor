@@ -96,6 +96,7 @@ impl Command {
                 DocCommand::NextPage => "Próxima página",
                 DocCommand::LastPage => "Última página",
                 DocCommand::GoToPage => "Ir para página…",
+                DocCommand::NewBookmark => "Novo marcador",
                 DocCommand::ZoomTo => "Zoom para…",
                 DocCommand::Tool(t) => return t.label().into(),
                 DocCommand::CycleMarkup => "Alternar destacar e sublinhar",
@@ -191,6 +192,7 @@ pub fn shortcuts() -> Vec<(KeyboardShortcut, Command)> {
         (cmd(Key::Y), doc(DocCommand::ZoomTo)),
         (cmd(Key::L), Command::FullScreen),
         (cmd(Key::K), Command::Preferences),
+        (cmd(Key::B), doc(DocCommand::NewBookmark)),
         (cmd(Key::H), Command::ReadMode),
         (
             KeyboardShortcut::new(Modifiers::NONE, Key::F11),
