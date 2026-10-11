@@ -2478,7 +2478,9 @@ impl DocTab {
             let actions = ui
                 .push_id(self.id, |ui| {
                     ui.strong(panel.label());
-                    self.layers_panel.show(ui, &self.layers, can_edit)
+                    let can_toggle = self.cert.signatures.is_empty();
+                    self.layers_panel
+                        .show(ui, &self.layers, can_edit, can_toggle)
                 })
                 .inner;
             for action in actions {

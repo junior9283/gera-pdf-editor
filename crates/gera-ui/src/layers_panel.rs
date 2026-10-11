@@ -157,11 +157,13 @@ impl LayersPanel {
         self.rows = None;
     }
 
+    /// `can_toggle`: o olho funciona (num documento assinado, não).
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
         tree: &[LayerNode],
         can_edit: bool,
+        can_toggle: bool,
     ) -> Vec<LayerAction> {
         let mut out = Vec::new();
         if tree.is_empty() {
@@ -233,9 +235,14 @@ impl LayersPanel {
                         };
                         let mut on = row.visible;
                         let eye = ui
-                            .add_enabled(!row.locked, egui::Checkbox::new(&mut on, &row.text))
+                            .add_enabled(
+                                !row.locked && can_toggle,
+                                egui::Checkbox::new(&mut on, &row.text),
+                            )
                             .on_hover_text(if row.locked {
                                 "Camada travada"
+                            } else if !can_toggle {
+                                "Documento assinado: a visibilidade das camadas fica como no arquivo"
                             } else {
                                 "Mostrar ou ocultar a camada"
                             });

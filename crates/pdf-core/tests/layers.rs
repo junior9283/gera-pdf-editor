@@ -211,3 +211,35 @@ fn eye_state_never_reaches_a_compressed_copy() {
         "a cópia comprimida guarda o estado inicial"
     );
 }
+
+#[test]
+fn eye_is_refused_in_a_signed_document() {
+    use pdf_core::{DigitalId, PdfRect, SignPlace};
+    let dir = tempfile::tempdir().unwrap();
+    let (path, mut d) = layered(&dir);
+    let id = DigitalId::create_self_signed("Ana", "a@b.c", "", "s3nha", &dir.path().join("a.pfx"))
+        .unwrap();
+    d.sign_digitally(
+        SignPlace::New {
+            page: 0,
+            rect: PdfRect::new(100.0, 300.0, 300.0, 360.0),
+        },
+        &id,
+        "r",
+        "l",
+    )
+    .unwrap();
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let a = id_of(&d, "A");
+    assert!(
+        d.set_layer_view(a, false).is_err(),
+        "assinado: o olho não muda o arquivo"
+    );
+    let out = dir.path().join("copia.pdf");
+    d.save(&out).unwrap();
+    let s = PdfDoc::open(&out, None).unwrap().signatures().unwrap();
+    assert!(
+        !s[0].modified_after,
+        "nenhuma revisão nova depois da assinatura"
+    );
+}

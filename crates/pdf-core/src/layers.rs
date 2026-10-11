@@ -281,6 +281,13 @@ impl PdfDoc {
         if self.locked().contains(&id) {
             return Err(refused("a camada está travada"));
         }
+        // assinado: o documento só pode ser gravado de forma incremental, e reabrir pelos bytes
+        // deixaria cada clique como uma revisão depois da assinatura
+        if self.signed_on_disk || self.has_signatures()? {
+            return Err(refused(
+                "o documento está assinado: a visibilidade das camadas fica como no arquivo",
+            ));
+        }
         self.layer_view.insert(id, on);
         self.apply_layer_view()
     }
