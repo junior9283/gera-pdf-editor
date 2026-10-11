@@ -28,6 +28,7 @@ mod redact_tool;
 mod search;
 mod shell;
 mod sidebar;
+mod summary_dialog;
 mod thumbnails;
 mod view;
 

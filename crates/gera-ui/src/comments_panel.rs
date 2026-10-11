@@ -34,6 +34,17 @@ pub enum PanelAction {
         selected: bool,
     },
     Import,
+    /// Menu "···" → Resumir comentários.
+    Summarize,
+}
+
+/// Comentários que o filtro do painel mostra (os principais), para o Resumir.
+pub fn shown(st: &PanelState, annots: &[AnnotInfo]) -> Vec<(i32, i32)> {
+    threads(annots)
+        .into_iter()
+        .filter(|t| st.filter.matches(t))
+        .map(|t| (t.root.page, t.root.id))
+        .collect()
 }
 
 /// Aviso do fim da importação.
@@ -301,6 +312,13 @@ fn toolbar(
             }
             if ui.button("Importar arquivo de dados…").clicked() {
                 out.push(PanelAction::Import);
+            }
+            ui.separator();
+            if ui
+                .add_enabled(!all.is_empty(), egui::Button::new("Resumir comentários…"))
+                .clicked()
+            {
+                out.push(PanelAction::Summarize);
             }
         });
     });

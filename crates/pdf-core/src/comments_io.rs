@@ -88,7 +88,7 @@ impl PdfDoc {
                 crate::xfdf::write(&self.inner, &picked, &name)?.into_bytes()
             }
         };
-        write_bytes_atomic(path, &bytes)?;
+        crate::doc::write_bytes_atomic(path, &bytes)?;
         Ok(picked.len())
     }
 
@@ -523,15 +523,5 @@ pub(crate) fn push_annot(
             page_obj.dict_put("Annots", list)?;
         }
     }
-    Ok(())
-}
-
-/// Grava os bytes num temporário ao lado e troca de nome (nunca deixa o arquivo pela metade).
-fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("gera-tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })?;
     Ok(())
 }

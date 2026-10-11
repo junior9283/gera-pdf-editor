@@ -231,6 +231,12 @@ pub enum Request {
         format: crate::CommentFormat,
         only: Option<Vec<(i32, i32)>>,
     },
+    /// Resumo dos comentários num PDF novo em `dest`: responde `AttachmentWritten { open: true }`
+    /// (abre numa aba sem lugar escolhido) ou `EditFailed`.
+    SummarizeComments {
+        options: crate::SummaryOptions,
+        dest: PathBuf,
+    },
     /// Comentários de um FDF, XFDF ou PDF: responde `CommentsImported` e `AnnotsChanged`.
     ImportComments {
         path: PathBuf,
@@ -809,6 +815,12 @@ impl State {
                 match self.with_doc(|d| d.export_comments(&path, format, only.as_deref())) {
                     Ok(_) => Response::ExportedTo(vec![path]),
                     Err(e) => Response::ExportToFailed(e),
+                },
+            ),
+            Request::SummarizeComments { options, dest } => send(
+                match self.with_doc(|d| crate::summarize_comments(d, &options, &dest)) {
+                    Ok(_) => Response::AttachmentWritten { dest, open: true },
+                    Err(e) => Response::EditFailed(e),
                 },
             ),
             Request::ImportComments { path } => {

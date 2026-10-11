@@ -283,6 +283,8 @@ pub struct DocTab {
     identity_name: String,
     /// Painel Comentários (busca, filtros, ordenação e resposta em digitação).
     comments: crate::comments_panel::PanelState,
+    /// Diálogo Resumir comentários, se aberto.
+    summary: Option<crate::summary_dialog::SummaryDialog>,
     /// Preencher formulários: realce, campo em edição, lista aberta.
     form: crate::fields::FormState,
     /// Diálogo Dividir documento aberto.
@@ -428,6 +430,7 @@ impl DocTab {
             turned_at: f64::NEG_INFINITY,
             identity_name: String::new(),
             comments: Default::default(),
+            summary: None,
             form: Default::default(),
             organize: None,
             split: None,
@@ -3312,6 +3315,13 @@ impl DocTab {
                     self.picking = Some(PickFor::ExportComments(only));
                     self.files.save_comment_data(ui.ctx(), suggested);
                 }
+                PanelAction::Summarize => {
+                    let pages = self
+                        .view
+                        .as_ref()
+                        .map_or(1, |v| v.layout.page_count() as i32);
+                    self.summary = Some(crate::summary_dialog::SummaryDialog::new(pages));
+                }
                 PanelAction::Import => {
                     if !self.security.permissions.annotate {
                         self.deny("importar comentários");
@@ -3322,7 +3332,42 @@ impl DocTab {
                 }
             }
         }
+        self.summary_window(ui.ctx());
         self.send_edits();
+    }
+
+    /// Janela Resumir comentários: o resumo vai para a pasta privada e abre numa aba nova, sem
+    /// lugar escolhido (Salvar pergunta onde gravar), como o PDF novo do Acrobat.
+    fn summary_window(&mut self, ctx: &egui::Context) {
+        use crate::summary_dialog::SummaryChoice;
+        let Some(choice) = self.summary.as_mut().and_then(|d| d.window(ctx)) else {
+            return;
+        };
+        let Some(dialog) = self.summary.take() else {
+            return;
+        };
+        if let SummaryChoice::Cancel = choice {
+            return;
+        }
+        let shown = crate::comments_panel::shown(&self.comments, &self.annots);
+        let options = dialog.options(Some(shown));
+        match crate::print_job::spool_dir() {
+            Ok(dir) => {
+                use crate::print_job::{spool_file_name, ATTACHMENT_PREFIX};
+                let stem = self
+                    .path
+                    .file_stem()
+                    .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+                let name = crate::attachments_panel::save_name(&format!(
+                    "Resumo de comentários em {stem}.pdf"
+                ));
+                let dest = dir.join(spool_file_name(ATTACHMENT_PREFIX, &format!("-{name}")));
+                self.status = "Criando o resumo dos comentários…".into();
+                self.worker
+                    .send(Request::SummarizeComments { options, dest });
+            }
+            Err(e) => self.status = format!("Não foi possível criar o resumo: {e}"),
+        }
     }
 
     /// Nome do usuário: vai para os carimbos dinâmicos e, no worker, como autor das anotações.
