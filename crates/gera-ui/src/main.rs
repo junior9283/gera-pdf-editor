@@ -7,6 +7,7 @@ mod certificates;
 mod clipboard;
 mod comments_panel;
 mod create;
+mod desktop;
 mod doc_tab;
 mod edit;
 mod edit_pdf;
@@ -39,10 +40,11 @@ fn main() -> eframe::Result {
             _ => paths.push(PathBuf::from(arg)),
         }
     }
+    desktop::integrate_appimage();
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1100.0, 800.0])
         .with_title("Gera PDF Editor")
-        .with_app_id("gera-pdf-editor");
+        .with_app_id(desktop::APP_ID);
     if let Some(icon) = icon::app_icon() {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
     }
