@@ -56,18 +56,22 @@ fn unique_name(wanted: &str, taken: &[String]) -> String {
         .unwrap_or_else(|| wanted.to_owned())
 }
 
-/// Nomes dos filtros do stream (`/Filter` nome ou lista).
-fn filters(stream: &PdfObject) -> Vec<String> {
+/// Nomes dos filtros do stream (`/Filter` nome ou lista). `None` quando a lista não é só de
+/// nomes ou é longa demais: o app não decide sobre o que o MuPDF leria diferente.
+fn filters(stream: &PdfObject) -> Option<Vec<String>> {
     let Some(f) = get(stream, "Filter") else {
-        return Vec::new();
+        return Some(Vec::new());
     };
     if f.is_array().unwrap_or(false) {
-        let len = f.len().unwrap_or(0).min(16) as i32;
-        (0..len)
-            .filter_map(|k| name_of(&f.get_array(k).ok()??))
+        let len = f.len().ok()?;
+        if len > 16 {
+            return None;
+        }
+        (0..len as i32)
+            .map(|k| name_of(&f.get_array(k).ok()??))
             .collect()
     } else {
-        name_of(&f).into_iter().collect()
+        Some(vec![name_of(&f)?])
     }
 }
 
@@ -97,9 +101,10 @@ fn inflate_capped(raw: &[u8], cap: usize) -> Option<Vec<u8>> {
 /// Conteúdo do stream com teto de `cap` bytes, sem descomprimir uma bomba: o tamanho declarado
 /// vem do arquivo e pode mentir. O Flate (o filtro dos anexos) é descomprimido aqui, em blocos e
 /// com teto; os demais filtros que expandem só valem para streams pequenos.
-fn read_capped(stream: &PdfObject, cap: usize) -> Result<Vec<u8>> {
+pub(crate) fn read_capped(stream: &PdfObject, cap: usize) -> Result<Vec<u8>> {
     let too_big = || refused("o anexo é grande demais");
-    let filters = filters(stream);
+    let unsafe_filter = || refused("o anexo usa uma compressão que o app não abre com segurança");
+    let filters = filters(stream).ok_or_else(unsafe_filter)?;
     // ASCIIHex e ASCII85 só encolhem; os demais podem expandir
     let expanding = filters
         .iter()
@@ -119,9 +124,7 @@ fn read_capped(stream: &PdfObject, cap: usize) -> Result<Vec<u8>> {
         }
         if expanding > 1 || raw.len() > cap / 4096 {
             // LZW e RunLength expandem até ~4096×: só os pequenos são seguros
-            return Err(refused(
-                "o anexo usa uma compressão que o app não abre com segurança",
-            ));
+            return Err(unsafe_filter());
         }
     }
     let bytes = stream.read_stream()?;
@@ -356,6 +359,46 @@ mod tests {
             read_capped(&s, 64 << 20).is_err(),
             "o app não mede o preditor"
         );
+    }
+
+    #[test]
+    fn a_long_filter_chain_cannot_hide_the_flate() {
+        use std::io::Write;
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        z.write_all(&vec![0u8; 4 << 20]).unwrap();
+        let packed = z.finish().unwrap();
+        let mut doc = mupdf::pdf::PdfDocument::new();
+        for chain in [
+            // o Flate depois de 16 filtros que só encolhem
+            (0..17)
+                .map(|k| if k == 16 { "FlateDecode" } else { "AHx" })
+                .collect::<Vec<_>>(),
+            vec!["AHx", "FlateDecode"],
+        ] {
+            let mut arr = doc.new_array().unwrap();
+            for f in &chain {
+                arr.array_push(PdfObject::new_name(f).unwrap()).unwrap();
+            }
+            let mut dict = doc.new_dict().unwrap();
+            dict.dict_put("Filter", arr).unwrap();
+            let buf = mupdf::Buffer::from_bytes(&packed).unwrap();
+            let s = doc.add_stream(&buf, Some(&dict), true).unwrap();
+            assert!(read_capped(&s, 1 << 20).is_err(), "{chain:?}");
+        }
+    }
+
+    #[test]
+    fn a_filter_that_is_not_a_name_is_refused() {
+        let mut doc = mupdf::pdf::PdfDocument::new();
+        let mut arr = doc.new_array().unwrap();
+        arr.array_push(PdfObject::new_int(3).unwrap()).unwrap();
+        arr.array_push(PdfObject::new_name("FlateDecode").unwrap())
+            .unwrap();
+        let mut dict = doc.new_dict().unwrap();
+        dict.dict_put("Filter", arr).unwrap();
+        let buf = mupdf::Buffer::from_bytes(&vec![1u8; 1 << 20]).unwrap();
+        let s = doc.add_stream(&buf, Some(&dict), true).unwrap();
+        assert!(read_capped(&s, 64 << 20).is_err());
     }
 
     #[test]
