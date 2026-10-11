@@ -59,7 +59,13 @@ pub fn drop_op(nodes: &[OutlineNode], dragged: i32, target: i32, zone: Zone) -> 
     }
     let t = node(nodes, target)?;
     let (parent, after) = match zone {
-        Zone::Child => (Some(target), siblings(nodes, Some(target)).last().copied()),
+        // no fim dos filhos do alvo (sem contar o próprio arrastado)
+        Zone::Child => (
+            Some(target),
+            siblings(nodes, Some(target))
+                .into_iter()
+                .rfind(|&s| s != dragged),
+        ),
         Zone::After => (t.parent, Some(target)),
         Zone::Before => {
             let sibs: Vec<i32> = siblings(nodes, t.parent)
@@ -75,6 +81,17 @@ pub fn drop_op(nodes: &[OutlineNode], dragged: i32, target: i32, zone: Zone) -> 
         parent,
         after,
     })
+}
+
+/// Nome novo ao renomear no lugar (Enter ou ao sair do campo): nada quando ficou vazio ou não
+/// mudou. Vale para marcadores e destinos.
+pub fn renamed(old: &str, typed: &str) -> Option<String> {
+    let title = typed.trim();
+    (!title.is_empty() && title != old.trim()).then(|| title.to_owned())
+}
+
+pub fn rename_op(id: i32, old: &str, typed: &str) -> Option<OutlineOp> {
+    renamed(old, typed).map(|title| OutlineOp::Rename { id, title })
 }
 
 /// Os marcadores à mostra (os filhos de um recolhido ficam escondidos).
@@ -219,7 +236,7 @@ impl BookmarksPanel {
             Key::ArrowLeft,
             Key::ArrowRight,
             Key::Enter,
-            Key::Delete,
+            // Delete chega como o comando Excluir (DocTab::panel_delete)
             Key::F2,
         ];
         let pressed: Vec<Key> = ctx.input_mut(|i| {
@@ -335,13 +352,7 @@ impl BookmarksPanel {
                             if esc {
                                 self.renaming = None;
                             } else if edit.lost_focus() || enter {
-                                let title = text.trim().to_owned();
-                                if !title.is_empty() {
-                                    out.push(BookmarkAction::Op(OutlineOp::Rename {
-                                        id: *id,
-                                        title,
-                                    }));
-                                }
+                                out.extend(rename_op(*id, &n.title, text).map(BookmarkAction::Op));
                                 self.renaming = None;
                             }
                             return None;
@@ -586,6 +597,33 @@ mod tests {
         // sobre si mesmo ou dentro de um descendente: nada
         assert_eq!(drop_op(&t, 1, 1, Zone::Child), None);
         assert_eq!(drop_op(&t, 1, 3, Zone::After), None);
+    }
+
+    #[test]
+    fn dropping_the_last_child_on_its_parent_is_a_no_op() {
+        let t = tree();
+        // o 3 já é o último filho do 1: soltá-lo como filho do 1 não muda nada
+        assert_eq!(
+            drop_op(&t, 3, 1, Zone::Child),
+            Some(OutlineOp::Move {
+                id: 3,
+                parent: Some(1),
+                after: Some(2)
+            })
+        );
+    }
+
+    #[test]
+    fn enter_without_change_sends_no_rename() {
+        assert_eq!(rename_op(7, "Capítulo", "  Capítulo "), None);
+        assert_eq!(rename_op(7, "Capítulo", "   "), None);
+        assert_eq!(
+            rename_op(7, "Capítulo", " Prefácio"),
+            Some(OutlineOp::Rename {
+                id: 7,
+                title: "Prefácio".into()
+            })
+        );
     }
 
     #[test]

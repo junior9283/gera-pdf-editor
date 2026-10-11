@@ -841,8 +841,11 @@ impl PdfDoc {
         // gravação incremental: o arquivo do disco + a revisão com a assinatura
         let mut opts = PdfWriteOptions::default();
         opts.set_incremental(true);
-        let mut bytes = Vec::new();
-        self.inner.write_to_with_options(&mut bytes, opts)?;
+        let mut bytes = self.with_file_layers(|d| {
+            let mut bytes = Vec::new();
+            d.inner.write_to_with_options(&mut bytes, opts)?;
+            Ok(bytes)
+        })?;
         let original = std::fs::read(&self.path)?;
         if !bytes.starts_with(&original) {
             return Err(err(

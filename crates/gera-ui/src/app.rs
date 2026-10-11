@@ -20,6 +20,8 @@ const PREFS_FILE: &str = "preferencias.json";
 
 pub struct GeraApp {
     tabs: TabList,
+    /// Retângulos das abas de documento no último quadro (soltar miniaturas sobre uma aba).
+    tab_rects: Vec<(usize, egui::Rect)>,
     /// Um por aba de documento, na mesma ordem de `tabs.docs()`.
     docs: Vec<DocTab>,
     dialogs: FileDialogs,
@@ -77,6 +79,7 @@ impl GeraApp {
         crate::fill_sign::install_script_font(&cc.egui_ctx);
         let mut app = Self {
             tabs: TabList::default(),
+            tab_rects: Vec::new(),
             docs: Vec::new(),
             dialogs: FileDialogs::default(),
             recents: store::config_file(RECENTS_FILE)
@@ -181,6 +184,7 @@ impl GeraApp {
         self.switch_tab(|tabs| created = tabs.open(path.clone()).1);
         if created {
             let mut doc = DocTab::new(ctx, path.clone(), self.prefs.dark);
+            doc.thumbs.width = self.prefs.thumb_width;
             doc.set_author(self.prefs.author.clone());
             let key = path.to_string_lossy();
             doc.open_view = crate::doc_tab::OpenView {
@@ -254,6 +258,7 @@ impl GeraApp {
     fn close_tab(&mut self, tab: usize) {
         if let Some(i) = self.tabs.close(tab) {
             let doc = self.docs.remove(i); // o Worker cai junto e a thread termina
+            doc.remove_attachment_copy();
             self.remember_view_of(&doc);
         }
     }
@@ -316,6 +321,7 @@ impl GeraApp {
         let mut full_screen = None;
         let mut to_run = Vec::new();
         let mut attachments = Vec::new();
+        let mut copies = Vec::new();
         for tab in (FIXED..self.tabs.len()).rev() {
             let Some(i) = self.tabs.doc_index(tab) else {
                 continue;
@@ -359,6 +365,23 @@ impl GeraApp {
                         full_screen = Some(tab)
                     }
                     DocEvent::FullScreen => {}
+                    DocEvent::DragPagesOut(pages) => {
+                        let pointer = ctx.input(|i| i.pointer.latest_pos());
+                        let target = pointer
+                            .and_then(|p| tab_bar::drop_target(&self.tab_rects, p, tab))
+                            .and_then(|t| self.tabs.doc_path(t).map(Path::to_path_buf));
+                        if let Some(target) = target {
+                            self.docs[i].copy_pages(pages, target);
+                        }
+                    }
+                    DocEvent::CopyPages { target, file } => copies.push((i, target, file)),
+                    DocEvent::ThumbWidth(width) => {
+                        self.prefs.thumb_width = width;
+                        self.prefs_dirty = true;
+                        for doc in &mut self.docs {
+                            doc.thumbs.width = width;
+                        }
+                    }
                     DocEvent::Run(cmd) => to_run.push(cmd),
                     DocEvent::OpenAttachment(path) => attachments.push(path),
                     DocEvent::OpenLink(target) => {
@@ -377,6 +400,21 @@ impl GeraApp {
         }
         for path in to_open {
             self.open_path(ctx, path);
+        }
+        // páginas copiadas de uma aba para outra: o destino insere no fim
+        for (source, target, file) in copies {
+            let source_title = self.docs[source].title();
+            let result = match self.docs.iter_mut().find(|d| d.path == target) {
+                Some(doc) => doc.insert_copied(file.clone()),
+                None => Err("a aba de destino foi fechada".into()),
+            };
+            self.docs[source].status = match result {
+                Ok(()) => format!("Páginas copiadas de {source_title}."),
+                Err(e) => {
+                    let _ = std::fs::remove_file(&file);
+                    format!("Não foi possível copiar as páginas: {e}")
+                }
+            };
         }
         // anexo aberto: a cópia na pasta privada não é um lugar para salvar (Salvar pergunta onde)
         for path in attachments {
@@ -572,7 +610,17 @@ impl GeraApp {
         let Some(i) = self.tabs.doc_index(self.tabs.active()) else {
             return;
         };
+        // as outras abas, para Copiar para ▸ no menu das miniaturas
+        let targets: Vec<(PathBuf, String)> = self
+            .docs
+            .iter()
+            .enumerate()
+            .filter(|&(k, _)| k != i)
+            .map(|(_, d)| (d.path.clone(), d.title()))
+            .collect();
         let doc = &mut self.docs[i];
+        doc.copy_targets = targets;
+        doc.logical_pages = self.prefs.logical_page_numbers;
         doc.begin();
         if self.reading {
             // modo leitura: só as páginas e a barra flutuante
@@ -976,9 +1024,10 @@ impl eframe::App for GeraApp {
                 self.run(ui.ctx(), cmd);
             }
             let labels = self.tab_labels();
-            let action = egui::Panel::top("abas")
+            let (action, rects) = egui::Panel::top("abas")
                 .show(ui, |ui| tab_bar::show(ui, self.tabs.active(), &labels))
                 .inner;
+            self.tab_rects = rects;
             match action {
                 Some(TabAction::Activate(t)) => self.activate(t),
                 Some(TabAction::Close(t)) => {

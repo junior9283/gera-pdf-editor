@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 /// Largura das miniaturas: padrão e limites do controle de zoom.
 const THUMB: f32 = 140.0;
-const THUMB_RANGE: std::ops::RangeInclusive<f32> = 80.0..=320.0;
+use app_state::prefs::THUMB_WIDTH_RANGE as THUMB_RANGE;
 /// Espaço em volta da miniatura dentro da célula e altura do número da página.
 const PAD: f32 = 12.0;
 const LABEL: f32 = 22.0;
@@ -129,7 +129,12 @@ impl OrganizeState {
 }
 
 /// Menu das ações sobre a seleção (botão direito numa miniatura).
-fn page_menu(ui: &mut egui::Ui, st: &mut OrganizeState, total: usize, out: &mut Vec<OrgAction>) {
+pub(crate) fn page_menu(
+    ui: &mut egui::Ui,
+    st: &mut OrganizeState,
+    total: usize,
+    out: &mut Vec<OrgAction>,
+) {
     if ui.button("Girar à esquerda").clicked() {
         out.extend(st.rotate(-1));
     }
@@ -329,11 +334,12 @@ pub fn show(
                         }
                         match view.texture_at(p, scale).or_else(|| view.any_texture(p)) {
                             Some(id) => {
-                                let uv = egui::Rect::from_min_max(
-                                    egui::pos2(0.0, 0.0),
-                                    egui::pos2(1.0, 1.0),
+                                painter.image(
+                                    id,
+                                    img,
+                                    crate::canvas::FULL_UV,
+                                    egui::Color32::WHITE,
                                 );
-                                painter.image(id, img, uv, egui::Color32::WHITE);
                             }
                             None => {
                                 painter.rect_filled(img, 0.0, egui::Color32::from_gray(225));
@@ -401,13 +407,9 @@ pub fn show(
         st.drag = Some((start, drop_at));
         if released {
             if let Some((_, Some(to))) = st.drag {
-                let pages = st.sel.to_vec();
                 // soltar em cima da própria seleção não muda nada
-                let first = pages.first().copied().unwrap_or(to);
-                let last = pages.last().copied().unwrap_or(to);
-                let contiguous = (last - first + 1) as usize == pages.len();
-                if !(contiguous && (first..=last + 1).contains(&to)) {
-                    out.push(OrgAction::Op(PageOp::Move { pages, to }));
+                if let Some(op) = crate::thumbnails::move_op(&st.sel.to_vec(), to) {
+                    out.push(OrgAction::Op(op));
                     st.sel.after_move(to);
                 }
             }
@@ -419,7 +421,12 @@ pub fn show(
 }
 
 /// Diálogos do modo Organizar.
-fn dialogs(ui: &mut egui::Ui, st: &mut OrganizeState, view: &DocView, out: &mut Vec<OrgAction>) {
+pub(crate) fn dialogs(
+    ui: &mut egui::Ui,
+    st: &mut OrganizeState,
+    view: &DocView,
+    out: &mut Vec<OrgAction>,
+) {
     let total = view.sizes.len();
     let Some(dialog) = st.dialog.as_mut() else {
         return;

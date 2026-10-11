@@ -145,6 +145,10 @@ impl PrefsDraft {
                             ui.selectable_value(&mut p.default_zoom, z, zoom_label(z));
                         }
                     });
+                ui.checkbox(
+                    &mut p.logical_page_numbers,
+                    "Usar números lógicos de página",
+                );
             }
             Category::Documents => {
                 ui.checkbox(

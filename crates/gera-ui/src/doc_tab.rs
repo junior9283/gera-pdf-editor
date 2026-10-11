@@ -103,6 +103,15 @@ pub enum DocEvent {
     FullScreen,
     /// Anexo PDF gravado na pasta privada: abrir numa aba, sem lugar escolhido (Salvar pergunta).
     OpenAttachment(PathBuf),
+    /// Nova largura das miniaturas (preferências e todas as abas).
+    ThumbWidth(f32),
+    /// Páginas exportadas em `file`, para inserir no fim do documento `target`.
+    CopyPages {
+        target: PathBuf,
+        file: PathBuf,
+    },
+    /// Miniaturas soltas fora do painel: o app vê se caíram sobre outra aba.
+    DragPagesOut(Vec<i32>),
     /// Um comando da casca escolhido na página (menu de contexto: Imprimir, Propriedades).
     Run(Command),
 }
@@ -142,8 +151,34 @@ pub struct DocTab {
     pub(crate) display_title: Option<String>,
     /// Anexos do documento e dos comentários (painel Anexos).
     pub(crate) attachments: Vec<pdf_core::AttachmentInfo>,
+    /// Destinos nomeados (painel Destinos).
+    pub(crate) destinations: Vec<pdf_core::DestInfo>,
+    /// A lista acima vale para o documento como está (senão o painel pede de novo).
+    destinations_loaded: bool,
+    /// Camadas (painel Camadas).
+    pub(crate) layers: Vec<pdf_core::LayerNode>,
+    /// Rótulo de cada página (vazio sem rótulos).
+    pub(crate) labels: Vec<String>,
     /// Painel Marcadores (seleção, renomeação, arraste, foco do teclado).
     pub(crate) bookmarks: crate::bookmarks::BookmarksPanel,
+    /// Painel Miniaturas (seleção, arraste, menu e diálogos de páginas).
+    pub(crate) thumbs: crate::thumbnails::ThumbnailsPanel,
+    /// Cópia de páginas para outra aba em andamento: (arquivo temporário, aba de destino).
+    pub(crate) copy_pending: Option<(PathBuf, PathBuf)>,
+    /// Painel Destinos (ordem, seleção, renomeação).
+    destinations_panel: crate::destinations_panel::DestinationsPanel,
+    /// Painel Camadas (recolhidos e Propriedades da camada).
+    layers_panel: crate::layers_panel::LayersPanel,
+    /// Diálogo Rótulos de página aberto.
+    labels_dialog: Option<crate::page_labels_dialog::PageLabelsDialog>,
+    /// Usar números lógicos de página (preferência; o app atualiza).
+    pub(crate) logical_pages: bool,
+    /// Texto da caixa de página com rótulos (enquanto se digita).
+    page_input: Option<String>,
+    /// Outras abas abertas (caminho, título), para Copiar para ▸ (o app atualiza).
+    pub(crate) copy_targets: Vec<(PathBuf, String)>,
+    /// Temporários de páginas recebidas: apagados quando a inserção termina.
+    received_copies: Vec<PathBuf>,
     /// Painel Anexos (seleção e descrição em edição).
     attachments_panel: crate::attachments_panel::AttachmentsPanel,
     /// Aviso antes de abrir um anexo (o anexo e quando o aviso apareceu).
@@ -324,6 +359,19 @@ impl DocTab {
             attachments_panel: Default::default(),
             attach_warning: None,
             attachments: Vec::new(),
+            destinations: Vec::new(),
+            destinations_loaded: false,
+            thumbs: Default::default(),
+            copy_pending: None,
+            labels_dialog: None,
+            destinations_panel: Default::default(),
+            layers_panel: Default::default(),
+            logical_pages: true,
+            page_input: None,
+            copy_targets: Vec::new(),
+            received_copies: Vec::new(),
+            layers: Vec::new(),
+            labels: Vec::new(),
             display_title: None,
             marquee: None,
             focus_zoom: false,
@@ -461,6 +509,10 @@ impl DocTab {
             if cmd == DocCommand::Cut {
                 self.edit.delete_selected();
             }
+            return;
+        }
+        // Excluir com um painel focado age sobre o painel (a tecla Delete chega como comando)
+        if cmd == DocCommand::Delete && self.organize.is_none() && self.panel_delete() {
             return;
         }
         let page = self.last.current_page;
@@ -1045,6 +1097,15 @@ impl DocTab {
         }
     }
 
+    /// Fechando a aba de um anexo aberto: a cópia na pasta privada sai junto (só ela: o nome
+    /// precisa ser o de uma cópia de anexo).
+    pub(crate) fn remove_attachment_copy(&self) {
+        let is_copy = crate::attachments_panel::spool_name(&self.path).is_some();
+        if self.attachment_name.is_some() && is_copy {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
     /// Caminho sugerido no Salvar como: o próprio arquivo, ou, para um anexo aberto, o nome dele
     /// na pasta pessoal (a cópia na pasta privada não é lugar para guardar).
     pub fn save_suggestion(&self) -> PathBuf {
@@ -1082,6 +1143,11 @@ impl DocTab {
         self.outline = summary.outline;
         self.links = summary.links;
         self.attachments = summary.attachments;
+        // documento mudou: a lista de destinos é pedida de novo quando o painel aparecer
+        self.destinations_loaded = false;
+        self.layers = summary.layers;
+        self.layers_panel.invalidate();
+        self.labels = summary.labels;
         self.display_title = summary.display_title;
         (summary.path, summary.sizes)
     }
@@ -1159,8 +1225,11 @@ impl DocTab {
         let page = self.last.current_page.min(sizes.len().saturating_sub(1));
         // com páginas a mais ou a menos, a seleção antiga marcaria outras páginas
         let same_count = self.view.as_ref().map(|v| v.sizes.len()) == Some(sizes.len());
-        if let Some(org) = self.organize.as_mut().filter(|_| !same_count) {
-            org.sel = Default::default();
+        if !same_count {
+            if let Some(org) = self.organize.as_mut() {
+                org.sel = Default::default();
+            }
+            self.thumbs.org.sel = Default::default();
         }
         if let Some(view) = self.view.as_mut() {
             view.set_pages(sizes);
@@ -1314,6 +1383,29 @@ impl DocTab {
                     self.attachments = attachments;
                     self.history = history;
                 }
+                Response::LayersChanged { layers, history } => {
+                    self.layers = layers;
+                    self.layers_panel.invalidate();
+                    self.history = history;
+                    // a página desenha diferente: as imagens em cache valem para a vista antiga
+                    if let Some(view) = self.view.as_mut() {
+                        view.clear_cache();
+                    }
+                }
+                Response::DestinationsChanged {
+                    destinations,
+                    created,
+                    history,
+                } => {
+                    self.destinations = destinations;
+                    self.destinations_panel.invalidate();
+                    self.destinations_loaded = true;
+                    self.history = history;
+                    // destino novo: o nome vem pronto para editar (como no Acrobat)
+                    if let Some(name) = created {
+                        self.destinations_panel.rename((name, 0));
+                    }
+                }
                 Response::AttachmentWritten { dest, open: true } => {
                     self.events.push(DocEvent::OpenAttachment(dest))
                 }
@@ -1448,7 +1540,17 @@ impl DocTab {
                     }
                 }
                 Response::PagesChanged { summary, history } => {
+                    self.forget_received_copies();
                     self.on_pages_changed(summary, history)
+                }
+                Response::PagesExported { dest } => {
+                    if let Some((file, target)) = self.copy_pending.take() {
+                        if file == dest {
+                            self.events.push(DocEvent::CopyPages { target, file });
+                        } else {
+                            let _ = std::fs::remove_file(file);
+                        }
+                    }
                 }
                 Response::RedactionsApplied { result } => match result {
                     Ok((summary, history)) => {
@@ -1461,6 +1563,10 @@ impl DocTab {
                     }
                 },
                 Response::PagesFailed(msg) => {
+                    self.forget_received_copies();
+                    if let Some((file, _)) = self.copy_pending.take() {
+                        let _ = std::fs::remove_file(file);
+                    }
                     self.delete_after_extract = None;
                     self.status = format!("Não foi possível organizar as páginas: {msg}");
                 }
@@ -1556,6 +1662,12 @@ impl DocTab {
             } else if !self.form.escape() {
                 self.edit.escape();
             }
+        }
+        if !typing && self.thumbs.focused {
+            // painel Miniaturas focado: setas, Início/Fim e Delete são dele
+            let total = self.view.as_ref().map_or(0, |v| v.sizes.len() as i32);
+            let actions = self.thumbs.keys(ctx, total);
+            self.thumb_actions(ctx, actions);
         }
         if !typing && self.bookmarks.focused {
             // painel Marcadores focado: setas, Enter, Delete e F2 são dele
@@ -2225,6 +2337,16 @@ impl DocTab {
                 }
             }
         }
+        if let Some(ok) = self.labels_dialog.as_mut().and_then(|d| d.show(ui.ctx())) {
+            if let Some(d) = self.labels_dialog.take().filter(|_| ok) {
+                let (from, to, new) = d.request();
+                if self.can_modify_file() {
+                    self.worker.send(Request::PageLabels { from, to, new });
+                } else {
+                    self.deny("alterar os rótulos de página");
+                }
+            }
+        }
         if let (Some(rx), Some(dialog)) = (&self.printers_rx, self.print_dialog.as_mut()) {
             if let Ok((list, default)) = rx.try_recv() {
                 dialog.set_printers(list, default);
@@ -2298,7 +2420,7 @@ impl DocTab {
     /// Conteúdo do painel esquerdo; clicar leva à página.
     pub fn side_panel(&mut self, ui: &mut egui::Ui, panel: LeftPanel) {
         if panel == LeftPanel::Outline {
-            let can_edit = self.bookmarks_editable();
+            let can_edit = self.can_modify_file();
             let nodes = outline_shown(&self.outline, &self.bookmarks_open);
             let actions = ui
                 .push_id(self.id, |ui| {
@@ -2334,24 +2456,199 @@ impl DocTab {
             }
             return;
         }
-        let Some(view) = self.view.as_mut() else {
+        if panel == LeftPanel::Destinations {
+            if !std::mem::replace(&mut self.destinations_loaded, true) {
+                self.worker.send(Request::ListDestinations);
+            }
+            let can_edit = self.can_modify_file();
+            let actions = ui
+                .push_id(self.id, |ui| {
+                    ui.strong(panel.label());
+                    self.destinations_panel
+                        .show(ui, &self.destinations, can_edit)
+                })
+                .inner;
+            for action in actions {
+                self.destination_action(action);
+            }
             return;
-        };
+        }
+        if panel == LeftPanel::Layers {
+            let can_edit = self.can_modify_file();
+            let actions = ui
+                .push_id(self.id, |ui| {
+                    ui.strong(panel.label());
+                    let can_toggle = self.cert.signatures.is_empty();
+                    self.layers_panel
+                        .show(ui, &self.layers, can_edit, can_toggle)
+                })
+                .inner;
+            for action in actions {
+                self.worker.send(action.into());
+            }
+            return;
+        }
+        if panel == LeftPanel::Thumbnails {
+            let Some(view) = self.view.as_mut() else {
+                return;
+            };
+            let can_edit = self.security.permissions.modify;
+            let actions = ui
+                .push_id(self.id, |ui| {
+                    ui.strong(panel.label());
+                    self.thumbs.show(
+                        ui,
+                        view,
+                        &self.worker,
+                        &self.labels,
+                        can_edit,
+                        &self.copy_targets,
+                    )
+                })
+                .inner;
+            self.thumb_actions(ui.ctx(), actions);
+            return;
+        }
         // cada aba com seu id: as listas guardam a própria rolagem
         let action = ui
-            .push_id(self.id, |ui| {
-                sidebar::show(ui, panel, view, &self.worker, &self.annots)
-            })
+            .push_id(self.id, |ui| sidebar::show(ui, panel, &self.annots))
             .inner;
         let target = match action {
             SidebarAction::None => return,
-            SidebarAction::JumpToPage(page) => (page as i32, None),
             SidebarAction::SelectAnnot { page, id, at } => {
                 self.edit.selected = Some((page, id));
                 (page, Some(at))
             }
         };
         self.jump(target.0, target.1);
+    }
+
+    /// Excluir no painel focado (Miniaturas ou Marcadores); devolve se algum estava focado.
+    fn panel_delete(&mut self) -> bool {
+        if self.thumbs.focused {
+            if !self.security.permissions.modify {
+                self.deny("excluir páginas");
+            } else {
+                let total = self.view.as_ref().map_or(0, |v| v.sizes.len() as i32);
+                self.thumbs.ask_delete(total);
+            }
+            return true;
+        }
+        if self.bookmarks.focused {
+            if let Some(id) = self.bookmarks.selected {
+                self.outline_op(pdf_core::OutlineOp::Delete { id });
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Copiar páginas para outra aba: grava-as numa cópia na pasta privada; a aba de destino
+    /// insere quando ficar pronta (`DocEvent::CopyPages`).
+    pub(crate) fn copy_pages(&mut self, pages: Vec<i32>, target: PathBuf) {
+        if !self.security.permissions.copy {
+            return self.deny("copiar páginas");
+        }
+        if self.copy_pending.is_some() || pages.is_empty() {
+            return;
+        }
+        match crate::print_job::spool_dir() {
+            Ok(dir) => {
+                use crate::print_job::{spool_file_name, COPY_PREFIX};
+                let file = dir.join(spool_file_name(COPY_PREFIX, ".pdf"));
+                self.copy_pending = Some((file.clone(), target));
+                self.worker.send(Request::ExportPages { pages, dest: file });
+            }
+            Err(e) => self.status = format!("Não foi possível copiar as páginas: {e}"),
+        }
+    }
+
+    /// Insere no fim as páginas copiadas de outra aba (o temporário some depois).
+    pub(crate) fn insert_copied(&mut self, file: PathBuf) -> Result<(), String> {
+        if !self.can_modify_file() {
+            return Err("o documento de destino não permite alterar as páginas".into());
+        }
+        let at = self.view.as_ref().map_or(0, |v| v.sizes.len() as i32);
+        self.received_copies.push(file.clone());
+        self.worker
+            .send(Request::Pages(pdf_core::PageOp::InsertFrom {
+                at,
+                path: file,
+                password: None,
+                range: None,
+            }));
+        Ok(())
+    }
+
+    fn forget_received_copies(&mut self) {
+        for file in self.received_copies.drain(..) {
+            let _ = std::fs::remove_file(file);
+        }
+    }
+
+    fn destination_action(&mut self, action: crate::destinations_panel::DestAction) {
+        use crate::destinations_panel::DestAction;
+        use pdf_core::DestOp;
+        let op = match action {
+            DestAction::Go { page, at } => return self.jump(page, at),
+            DestAction::New => {
+                let (page, at) = self.view_target();
+                DestOp::Add {
+                    name: "Sem título".into(),
+                    page,
+                    at,
+                }
+            }
+            DestAction::SetHere((name, occurrence)) => {
+                let (page, at) = self.view_target();
+                DestOp::Set {
+                    name,
+                    occurrence,
+                    page,
+                    at,
+                }
+            }
+            DestAction::Rename {
+                key: (name, occurrence),
+                to,
+            } => DestOp::Rename {
+                name,
+                occurrence,
+                to,
+            },
+            DestAction::Remove((name, occurrence)) => DestOp::Remove { name, occurrence },
+        };
+        if self.can_modify_file() {
+            self.worker.send(Request::Destination(op));
+        } else {
+            self.deny("alterar os destinos");
+        }
+    }
+
+    fn thumb_actions(&mut self, ctx: &egui::Context, actions: Vec<crate::thumbnails::ThumbAction>) {
+        use crate::thumbnails::ThumbAction;
+        for action in actions {
+            match action {
+                ThumbAction::Go(page) => self.jump(page, None),
+                ThumbAction::Org(a) => self.org_action(ctx, a),
+                ThumbAction::Print(pages) => {
+                    self.open_print_dialog(ctx);
+                    if let Some(d) = self.print_dialog.as_mut() {
+                        d.options.pages = app_state::print::Pages::Ranges;
+                        d.options.ranges = crate::thumbnails::ranges_text(&pages);
+                    }
+                }
+                ThumbAction::Zoom(width) => self.events.push(DocEvent::ThumbWidth(width)),
+                ThumbAction::CopyTo { pages, target } => self.copy_pages(pages, target),
+                ThumbAction::DragOut(pages) => self.events.push(DocEvent::DragPagesOut(pages)),
+                ThumbAction::Labels(pages) => {
+                    let total = self.view.as_ref().map_or(0, |v| v.sizes.len());
+                    self.labels_dialog = Some(crate::page_labels_dialog::PageLabelsDialog::new(
+                        &pages, total,
+                    ));
+                }
+            }
+        }
     }
 
     fn attachment_action(
@@ -2456,15 +2753,16 @@ impl DocTab {
         self.outline_op(op);
     }
 
-    /// Os marcadores podem ser alterados no arquivo? Não num documento protegido contra alteração
-    /// nem num assinado (mudar o arquivo alteraria as assinaturas).
-    fn bookmarks_editable(&self) -> bool {
+    /// O arquivo pode ser alterado (marcadores, destinos, camadas, rótulos, páginas recebidas)?
+    /// Não num documento protegido contra alteração nem num assinado (mudar o arquivo alteraria
+    /// as assinaturas).
+    fn can_modify_file(&self) -> bool {
         self.security.permissions.modify && self.cert.signatures.is_empty()
     }
 
     fn outline_op(&mut self, op: pdf_core::OutlineOp) {
         use pdf_core::OutlineOp;
-        if !self.bookmarks_editable() {
+        if !self.can_modify_file() {
             // expandir e recolher continuam, só na tela
             match op {
                 OutlineOp::SetOpen { id, open } => {
@@ -2499,15 +2797,31 @@ impl DocTab {
                 ui.label(commands::hover(&Command::Doc(DocCommand::PrevPage)));
             })
             .clicked();
-        let go = ui
-            .add(egui::DragValue::new(&mut page).range(1..=count).speed(0.2))
-            .on_hover_ui(|ui| {
-                ui.label(commands::hover(&Command::Doc(DocCommand::GoToPage)));
-            });
-        if std::mem::take(&mut self.focus_page) {
-            go.request_focus(); // Ir para página: digita o número e Enter
-        }
-        ui.label(format!("/ {count}"));
+        let field = if self.logical_pages && !self.labels.is_empty() {
+            self.page_label_box(ui, page - 1, count);
+            None
+        } else {
+            let go = ui
+                .add(egui::DragValue::new(&mut page).range(1..=count).speed(0.2))
+                .on_hover_ui(|ui| {
+                    ui.label(commands::hover(&Command::Doc(DocCommand::GoToPage)));
+                });
+            if std::mem::take(&mut self.focus_page) {
+                go.request_focus(); // Ir para página: digita o número e Enter
+            }
+            ui.label(format!("/ {count}"));
+            if go.drag_started() {
+                Some(PageField::DragStart)
+            } else if go.changed() {
+                Some(if go.dragged() {
+                    PageField::Dragging
+                } else {
+                    PageField::Typed
+                })
+            } else {
+                None
+            }
+        };
         let next = ui
             .button("▶")
             .on_hover_ui(|ui| {
@@ -2520,16 +2834,33 @@ impl DocTab {
             } else {
                 DocCommand::PrevPage
             });
-        } else if go.drag_started() {
-            self.page_field(page, PageField::DragStart);
-        } else if go.changed() {
-            let how = if go.dragged() {
-                PageField::Dragging
-            } else {
-                PageField::Typed
-            };
+        } else if let Some(how) = field {
             self.page_field(page, how);
         }
+    }
+
+    /// Números lógicos: o campo mostra o rótulo ("iii", com "(3 de 10)" ao lado) e aceita rótulo
+    /// ou número.
+    fn page_label_box(&mut self, ui: &mut egui::Ui, page: usize, count: usize) {
+        let (label, suffix) = app_state::page_input::page_box_text(&self.labels, page, count);
+        let mut text = self.page_input.clone().unwrap_or(label);
+        let edit = ui
+            .add(egui::TextEdit::singleline(&mut text).desired_width(56.0))
+            .on_hover_ui(|ui| {
+                ui.label(commands::hover(&Command::Doc(DocCommand::GoToPage)));
+            });
+        if std::mem::take(&mut self.focus_page) {
+            edit.request_focus();
+        }
+        self.page_input = edit.has_focus().then(|| text.clone());
+        if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            match app_state::page_input::page_for_input(&text, &self.labels, count) {
+                Some(p) => self.page_field(p + 1, PageField::Typed),
+                None => self.status = format!("Não há página \"{}\".", text.trim()),
+            }
+            self.page_input = None;
+        }
+        ui.label(suffix);
     }
 
     /// Campo de busca, resumo e ▲▼ (o foco vem de `DocCommand::Find`).
@@ -2763,7 +3094,7 @@ impl DocTab {
 
     /// A grade do Organizar páginas e as ações dela.
     fn organize_view(&mut self, ui: &mut egui::Ui) {
-        use crate::organize::{show, OrgAction};
+        use crate::organize::show;
         let (Some(view), Some(org)) = (self.view.as_mut(), self.organize.as_mut()) else {
             return;
         };
@@ -2771,39 +3102,57 @@ impl DocTab {
         let history = (self.history.can_undo, self.history.can_redo);
         let actions = show(ui, org, view, &self.worker, history);
         for action in actions {
-            match action {
-                OrgAction::Op(op) => self.worker.send(Request::Pages(op)),
-                OrgAction::Undo => self.worker.send(Request::Undo),
-                OrgAction::Redo => self.worker.send(Request::Redo),
-                OrgAction::Close => self.organize = None,
-                OrgAction::Split => self.open_split(),
-                OrgAction::PickFile(purpose) if !self.files.busy() => {
-                    self.picking = Some(PickFor::File(purpose));
-                    self.files.open(ui.ctx());
-                }
-                OrgAction::PickFile(_) => {}
-                OrgAction::Extract { .. } if !self.security.permissions.copy => {
-                    self.deny("extrair páginas")
-                }
-                OrgAction::Extract {
+            self.org_action(ui.ctx(), action);
+        }
+    }
+
+    /// Executa uma ação do Organizar páginas (da grade ou do menu das miniaturas).
+    fn org_action(&mut self, ctx: &egui::Context, action: crate::organize::OrgAction) {
+        use crate::organize::OrgAction;
+        match action {
+            OrgAction::Op(_) if !self.security.permissions.modify => {
+                self.deny("alterar as páginas")
+            }
+            OrgAction::Op(op) => self.worker.send(Request::Pages(op)),
+            OrgAction::Undo => self.worker.send(Request::Undo),
+            OrgAction::Redo => self.worker.send(Request::Redo),
+            OrgAction::Close => self.organize = None,
+            OrgAction::Split => self.open_split(),
+            OrgAction::PickFile(purpose) if !self.files.busy() => {
+                self.picking = Some(PickFor::File(purpose));
+                self.files.open(ctx);
+            }
+            OrgAction::PickFile(_) => {}
+            OrgAction::Extract { .. } if !self.security.permissions.copy => {
+                self.deny("extrair páginas")
+            }
+            OrgAction::Extract {
+                pages,
+                separate,
+                delete_after,
+            } => {
+                let stem = self
+                    .path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let suggested = self.path.with_file_name(format!("{stem} (páginas).pdf"));
+                self.picking = Some(PickFor::Extract {
                     pages,
                     separate,
                     delete_after,
-                } => {
-                    let stem = self
-                        .path
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let suggested = self.path.with_file_name(format!("{stem} (páginas).pdf"));
-                    self.picking = Some(PickFor::Extract {
-                        pages,
-                        separate,
-                        delete_after,
-                    });
-                    self.files.save_as(ui.ctx(), suggested.clone(), suggested);
-                }
+                });
+                self.files.save_as(ctx, suggested.clone(), suggested);
             }
+        }
+    }
+
+    /// Seleção e diálogos de páginas em uso: os da grade do Organizar, se aberta, ou os das
+    /// miniaturas.
+    fn pages_state(&mut self) -> &mut crate::organize::OrganizeState {
+        match self.organize.as_mut() {
+            Some(org) => org,
+            None => &mut self.thumbs.org,
         }
     }
 
@@ -2834,9 +3183,7 @@ impl DocTab {
                         password: String::new(),
                     },
                 };
-                if let Some(org) = self.organize.as_mut() {
-                    org.dialog = Some(dialog);
-                }
+                self.pages_state().dialog = Some(dialog);
             }
             (
                 Some(PickFor::Extract {
@@ -3170,6 +3517,7 @@ impl DocTab {
         // clique nas páginas: o teclado volta para o documento
         if ui.input(|i| i.pointer.any_pressed()) && ui.rect_contains_pointer(ui.max_rect()) {
             self.bookmarks.focused = false;
+            self.thumbs.focused = false;
         }
         if let Some(action) = screen_action {
             self.screen_action(action);
@@ -3644,7 +3992,49 @@ mod tests {
         }];
         tab.outline_op(pdf_core::OutlineOp::SetOpen { id: 4, open: true });
         assert_eq!(tab.bookmarks_open.get(&4), Some(&true), "só na tela");
-        assert!(!tab.bookmarks_editable(), "assinado: o painel não edita");
+        assert!(!tab.can_modify_file(), "assinado: o painel não edita");
+    }
+
+    #[test]
+    fn delete_with_the_thumbnails_focused_asks_about_the_pages() {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_pages(3);
+        tab.security.permissions.modify = true;
+        tab.thumbs.focused = true;
+        tab.thumbs.org.sel.click(1);
+        tab.run(&ctx, DocCommand::Delete);
+        assert_eq!(tab.thumbs.confirming(), Some(&[1][..]));
+    }
+
+    #[test]
+    fn copy_from_protected_document_is_refused() {
+        let mut tab = tab_with_pages(3);
+        tab.security.permissions.copy = false;
+        tab.copy_pages(vec![0], PathBuf::from("/outro.pdf"));
+        assert!(tab.copy_pending.is_none(), "nada foi exportado");
+        assert!(tab.status.contains("não permite"), "{}", tab.status);
+    }
+
+    #[test]
+    fn closing_an_attachment_tab_removes_the_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let copy = dir.path().join("gera-anexo-77-0-outro.pdf");
+        std::fs::write(&copy, b"%PDF").unwrap();
+        let mut tab = tab_with_pages(1);
+        tab.path = copy.clone();
+        tab.attachment_name = Some("outro.pdf".into());
+        tab.remove_attachment_copy();
+        assert!(
+            !copy.exists(),
+            "a cópia na pasta privada sai junto com a aba"
+        );
+        // um documento comum nunca é apagado
+        let own = dir.path().join("meu.pdf");
+        std::fs::write(&own, b"%PDF").unwrap();
+        let mut tab = tab_with_pages(1);
+        tab.path = own.clone();
+        tab.remove_attachment_copy();
+        assert!(own.exists());
     }
 
     #[test]

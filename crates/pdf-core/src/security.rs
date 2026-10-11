@@ -166,7 +166,11 @@ impl PdfDoc {
         };
         Ok(SecurityInfo {
             encrypted,
-            needs_user_password: encrypted && self.inner.needs_password()?,
+            // aberto com senha não vazia = o arquivo pede senha de usuário. Não perguntar ao
+            // MuPDF (`needs_password` testa a senha vazia, e a tentativa que falha estraga a chave
+            // da cifra: os textos gravados depois saíam ilegíveis)
+            needs_user_password: encrypted
+                && self.password.as_deref().is_some_and(|p| !p.is_empty()),
             permissions,
             unlocked: encrypted && self.owner_unlocked,
         })

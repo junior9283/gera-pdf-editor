@@ -61,6 +61,10 @@ pub struct PdfDoc {
     /// Números dos objetos das fontes que o Editar texto acrescentou nesta sessão: só elas são
     /// reaproveitadas; nada do arquivo é confiado como "fonte do app".
     pub(crate) added_fonts: Vec<i32>,
+    /// Olho do painel Camadas: as camadas que o usuário ligou ou desligou (só a vista).
+    pub(crate) layer_view: std::collections::BTreeMap<i32, bool>,
+    /// O `/D` das camadas do arquivo, guardado enquanto o da memória mostra o olho.
+    pub(crate) layer_default: Option<crate::layers::LayerDefault>,
 }
 
 /// Abre o arquivo e, se for protegido, autentica com `password`.
@@ -96,6 +100,8 @@ impl PdfDoc {
             owner_unlocked: false,
             pending_protection: None,
             added_fonts: Vec::new(),
+            layer_view: Default::default(),
+            layer_default: None,
         };
         doc.signed_on_disk = doc.has_signatures().unwrap_or(false);
         // abrir digitando a senha de permissões libera tudo (como no Acrobat)
@@ -903,7 +909,7 @@ impl PdfDoc {
         self.history = History::default();
         self.unsaved = false;
         self.signed_on_disk = self.has_signatures().unwrap_or(false);
-        Ok(())
+        self.reapply_layer_view()
     }
 
     pub(crate) fn purge_hidden(&mut self) -> Result<()> {
@@ -917,13 +923,16 @@ impl PdfDoc {
             // documento assinado: só gravação incremental (como o Acrobat), senão a reescrita
             // mudaria os bytes assinados e quebraria as assinaturas
             opts.set_incremental(true);
-            let mut bytes = Vec::new();
-            self.inner.write_to_with_options(&mut bytes, opts)?;
+            let bytes = self.with_file_layers(|d| {
+                let mut bytes = Vec::new();
+                d.inner.write_to_with_options(&mut bytes, opts)?;
+                Ok(bytes)
+            })?;
             write_bytes_atomic(dest, &bytes)?;
             self.path = dest.to_path_buf();
             return Ok(());
         }
-        write_atomic(&self.inner, dest, opts)?;
+        self.with_file_layers(|d| write_atomic(&d.inner, dest, opts))?;
         self.path = dest.to_path_buf();
         Ok(())
     }
@@ -1244,15 +1253,21 @@ impl PdfDoc {
         }
     }
 
-    /// O documento em memória como está agora (com as apagadas pendentes), para desfazer.
-    pub(crate) fn snapshot(&self) -> Result<Snapshot> {
+    /// Bytes do documento em memória (criptografia mantida). Arquivo assinado: incremental, para
+    /// continuar começando pelos bytes assinados (restaurar e salvar depois não pode regravar o
+    /// arquivo).
+    pub(crate) fn memory_bytes(&self) -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
         let mut keep = PdfWriteOptions::default();
         keep.set_encryption(Encryption::Keep);
-        // arquivo assinado: o instantâneo é incremental, para continuar começando pelos bytes
-        // assinados (restaurar e salvar depois não pode regravar o arquivo)
         keep.set_incremental(self.signed_on_disk);
         self.inner.write_to_with_options(&mut bytes, keep)?;
+        Ok(bytes)
+    }
+
+    /// O documento em memória como está agora (com as apagadas pendentes), para desfazer.
+    pub(crate) fn snapshot(&self) -> Result<Snapshot> {
+        let bytes = self.with_file_layers(|d| d.memory_bytes())?;
         Ok(Snapshot {
             bytes,
             hidden: self.history.hidden.clone(),
@@ -1265,7 +1280,7 @@ impl PdfDoc {
         self.inner = reopen(&snap.bytes, self.password.as_deref())?;
         self.history.hidden = snap.hidden.clone();
         self.added_fonts = snap.added_fonts.clone();
-        Ok(())
+        self.reapply_layer_view()
     }
 
     /// Texto de uma página.
@@ -1384,6 +1399,8 @@ impl PdfDoc {
             initial_view: self.initial_view(),
             attachments,
             display_title: self.display_title(),
+            labels: self.labels(),
+            layers: self.layers(),
             fields: self.all_fields().unwrap_or_default(),
             form_notes: self.form_notes().unwrap_or_default(),
             security: self.security()?,

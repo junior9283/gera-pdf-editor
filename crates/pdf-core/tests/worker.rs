@@ -556,3 +556,36 @@ fn redaction_through_the_worker() {
     )));
     assert!(matches!(recv(&w), Response::RedactHits(h) if h.is_empty()));
 }
+
+#[test]
+fn exported_pages_go_into_another_document_with_annotations() {
+    let (dir, w, _) = opened(3);
+    // uma nota na página 2, que vai junto
+    w.send(Request::Annot(AnnotOp::Create(NewAnnot::Note {
+        page: 1,
+        at: (50.0, 50.0),
+        text: "vai junto".into(),
+    })));
+    let _ = recv(&w);
+    let tmp = dir.path().join("copia.pdf");
+    w.send(Request::ExportPages {
+        pages: vec![1, 2],
+        dest: tmp.clone(),
+    });
+    assert!(matches!(recv(&w), Response::PagesExported { dest } if dest == tmp));
+    let target = write_sample(&dir, "b.pdf", 1, 0);
+    let mut d = pdf_core::PdfDoc::open(&target, None).unwrap();
+    d.apply_pages(pdf_core::PageOp::InsertFrom {
+        at: 1,
+        path: tmp,
+        password: None,
+        range: None,
+    })
+    .unwrap();
+    assert_eq!(d.page_count().unwrap(), 3);
+    assert!(d
+        .annotations(1)
+        .unwrap()
+        .iter()
+        .any(|a| a.contents == "vai junto"));
+}

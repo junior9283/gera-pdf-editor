@@ -4,7 +4,9 @@ use app_state::transform::PageMap;
 use pdf_core::Worker;
 
 /// Coordenadas de textura da imagem inteira.
-const FULL_UV: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+/// A textura inteira (de 0,0 a 1,1).
+pub(crate) const FULL_UV: egui::Rect =
+    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
 
 #[derive(Default)]
 pub struct CanvasFrame {

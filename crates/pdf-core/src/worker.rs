@@ -49,6 +49,31 @@ pub enum Request {
     RemoveAttachment {
         name: String,
     },
+    /// Olho de uma camada (só a vista).
+    LayerView {
+        id: i32,
+        on: bool,
+    },
+    /// Redefinir para visibilidade inicial.
+    ResetLayers,
+    /// Propriedades da camada: nome e estado padrão.
+    EditLayer {
+        id: i32,
+        name: String,
+        default_on: bool,
+    },
+    /// Lista os destinos (o painel Destinos pede ao abrir: em PDFs com milhares de destinos a
+    /// lista custa, e não entra na abertura).
+    ListDestinations,
+    /// Cria, renomeia, redefine ou exclui um destino nomeado.
+    Destination(crate::DestOp),
+    /// Diálogo Rótulos de página: `from..=to` começam uma seção nova (`new`) ou estendem a
+    /// anterior (`None`).
+    PageLabels {
+        from: i32,
+        to: i32,
+        new: Option<crate::PageLabelRange>,
+    },
     DescribeAttachment {
         name: String,
         text: String,
@@ -199,6 +224,11 @@ pub enum Request {
         dest: PathBuf,
         separate: bool,
     },
+    /// Grava as páginas (com as anotações) num arquivo, para copiá-las para outro documento.
+    ExportPages {
+        pages: Vec<i32>,
+        dest: PathBuf,
+    },
     /// Seleção pelo fluxo do texto entre `a` e `b` (pontos da página).
     SelectText {
         tag: u64,
@@ -248,6 +278,16 @@ pub enum Response {
     },
     AttachmentsChanged {
         attachments: Vec<crate::types::AttachmentInfo>,
+        history: HistoryState,
+    },
+    /// As camadas mudaram (olho ou propriedades): a renderização também.
+    LayersChanged {
+        layers: Vec<crate::LayerNode>,
+        history: HistoryState,
+    },
+    DestinationsChanged {
+        destinations: Vec<crate::DestInfo>,
+        created: Option<String>,
         history: HistoryState,
     },
     /// O anexo foi gravado em `dest` (`open`: abrir numa aba).
@@ -309,6 +349,10 @@ pub enum Response {
     },
     PagesFailed(String),
     Extracted(Vec<PathBuf>),
+    /// As páginas pedidas por `ExportPages` estão em `dest`.
+    PagesExported {
+        dest: PathBuf,
+    },
     Split(Vec<PathBuf>),
     /// Campos mudaram (preencher, desfazer/refazer de um valor): todos, de todas as páginas.
     FieldsChanged {
@@ -488,6 +532,38 @@ impl State {
             Request::AddAttachment { path } => self.edit(send, |d| {
                 d.add_attachment(&path, "")?;
                 Ok(Changed::Attachments)
+            }),
+            Request::LayerView { id, on } => self.edit(send, |d| {
+                d.set_layer_view(id, on)?;
+                Ok(Changed::Layers)
+            }),
+            Request::ResetLayers => self.edit(send, |d| {
+                d.reset_layer_view()?;
+                Ok(Changed::Layers)
+            }),
+            Request::EditLayer {
+                id,
+                name,
+                default_on,
+            } => self.edit(send, |d| {
+                d.edit_layer(id, &name, default_on)?;
+                Ok(Changed::Layers)
+            }),
+            Request::ListDestinations => {
+                if let Some(d) = self.doc.as_ref() {
+                    send(Response::DestinationsChanged {
+                        destinations: d.destinations(),
+                        created: None,
+                        history: d.history_state(),
+                    });
+                }
+            }
+            Request::Destination(op) => {
+                self.edit(send, |d| Ok(Changed::Destinations(d.edit_destination(op)?)))
+            }
+            Request::PageLabels { from, to, new } => self.edit(send, |d| {
+                d.apply_page_labels(from, to, new)?;
+                Ok(Changed::Document)
             }),
             Request::RemoveAttachment { name } => self.edit(send, |d| {
                 d.remove_attachment(&name)?;
@@ -716,6 +792,12 @@ impl State {
                     Err(e) => Response::PagesFailed(e),
                 },
             ),
+            Request::ExportPages { pages, dest } => {
+                send(match self.with_doc(|d| d.extract(&pages, &dest, false)) {
+                    Ok(_) => Response::PagesExported { dest },
+                    Err(e) => Response::PagesFailed(e),
+                })
+            }
             Request::Undo => self.edit(send, PdfDoc::undo),
             Request::SetAuthor(author) => {
                 if let Some(d) = self.doc.as_mut() {
@@ -777,6 +859,15 @@ impl State {
             }),
             Ok(Changed::Outline(created)) => send(Response::OutlineChanged {
                 outline: d.outline_tree().unwrap_or_default(),
+                created,
+                history: d.history_state(),
+            }),
+            Ok(Changed::Layers) => send(Response::LayersChanged {
+                layers: d.layers(),
+                history: d.history_state(),
+            }),
+            Ok(Changed::Destinations(created)) => send(Response::DestinationsChanged {
+                destinations: d.destinations(),
                 created,
                 history: d.history_state(),
             }),
