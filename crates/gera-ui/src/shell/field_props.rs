@@ -182,7 +182,6 @@ impl FieldPropsWindow {
                     ui.label("Rótulo");
                     ui.text_edit_singleline(&mut p.button_label);
                 });
-                ui.checkbox(&mut p.reset_action, "Ao clicar: Redefinir formulário");
             }
             Kind::Other => {}
         }

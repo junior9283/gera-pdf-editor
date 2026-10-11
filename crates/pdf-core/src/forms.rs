@@ -71,6 +71,10 @@ pub struct FieldInfo {
     pub required: bool,
     /// Dica (/TU), quando houver.
     pub tooltip: String,
+    /// Oculto (/F 2 ou 32): não aparece ao preencher; no Preparar, aparece esmaecido.
+    pub hidden: bool,
+    /// Ações do widget (Mouse para cima, Mouse entra…), executadas ao preencher.
+    pub actions: Vec<(crate::actions::FieldTrigger, crate::actions::ActionKind)>,
     /// Formatar, Tecla, Validar e Calcular (/AA /F, /K, /V e /C). A Tecla filtra a digitação.
     pub format: FieldFormat,
     pub keystroke: FieldFormat,
@@ -294,6 +298,13 @@ fn info(w: &PdfWidget, page: i32) -> Result<FieldInfo> {
         Default::default()
     };
     let value = w.value()?.unwrap_or_default();
+    let obj_w = w.annotation().object();
+    let hidden = hidden(&obj_w)?;
+    let actions = obj_w
+        .document()
+        .map(|doc| crate::actions::read_field_actions(&doc, &obj_w))
+        .transpose()?
+        .unwrap_or_default();
     Ok(FieldInfo {
         id: annot_id(w.annotation())?,
         page,
@@ -301,6 +312,8 @@ fn info(w: &PdfWidget, page: i32) -> Result<FieldInfo> {
         kind,
         rect: w.annotation().rect()?.into(),
         value,
+        hidden,
+        actions,
         format,
         keystroke,
         validate,
@@ -356,10 +369,8 @@ impl PdfDoc {
         let mut out = Vec::new();
         for w in page_ref.widgets() {
             // campo defeituoso (ex.: ciclo de /Parent) fica de fora; os outros continuam
-            if !hidden(&w.annotation().object())? {
-                if let Ok(f) = info(&w, page) {
-                    out.push(f);
-                }
+            if let Ok(f) = info(&w, page) {
+                out.push(f);
             }
         }
         let by = |column: bool| {

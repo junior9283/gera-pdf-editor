@@ -596,12 +596,18 @@ fn paint_fields(
             egui::Stroke::new(1.0, OUTLINE),
             egui::StrokeKind::Inside,
         );
+        // oculto (Mostrar/ocultar): continua editável, esmaecido, como no Acrobat
+        let (label, color) = if f.hidden {
+            (format!("{} (oculto)", f.name), OUTLINE.gamma_multiply(0.5))
+        } else {
+            (f.name.clone(), OUTLINE)
+        };
         painter.text(
             r.left_top() + egui::vec2(2.0, 1.0),
             egui::Align2::LEFT_TOP,
-            &f.name,
+            label,
             egui::FontId::proportional(10.0),
-            OUTLINE,
+            color,
         );
         if st.show_order {
             // número da ordem de tabulação, como o Acrobat mostra com Shift+N
@@ -666,6 +672,8 @@ mod tests {
             required: false,
             tooltip: String::new(),
             keystroke: Default::default(),
+            hidden: false,
+            actions: Vec::new(),
             format: Default::default(),
             validate: Default::default(),
             calc: Default::default(),
@@ -712,6 +720,8 @@ mod tests {
             required: false,
             tooltip: String::new(),
             keystroke: Default::default(),
+            hidden: false,
+            actions: Vec::new(),
             format: Default::default(),
             validate: Default::default(),
             calc: Default::default(),

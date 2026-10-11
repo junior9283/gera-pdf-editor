@@ -502,7 +502,13 @@ fn button_and_date_fields_are_created() {
     let (id, mut p) = props(&d, "Botão1");
     assert_eq!(p.button_label, "Botão1");
     p.button_label = "Limpar".into();
-    p.reset_action = true;
+    p.actions = vec![(
+        pdf_core::FieldTrigger::MouseUp,
+        pdf_core::ActionKind::Reset {
+            fields: vec![],
+            exclude: false,
+        },
+    )];
     d.set_field_props(0, id, &p).unwrap();
     d.save(&path).unwrap();
     let d = PdfDoc::open(&path, None).unwrap();
@@ -512,7 +518,17 @@ fn button_and_date_fields_are_created() {
         FieldKind::Button { reset: true }
     );
     let (_, p) = props(&d, "Botão1");
-    assert_eq!((p.button_label.as_str(), p.reset_action), ("Limpar", true));
+    assert_eq!(p.button_label, "Limpar");
+    assert_eq!(
+        p.actions,
+        vec![(
+            pdf_core::FieldTrigger::MouseUp,
+            pdf_core::ActionKind::Reset {
+                fields: vec![],
+                exclude: false
+            }
+        )]
+    );
     let data = by_name(&f, "Data1");
     assert!(matches!(data.kind, FieldKind::Text { .. }));
     assert_eq!(

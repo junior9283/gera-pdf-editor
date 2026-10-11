@@ -6,7 +6,7 @@ use crate::form_scripts::{
     calc_script, format_scripts, parse_calc, parse_format, parse_validate, validate_script,
     FieldCalc, FieldFormat, FieldValidate,
 };
-use crate::forms::{aa_script, field_head, kids_of, on_state, options_of, resets_form};
+use crate::forms::{aa_script, field_head, kids_of, on_state, options_of};
 use crate::types::PdfRect;
 use mupdf::pdf::{PdfAnnotationType, PdfDocument, PdfObject, PdfWidget};
 use mupdf::{Buffer, Rect};
@@ -96,6 +96,11 @@ pub enum PrepareOp {
         id: i32,
         rects: Vec<PdfRect>,
     },
+    /// Ações da página (Abrir e Fechar página).
+    SetPageActions {
+        page: i32,
+        actions: Vec<(crate::actions::PageTrigger, crate::actions::ActionKind)>,
+    },
 }
 
 /// Ordem de tabulação, como no menu do Acrobat.
@@ -138,9 +143,10 @@ pub struct FieldProps {
     pub format: FieldFormat,
     pub validate: FieldValidate,
     pub calc: FieldCalc,
-    /// Botão: rótulo (/MK /CA) e a ação Redefinir formulário.
+    /// Botão: rótulo (/MK /CA).
     pub button_label: String,
-    pub reset_action: bool,
+    /// Ações do widget (aba Ações), na ordem dos gatilhos.
+    pub actions: Vec<(crate::actions::FieldTrigger, crate::actions::ActionKind)>,
 }
 
 /// Formato do campo Data novo, como o Acrobat em português.
@@ -715,6 +721,10 @@ impl PdfDoc {
                         .try_for_each(|p| d.duplicate_widget(page, id, p, offset).map(drop))
                 })
             }
+            PrepareOp::SetPageActions { page, actions } => {
+                self.check_page(page)?;
+                self.with_snapshot(|d| d.write_page_actions(page, &actions))
+            }
             PrepareOp::Copies { page, id, rects } => {
                 self.widget(page, id)?;
                 if rects.len() > MAX_COPIES {
@@ -984,11 +994,6 @@ impl PdfDoc {
     fn write_button(&mut self, obj: &mut PdfObject, p: &FieldProps) -> Result<()> {
         let mut mk = child_or_new(&self.inner, obj, "MK", false)?;
         mk.dict_put("CA", PdfObject::new_string(&p.button_label)?)?;
-        if p.reset_action {
-            obj.dict_put("A", self.inner.new_object_from_str("<</S/ResetForm>>")?)?;
-        } else if resets_form(obj)? {
-            obj.dict_delete("A")?;
-        }
         Ok(())
     }
 
@@ -1024,7 +1029,7 @@ impl PdfDoc {
             validate: parse_validate(&aa_script(&head, "V")?),
             calc: parse_calc(&aa_script(&head, "C")?),
             button_label: text(label)?,
-            reset_action: is_button && flags & PUSHBUTTON != 0 && resets_form(&obj)?,
+            actions: crate::actions::read_field_actions(&self.inner, &obj)?,
             name: partial_name(&head)?,
             tooltip: text(head.get_dict("TU")?)?,
             required: flags & REQUIRED != 0,
@@ -1151,6 +1156,9 @@ impl PdfDoc {
             _ => {}
         }
         head.dict_put("Ff", int(flags)?)?;
+        if p.actions != before.actions {
+            crate::actions::write_field_actions(&self.inner, &mut obj, &p.actions)?;
+        }
         self.refresh_widgets(page, Some(id))
     }
 

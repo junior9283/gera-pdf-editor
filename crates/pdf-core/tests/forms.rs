@@ -219,7 +219,7 @@ fn reset_form_clears_radio_groups() {
 }
 
 #[test]
-fn hidden_widgets_are_not_fields() {
+fn hidden_widgets_are_marked_hidden() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("h.pdf");
     let s = String::from_utf8(pdf_core::sample::form_pdf())
@@ -230,7 +230,9 @@ fn hidden_widgets_are_not_fields() {
         );
     std::fs::write(&path, s).unwrap();
     let d = PdfDoc::open(&path, None).unwrap();
-    assert!(d.fields(0).unwrap().iter().all(|f| f.name != "nome"));
+    // listado (o Preparar mostra e o cálculo usa), mas oculto: o preenchimento o pula
+    let f = d.fields(0).unwrap();
+    assert!(f.iter().find(|f| f.name == "nome").is_some_and(|f| f.hidden));
 }
 
 #[test]

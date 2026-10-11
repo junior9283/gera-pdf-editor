@@ -157,7 +157,7 @@ pub fn tab_order(fields: &[FieldInfo]) -> Vec<(i32, i32)> {
     let mut groups = std::collections::HashSet::new();
     fields
         .iter()
-        .filter(|f| !f.readonly)
+        .filter(|f| !f.readonly && !f.hidden)
         .filter(|f| !matches!(f.kind, FieldKind::Radio { .. }) || groups.insert(f.name.as_str()))
         .map(|f| (f.page, f.id))
         .collect()
@@ -221,7 +221,8 @@ pub fn on_page(
 ) -> Vec<FieldAction> {
     let mut out = Vec::new();
     let fill = egui::Color32::from_rgba_unmultiplied(120, 140, 255, 45);
-    for f in fields.iter().filter(|f| f.page == page) {
+    // campos ocultos (Mostrar/ocultar) não aparecem nem recebem clique
+    for f in fields.iter().filter(|f| f.page == page && !f.hidden) {
         let r = screen_rect(&f.rect, map);
         if st.highlight {
             ui.painter().rect_filled(r, 0.0, fill);
@@ -718,6 +719,8 @@ mod tests {
             required: false,
             tooltip: String::new(),
             keystroke: Default::default(),
+            hidden: false,
+            actions: Vec::new(),
             format: Default::default(),
             validate: Default::default(),
             calc: Default::default(),

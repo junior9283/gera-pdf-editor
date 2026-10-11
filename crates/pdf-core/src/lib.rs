@@ -1,6 +1,7 @@
 //! Única camada que conhece o MuPDF.
 pub mod sample;
 
+mod actions;
 mod annot_edit;
 mod attachments;
 mod comment_summary;
@@ -41,6 +42,7 @@ mod types;
 mod worker;
 mod xfdf;
 
+pub use actions::{named_label, ActionKind, FieldTrigger, PageTrigger, NAMED_ITEMS};
 pub use annot_edit::{callout_end, dist_to_segment, MAX_VERTICES};
 pub use attachments::MAX_ATTACHMENT_BYTES;
 pub use comment_summary::{

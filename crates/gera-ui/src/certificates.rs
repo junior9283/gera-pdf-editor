@@ -287,6 +287,8 @@ mod tests {
             required: false,
             tooltip: String::new(),
             keystroke: Default::default(),
+            hidden: false,
+            actions: Vec::new(),
             format: Default::default(),
             validate: Default::default(),
             calc: Default::default(),
