@@ -19,6 +19,7 @@ mod page_content;
 mod pages;
 mod pagination;
 mod prepare;
+mod properties_edit;
 mod redact;
 mod search;
 mod security;

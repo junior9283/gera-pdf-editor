@@ -56,6 +56,7 @@ impl PdfDoc {
             panel: match mode.as_str() {
                 "UseOutlines" => Some(InitialPanel::Bookmarks),
                 "UseThumbs" => Some(InitialPanel::Thumbnails),
+                "UseAttachments" => Some(InitialPanel::Attachments),
                 _ => None,
             },
             full_screen: mode == "FullScreen",

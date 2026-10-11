@@ -356,6 +356,12 @@ impl PdfDoc {
             pages: self.page_count()?,
             first_page: self.page_size(0)?,
             file_size: std::fs::metadata(&self.path).map_or(0, |m| m.len()),
+            custom: self.custom_properties(),
+            initial: self.initial_view(),
+            window: self.window_options(),
+            lang: self.language(),
+            print: self.print_prefs(),
+            fonts: self.fonts(),
         })
     }
 

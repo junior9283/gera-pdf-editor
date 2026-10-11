@@ -806,7 +806,8 @@ impl DocTab {
             Some(pdf_core::InitialPanel::Thumbnails) => {
                 self.events.push(DocEvent::ShowPanel(LeftPanel::Thumbnails))
             }
-            None => {}
+            // o painel Anexos chega na Tarefa 6
+            Some(pdf_core::InitialPanel::Attachments) | None => {}
         }
         if initial.full_screen {
             self.events.push(DocEvent::FullScreen);

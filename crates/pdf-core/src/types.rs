@@ -429,6 +429,7 @@ pub struct InitialView {
 pub enum InitialPanel {
     Bookmarks,
     Thumbnails,
+    Attachments,
 }
 
 /// `cover`: a primeira página sozinha (variantes `…Right`).
@@ -607,6 +608,85 @@ pub struct DocProperties {
     pub pages: i32,
     pub first_page: PageSize,
     pub file_size: u64,
+    /// Propriedades personalizadas do `/Info` (nome, valor).
+    pub custom: Vec<(String, String)>,
+    pub initial: InitialView,
+    pub window: WindowOptions,
+    /// Idioma do documento (`/Lang`).
+    pub lang: String,
+    pub print: PrintPrefs,
+    pub fonts: Vec<FontInfo>,
+}
+
+/// Opções de janela da Visualização inicial (`/ViewerPreferences`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WindowOptions {
+    pub fit_window: bool,
+    pub center_window: bool,
+    /// Mostrar o título do documento (não o nome do arquivo).
+    pub display_title: bool,
+    pub hide_menubar: bool,
+    pub hide_toolbar: bool,
+    pub hide_window_ui: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Duplex {
+    Simplex,
+    ShortEdge,
+    LongEdge,
+}
+
+/// Preferências de impressão pedidas pelo documento.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PrintPrefs {
+    /// Escala de página: Nenhuma (tamanho real).
+    pub scaling_none: bool,
+    pub duplex: Option<Duplex>,
+    pub copies: Option<u32>,
+    /// Intervalos de páginas, a partir de 1, inclusive.
+    pub ranges: Vec<(u32, u32)>,
+}
+
+/// Fonte usada no documento (aba Fontes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontInfo {
+    pub name: String,
+    /// Type1, TrueType, Type0, Type3…
+    pub kind: String,
+    pub embedded: bool,
+    /// Embutida só com as letras usadas (nome com prefixo `ABCDEF+`).
+    pub subset: bool,
+}
+
+/// O que a janela Propriedades grava.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PropertiesEdit {
+    pub title: String,
+    pub author: String,
+    pub subject: String,
+    pub keywords: String,
+    pub custom: Vec<(String, String)>,
+    pub initial: InitialView,
+    pub window: WindowOptions,
+    pub lang: String,
+    pub print: PrintPrefs,
+}
+
+impl From<&DocProperties> for PropertiesEdit {
+    fn from(p: &DocProperties) -> Self {
+        Self {
+            title: p.title.clone(),
+            author: p.author.clone(),
+            subject: p.subject.clone(),
+            keywords: p.keywords.clone(),
+            custom: p.custom.clone(),
+            initial: p.initial,
+            window: p.window,
+            lang: p.lang.clone(),
+            print: p.print.clone(),
+        }
+    }
 }
 
 #[cfg(test)]

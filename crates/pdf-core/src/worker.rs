@@ -42,6 +42,8 @@ pub enum Request {
     },
     /// Arquivo → Reverter: relê o arquivo salvo (responde `PagesChanged`).
     Revert,
+    /// Propriedades → OK (responde `PagesChanged`: o resumo leva a visualização inicial).
+    SetProperties(crate::types::PropertiesEdit),
     /// Ladrilho de `TILE` px da página (zoom acima do teto da página inteira).
     RenderTile {
         page: i32,
@@ -447,6 +449,10 @@ impl State {
                     });
                 }
             }
+            Request::SetProperties(e) => self.edit(send, |d| {
+                d.set_properties(&e)?;
+                Ok(Changed::Document)
+            }),
             Request::Revert => self.edit(send, |d| {
                 d.revert()?;
                 Ok(Changed::Document)
