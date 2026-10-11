@@ -926,6 +926,103 @@ impl PdfDoc {
         Ok(Some((rect, new)))
     }
 
+    /// A mudança que leva a anotação `(page, id)` por (`dx`, `dy`).
+    fn move_edit(&self, page: i32, id: i32, dx: f32, dy: f32) -> Result<Edit> {
+        Ok(match annot_edit::line_of(&self.inner, page, id)? {
+            Some((a, b)) => {
+                let shift = |p: (f32, f32)| (p.0 + dx, p.1 + dy);
+                Edit::LinePoints {
+                    page,
+                    id,
+                    a: shift(a),
+                    b: shift(b),
+                }
+            }
+            None => {
+                let (rect, ink) = annot_edit::geometry_of(&self.inner, page, id)?;
+                let (rect, ink) = annot_edit::moved(rect, ink, dx, dy);
+                Edit::Geometry {
+                    page,
+                    id,
+                    rect,
+                    ink,
+                }
+            }
+        })
+    }
+
+    /// Colar: cópia da anotação `(page, id)` em `to_page`, deslocada (`dx`, `dy`, coordenadas do
+    /// MuPDF). A aparência é copiada (mexer numa não muda a outra). Uma etapa do desfazer; devolve
+    /// o id da cópia.
+    pub fn duplicate_annot(
+        &mut self,
+        page: i32,
+        id: i32,
+        to_page: i32,
+        dx: f32,
+        dy: f32,
+    ) -> Result<i32> {
+        self.check_page(to_page)?;
+        // o original só é lido aqui: a página dele fecha antes de a de destino ser relida (o MuPDF
+        // guarda a lista de anotações de uma página aberta)
+        let mut copy = {
+            let (_page, src) = annot_edit::find(&self.inner, page, id)?;
+            let dict = src
+                .object()
+                .resolve()?
+                .ok_or_else(|| PdfError::InvalidAnnotation("anotação sem dicionário".into()))?;
+            deep_copy(&self.inner, &dict)?
+        };
+        // ligações com o original e a página de origem saem; o MuPDF dá um nome novo
+        for key in ["P", "Popup", "IRT", "NM", "Parent"] {
+            copy.dict_delete(key)?;
+        }
+        if let Some(ap) = copy.get_dict("AP")? {
+            let mut ap = ap.copy_dict()?;
+            for state in ["N", "R", "D"] {
+                let Some(stream) = ap
+                    .get_dict(state)?
+                    .filter(|s| s.is_stream().unwrap_or(false))
+                else {
+                    continue;
+                };
+                let raw = mupdf::Buffer::from_bytes(&stream.read_raw_stream()?)?;
+                let dict = stream.copy_dict()?;
+                let own = self.inner.add_stream(&raw, Some(&dict), true)?;
+                ap.dict_put(state, own)?;
+            }
+            copy.dict_put("AP", ap)?;
+        }
+        let target = self.inner.load_pdf_page(to_page)?;
+        let mut page_obj = target.object();
+        copy.dict_put("P", page_obj.clone())?;
+        let new_ref = self.inner.add_object(&copy)?;
+        let new_id = new_ref.as_indirect()?;
+        match page_obj.get_dict("Annots")? {
+            Some(mut annots) if annots.is_array()? => annots.array_push(new_ref)?,
+            _ => {
+                let mut annots = self.inner.new_array()?;
+                annots.array_push(new_ref)?;
+                page_obj.dict_put("Annots", annots)?;
+            }
+        }
+        drop(target); // a página relida vê a anotação nova
+        let mut undo = vec![Edit::Visibility {
+            page: to_page,
+            id: new_id,
+            hidden: true,
+        }];
+        if dx != 0.0 || dy != 0.0 {
+            let shift = self.move_edit(to_page, new_id, dx, dy)?;
+            undo.insert(
+                0,
+                annot_edit::apply_edit(&self.inner, &mut self.history.hidden, shift)?,
+            );
+        }
+        self.history.record(Edit::Batch(undo));
+        Ok(new_id)
+    }
+
     /// Aplica uma operação do usuário no documento em memória; devolve as páginas mudadas.
     pub fn apply(&mut self, op: AnnotOp) -> Result<Vec<i32>> {
         let edit = match op {
@@ -948,25 +1045,16 @@ impl PdfDoc {
                 });
                 return Ok(vec![page]);
             }
-            AnnotOp::Move { page, id, dx, dy } => {
-                if let Some((a, b)) = annot_edit::line_of(&self.inner, page, id)? {
-                    let shift = |p: (f32, f32)| (p.0 + dx, p.1 + dy);
-                    Edit::LinePoints {
-                        page,
-                        id,
-                        a: shift(a),
-                        b: shift(b),
-                    }
-                } else {
-                    let (rect, ink) = annot_edit::geometry_of(&self.inner, page, id)?;
-                    let (rect, ink) = annot_edit::moved(rect, ink, dx, dy);
-                    Edit::Geometry {
-                        page,
-                        id,
-                        rect,
-                        ink,
-                    }
-                }
+            AnnotOp::Move { page, id, dx, dy } => self.move_edit(page, id, dx, dy)?,
+            AnnotOp::Duplicate {
+                page,
+                id,
+                to_page,
+                dx,
+                dy,
+            } => {
+                self.duplicate_annot(page, id, to_page, dx, dy)?;
+                return Ok(vec![to_page]);
             }
             AnnotOp::MoveLinePoint { page, id, end, to } => {
                 let (a, b) = annot_edit::line_of(&self.inner, page, id)?
@@ -1291,6 +1379,34 @@ impl PdfDoc {
             .and_then(|v| v.as_bool().ok())
             .unwrap_or(false)
     }
+}
+
+/// Cópia de um objeto com os dicionários e arrays diretos também copiados (uma cópia rasa
+/// compartilharia, por exemplo, a borda `/BS`, e mudar a cópia mudaria o original). Objetos
+/// indiretos continuam compartilhados.
+fn deep_copy(doc: &PdfDocument, obj: &PdfObject) -> Result<PdfObject> {
+    if obj.is_indirect()? {
+        return Ok(obj.clone());
+    }
+    if obj.is_dict()? {
+        let mut out = doc.new_dict()?;
+        for i in 0..obj.dict_len()? as i32 {
+            if let (Some(k), Some(v)) = (obj.get_dict_key(i)?, obj.get_dict_val(i)?) {
+                out.dict_put(k, deep_copy(doc, &v)?)?;
+            }
+        }
+        return Ok(out);
+    }
+    if obj.is_array()? {
+        let mut out = doc.new_array()?;
+        for i in 0..obj.len()? as i32 {
+            if let Some(v) = obj.get_array(i)? {
+                out.array_push(deep_copy(doc, &v)?)?;
+            }
+        }
+        return Ok(out);
+    }
+    Ok(obj.clone())
 }
 
 /// Escala máxima de um ladrilho: 6400 % numa tela 4× (o ladrilho tem tamanho fixo).

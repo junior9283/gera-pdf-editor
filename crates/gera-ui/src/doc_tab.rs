@@ -1,5 +1,6 @@
 use crate::bench::Bench;
 use crate::canvas::{self, CanvasFrame};
+use crate::clipboard::Paste;
 use crate::edit::{screen_rect, EditState};
 use crate::print_job::{self, PrintJobs};
 use crate::search::SearchState;
@@ -67,6 +68,10 @@ pub enum DocCommand {
     Tool(app_state::tools::Tool),
     /// Shift+U: alterna entre Destacar e Sublinhar.
     CycleMarkup,
+    /// Recortar o comentário selecionado (Ctrl+X).
+    Cut,
+    /// Desmarcar tudo (Ctrl+Shift+A): seleção de texto e de comentário.
+    DeselectAll,
     /// Histórico de vistas (Alt+← / Alt+→).
     ViewBack,
     ViewForward,
@@ -119,6 +124,14 @@ pub struct DocTab {
     /// Último quadro do canvas (rolagem e página atual).
     pub(crate) last: CanvasFrame,
     pub(crate) jump_to: Option<f32>,
+    /// Comentário copiado ou recortado no app.
+    clip: crate::clipboard::AnnotClipboard,
+    /// Leitura da área de transferência do sistema em andamento.
+    paste_rx: Option<std::sync::mpsc::Receiver<crate::clipboard::SystemClip>>,
+    /// Imagens coladas gravadas na pasta temporária (apagadas ao fechar a aba).
+    pasted_files: Vec<std::path::PathBuf>,
+    /// Depois de colar, seleciona o comentário mais novo desta página.
+    select_newest_on: Option<i32>,
     /// Como abrir: padrão das Preferências e a última vista do arquivo (dados pela casca).
     pub(crate) open_view: OpenView,
     /// Mão temporária enquanto o Espaço está segurado.
@@ -272,6 +285,10 @@ impl DocTab {
             pending_target: None,
             temp_tool: Default::default(),
             open_view: OpenView::default(),
+            clip: Default::default(),
+            paste_rx: None,
+            pasted_files: Vec::new(),
+            select_newest_on: None,
             marquee: None,
             focus_zoom: false,
             zoom_text: None,
@@ -374,6 +391,13 @@ impl DocTab {
         if self.navigate(cmd) {
             return;
         }
+        // com um comentário selecionado (e sem texto), Copiar e Recortar são dele
+        if matches!(cmd, DocCommand::Copy | DocCommand::Cut) && self.copy_comment(ctx) {
+            if cmd == DocCommand::Cut {
+                self.edit.delete_selected();
+            }
+            return;
+        }
         let page = self.last.current_page;
         let Some(view) = self.view.as_mut() else {
             return;
@@ -403,8 +427,13 @@ impl DocTab {
             DocCommand::Redo if self.history.can_redo => self.worker.send(Request::Redo),
             DocCommand::Undo | DocCommand::Redo => {}
             DocCommand::Find => self.focus_search = true,
+            DocCommand::Cut => {} // tratado no começo
             DocCommand::Copy if !self.security.permissions.copy => self.deny("copiar"),
             DocCommand::Copy => self.edit.copy(ctx),
+            DocCommand::DeselectAll => {
+                self.edit.selection = None;
+                self.edit.selected = None;
+            }
             DocCommand::SelectAll => self.edit.select_all(&self.worker),
             DocCommand::Delete if self.prepare_tools => {
                 if let Some((page, id)) = self.prepare.selected.take() {
@@ -504,6 +533,143 @@ impl DocTab {
             _ => return false,
         }
         true
+    }
+
+    /// Copiar/Recortar com um comentário selecionado e sem texto selecionado: o comentário vai
+    /// para a área interna (e o texto dele para a do sistema). Devolve se copiou.
+    fn copy_comment(&mut self, ctx: &egui::Context) -> bool {
+        let has_text = self
+            .edit
+            .selection
+            .as_ref()
+            .is_some_and(|s| !s.text.is_empty());
+        let Some((page, id)) = self.edit.selected.filter(|_| !has_text) else {
+            return false;
+        };
+        let contents = self
+            .annots
+            .iter()
+            .find(|a| a.page == page && a.id == id)
+            .map_or("", |a| a.contents.as_str());
+        ctx.copy_text(self.clip.copy(page, id, contents));
+        true
+    }
+
+    /// Colar (Ctrl+V com o texto da área do sistema, ou Editar → Colar, que a lê aqui): o
+    /// comentário copiado no app, uma caixa de texto ou, com imagem, um carimbo.
+    pub(crate) fn paste(&mut self, system_text: Option<String>) {
+        if !self.security.permissions.annotate {
+            self.deny("colar comentários");
+            return;
+        }
+        let page = self.last.current_page as i32;
+        match self.clip.paste(system_text.as_deref(), page) {
+            Paste::Annot {
+                page,
+                id,
+                to_page,
+                dx,
+                dy,
+            } => {
+                self.select_newest_on = Some(to_page);
+                self.edit.push_op(pdf_core::AnnotOp::Duplicate {
+                    page,
+                    id,
+                    to_page,
+                    dx,
+                    dy,
+                });
+            }
+            Paste::Text(text) => self.paste_text_box(page, text),
+            Paste::FromSystem => self.read_system_clipboard(),
+        }
+    }
+
+    fn paste_text_box(&mut self, page: i32, text: String) {
+        let Some(size) = self
+            .view
+            .as_ref()
+            .and_then(|v| v.sizes.get(page as usize).copied())
+        else {
+            return;
+        };
+        let lines = text.lines().count().clamp(1, 40) as f32;
+        let longest = text.lines().map(|l| l.chars().count()).max().unwrap_or(1) as f32;
+        let box_size = (
+            (longest * 6.5 + 12.0).clamp(80.0, size.width * 0.8),
+            lines * 14.5 + 10.0,
+        );
+        let center = (size.width / 2.0, size.height / 2.0);
+        let rect = crate::clipboard::centered(center, box_size, (size.width, size.height));
+        self.select_newest_on = Some(page);
+        self.edit
+            .push_op(pdf_core::AnnotOp::Create(pdf_core::NewAnnot::TextBox {
+                page,
+                rect,
+                text,
+                size: 12.0,
+                color: [0.0, 0.0, 0.0],
+            }));
+    }
+
+    /// Lê a área de transferência do sistema numa thread: imagem (vira carimbo) ou texto.
+    fn read_system_clipboard(&mut self) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.paste_rx = Some(rx);
+        let dir = std::env::temp_dir();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::clipboard::read_system(&dir));
+        });
+    }
+
+    /// Resposta da leitura da área de transferência.
+    fn poll_paste(&mut self) {
+        let Some(rx) = self.paste_rx.as_ref() else {
+            return;
+        };
+        let Ok(found) = rx.try_recv() else {
+            return;
+        };
+        self.paste_rx = None;
+        use crate::clipboard::SystemClip;
+        match found {
+            SystemClip::Text(t) => self.paste(Some(t)),
+            SystemClip::Image {
+                path,
+                width,
+                height,
+            } => {
+                self.pasted_files.push(path.clone());
+                self.paste_image(path, (width, height));
+            }
+            SystemClip::Refused(msg) => self.status = msg,
+            SystemClip::Empty => self.status = "A área de transferência está vazia.".into(),
+        }
+    }
+
+    /// Imagem colada: um carimbo no meio da página atual, do tamanho natural (até 80 % da página).
+    fn paste_image(&mut self, path: std::path::PathBuf, px: (u32, u32)) {
+        let page = self.last.current_page as i32;
+        let Some(size) = self
+            .view
+            .as_ref()
+            .and_then(|v| v.sizes.get(page as usize).copied())
+        else {
+            return;
+        };
+        // 96 ppp da tela: 1 px = 0,75 pt
+        let (w, h) = (px.0 as f32 * 0.75, px.1 as f32 * 0.75);
+        let k = (size.width * 0.8 / w).min(size.height * 0.8 / h).min(1.0);
+        let center = (size.width / 2.0, size.height / 2.0);
+        let rect = crate::clipboard::centered(center, (w * k, h * k), (size.width, size.height));
+        self.select_newest_on = Some(page);
+        self.edit
+            .push_op(pdf_core::AnnotOp::Create(pdf_core::NewAnnot::Signature {
+                page,
+                rect,
+                art: pdf_core::SignatureArt::Image { path },
+                initials: false,
+            }));
     }
 
     /// Escolhe a ferramenta; as de comentário abrem a linha Comentar (como no Acrobat).
@@ -850,6 +1016,7 @@ impl DocTab {
         if let Some(msg) = self.print_jobs.poll().pop() {
             self.status = msg;
         }
+        self.poll_paste();
         let mut renders = 0;
         loop {
             let response = match self.worker.rx.try_recv() {
@@ -1079,6 +1246,15 @@ impl DocTab {
                 } => {
                     replace_pages(&mut self.annots, &pages, annots);
                     self.edit.keep_valid_selection(&self.annots);
+                    // o que acabou de ser colado fica selecionado (o mais novo da página)
+                    if let Some(page) = self.select_newest_on.take_if(|p| pages.contains(p)) {
+                        self.edit.selected = self
+                            .annots
+                            .iter()
+                            .filter(|a| a.page == page && a.reply_to.is_none())
+                            .max_by_key(|a| a.id)
+                            .map(|a| (a.page, a.id));
+                    }
                     self.edit_pdf.invalidate(&pages);
                     self.history = history;
                     if let Some(view) = self.view.as_mut() {
@@ -2757,6 +2933,9 @@ impl Drop for DocTab {
         if let Some(p) = self.print_pending.take() {
             let _ = std::fs::remove_file(p.file);
         }
+        for f in &self.pasted_files {
+            let _ = std::fs::remove_file(f);
+        }
         // OCR em andamento: para (libera a CPU e a vez das outras abas)
         if let Some(c) = self.ocr.as_ref().and_then(|w| w.cancel.as_ref()) {
             c.cancel();
@@ -2902,6 +3081,50 @@ mod tests {
         assert_eq!(tab.edit.tool, Tool::Underline);
         tab.run(&ctx, DocCommand::Tool(Tool::Hand));
         assert_eq!(tab.edit.tool, Tool::Hand);
+    }
+
+    #[test]
+    fn paste_is_denied_without_comment_permission() {
+        let mut tab = tab_with_pages(1);
+        tab.security.permissions.annotate = false;
+        tab.paste(Some("texto".into()));
+        assert!(tab.edit.ops.is_empty(), "nada criado");
+        assert!(tab.status.contains("não permite colar"), "{}", tab.status);
+    }
+
+    #[test]
+    fn cut_copies_the_selected_comment_and_deletes_it() {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_pages(2);
+        tab.security.permissions.annotate = true;
+        tab.annots.push(pdf_core::AnnotInfo {
+            page: 0,
+            id: 5,
+            contents: "nota".into(),
+            ..Default::default()
+        });
+        tab.edit.selected = Some((0, 5));
+        tab.run(&ctx, DocCommand::Cut);
+        assert_eq!(
+            tab.edit.ops,
+            vec![pdf_core::AnnotOp::Delete { page: 0, id: 5 }]
+        );
+        // colar com a marca ainda na área de transferência: duplica o recortado
+        tab.edit.ops.clear();
+        tab.paste(Some("nota".into()));
+        assert!(matches!(
+            tab.edit.ops.as_slice(),
+            [pdf_core::AnnotOp::Duplicate { page: 0, id: 5, .. }]
+        ));
+        // texto de fora: caixa de texto
+        tab.edit.ops.clear();
+        tab.paste(Some("outro".into()));
+        assert!(matches!(
+            tab.edit.ops.as_slice(),
+            [pdf_core::AnnotOp::Create(
+                pdf_core::NewAnnot::TextBox { .. }
+            )]
+        ));
     }
 
     #[test]

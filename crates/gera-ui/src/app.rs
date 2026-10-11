@@ -449,6 +449,11 @@ impl GeraApp {
                 self.prefs_dirty = true;
             }
             Command::Tool(id) => self.run_tool(ctx, id),
+            Command::Paste(text) => {
+                if let Some(doc) = self.active_doc() {
+                    doc.paste(text);
+                }
+            }
             Command::Preferences => {
                 self.preferences = Some(crate::shell::preferences::PrefsDraft::new(&self.prefs))
             }

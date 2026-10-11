@@ -544,6 +544,14 @@ pub enum AnnotOp {
         page: i32,
         id: i32,
     },
+    /// Colar: cópia da anotação em `to_page`, deslocada (`dx`, `dy`).
+    Duplicate {
+        page: i32,
+        id: i32,
+        to_page: i32,
+        dx: f32,
+        dy: f32,
+    },
     /// Responde ao comentário `parent` (resposta na conversa, como no Acrobat).
     Reply {
         page: i32,

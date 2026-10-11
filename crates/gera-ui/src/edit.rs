@@ -169,7 +169,7 @@ impl Markup {
 pub struct EditState {
     pub tool: Tool,
     /// Edições de anotação geradas neste quadro; a aba as envia ao worker (`take_ops`).
-    ops: Vec<AnnotOp>,
+    pub(crate) ops: Vec<AnnotOp>,
     pub saving: bool,
     stroke: Vec<(f32, f32)>,
     pub selection: Option<Selection>,

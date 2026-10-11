@@ -78,8 +78,11 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
             item(ui, &mut out, doc(DocCommand::Undo), has_doc);
             item(ui, &mut out, doc(DocCommand::Redo), has_doc);
             ui.separator();
+            item(ui, &mut out, doc(DocCommand::Cut), has_doc);
             item(ui, &mut out, doc(DocCommand::Copy), has_doc);
+            item(ui, &mut out, Command::Paste(None), has_doc);
             item(ui, &mut out, doc(DocCommand::SelectAll), has_doc);
+            item(ui, &mut out, doc(DocCommand::DeselectAll), has_doc);
             item(ui, &mut out, doc(DocCommand::Delete), has_doc);
             ui.separator();
             item(ui, &mut out, doc(DocCommand::Find), has_doc);

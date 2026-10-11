@@ -30,6 +30,9 @@ pub enum Command {
     Compare,
     /// Editar → Preferências… (Ctrl+K).
     Preferences,
+    /// Colar (Ctrl+V): o texto da área de transferência que veio no evento, ou `None` (menu),
+    /// e então a aba lê a área do sistema (também imagens).
+    Paste(Option<String>),
     /// Abre uma ferramenta do catálogo pelo menu (o mesmo que clicar nela em Ferramentas).
     Tool(&'static str),
 }
@@ -57,6 +60,7 @@ impl Command {
             Command::Print => "Imprimir…",
             Command::Compare => "Comparar arquivos…",
             Command::Preferences => "Preferências…",
+            Command::Paste(_) => "Colar",
             Command::Tool(id) => {
                 return app_state::tools_catalog::find(id)
                     .map_or(*id, |t| t.name)
@@ -92,6 +96,8 @@ impl Command {
                 DocCommand::ZoomTo => "Zoom para…",
                 DocCommand::Tool(t) => return t.label().into(),
                 DocCommand::CycleMarkup => "Alternar destacar e sublinhar",
+                DocCommand::Cut => "Recortar",
+                DocCommand::DeselectAll => "Desmarcar tudo",
                 DocCommand::ViewBack => "Vista anterior",
                 DocCommand::ViewForward => "Vista seguinte",
             },
@@ -109,6 +115,7 @@ pub fn shortcuts() -> Vec<(KeyboardShortcut, Command)> {
     let doc = Command::Doc;
     vec![
         (cmd_shift(Key::S), Command::SaveAs),
+        (cmd_shift(Key::A), doc(DocCommand::DeselectAll)),
         // navegação de páginas: os do Acrobat
         (cmd_shift(Key::N), doc(DocCommand::GoToPage)),
         (cmd_shift(Key::PageUp), doc(DocCommand::FirstPage)),
@@ -138,6 +145,9 @@ pub fn shortcuts() -> Vec<(KeyboardShortcut, Command)> {
         (cmd(Key::F), doc(DocCommand::Find)),
         (cmd(Key::C), doc(DocCommand::Copy)),
         (cmd(Key::A), doc(DocCommand::SelectAll)),
+        // mostrados nos menus; o egui entrega Ctrl+X e Ctrl+V como eventos (ver `from_keyboard`)
+        (cmd(Key::X), doc(DocCommand::Cut)),
+        (cmd(Key::V), Command::Paste(None)),
         (cmd(Key::Tab), Command::NextTab),
         // resultado da comparação: como no Acrobat
         (cmd(Key::Period), doc(DocCommand::NextChange)),
@@ -265,12 +275,17 @@ pub fn from_keyboard(ctx: &egui::Context, single_key: bool) -> Vec<Command> {
             .filter(|(s, _)| i.consume_shortcut(s))
             .map(|(_, c)| c)
             .collect();
-        // o egui entrega Ctrl+C como evento "copiar", não como tecla: passa pelo mesmo filtro
-        let copy = Command::Doc(DocCommand::Copy);
-        if i.events.iter().any(|e| matches!(e, egui::Event::Copy))
-            && !(typing && belongs_to_text_fields(&copy))
-        {
-            out.push(copy);
+        // o egui entrega Ctrl+C, Ctrl+X e Ctrl+V como eventos, não como teclas; num campo de
+        // texto são dele
+        if !typing {
+            for e in &i.events {
+                match e {
+                    egui::Event::Copy => out.push(Command::Doc(DocCommand::Copy)),
+                    egui::Event::Cut => out.push(Command::Doc(DocCommand::Cut)),
+                    egui::Event::Paste(t) => out.push(Command::Paste(Some(t.clone()))),
+                    _ => {}
+                }
+            }
         }
         out
     })
