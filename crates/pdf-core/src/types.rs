@@ -727,6 +727,21 @@ pub enum AnnotOp {
         page: i32,
         id: i32,
     },
+    /// Exclui vários (cada um com o grupo e os filhos), numa etapa.
+    DeleteMany {
+        page: i32,
+        ids: Vec<i32>,
+    },
+    /// Agrupa os comentários (o primeiro é o principal); grupos já existentes se juntam.
+    Group {
+        page: i32,
+        ids: Vec<i32>,
+    },
+    /// Desfaz o grupo de `id`.
+    Ungroup {
+        page: i32,
+        id: i32,
+    },
     /// Colar: cópia da anotação em `to_page`, deslocada (`dx`, `dy`).
     Duplicate {
         page: i32,

@@ -405,3 +405,129 @@ fn a_group_pointing_outside_the_page_annotations_still_deletes() {
     d.apply(AnnotOp::Delete { page: 0, id }).unwrap();
     assert!(d.annotations(0).unwrap().is_empty());
 }
+
+fn three_notes(d: &mut PdfDoc) -> Vec<i32> {
+    for x in [100.0, 200.0, 300.0] {
+        d.apply(AnnotOp::Create(NewAnnot::Note {
+            page: 0,
+            at: (x, 100.0),
+            text: format!("nota {x}"),
+        }))
+        .unwrap();
+    }
+    d.annotations(0).unwrap().iter().map(|a| a.id).collect()
+}
+
+fn rect_of(d: &PdfDoc, id: i32) -> pdf_core::PdfRect {
+    d.annotations(0)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.id == id)
+        .unwrap()
+        .rect
+}
+
+#[test]
+fn grouping_moves_and_deletes_together_and_undoes() {
+    let (_d, path, mut d) = blank();
+    let ids = three_notes(&mut d);
+    d.apply(AnnotOp::Group {
+        page: 0,
+        ids: vec![ids[0], ids[1]],
+    })
+    .unwrap();
+    let all = d.annotations(0).unwrap();
+    let second = all.iter().find(|a| a.id == ids[1]).unwrap();
+    assert_eq!(second.group, Some(ids[0]), "o primeiro é o principal");
+    let before = (rect_of(&d, ids[0]), rect_of(&d, ids[2]));
+    // mover um membro move o grupo
+    d.apply(AnnotOp::Move {
+        page: 0,
+        id: ids[1],
+        dx: 10.0,
+        dy: 0.0,
+    })
+    .unwrap();
+    assert!((rect_of(&d, ids[0]).x0 - before.0.x0 - 10.0).abs() < 0.5);
+    assert_eq!(rect_of(&d, ids[2]), before.1, "quem está fora não se move");
+    d.undo().unwrap();
+    assert_eq!(rect_of(&d, ids[0]), before.0, "uma etapa");
+    d.apply(AnnotOp::Delete {
+        page: 0,
+        id: ids[1],
+    })
+    .unwrap();
+    assert_eq!(d.annotations(0).unwrap().len(), 1, "o grupo sai junto");
+    d.undo().unwrap();
+    assert_eq!(d.annotations(0).unwrap().len(), 3);
+    d.undo().unwrap();
+    assert!(d.annotations(0).unwrap().iter().all(|a| a.group.is_none()));
+    d.redo().unwrap();
+    d.save(&path).unwrap();
+    let back = PdfDoc::open(&path, None).unwrap().annotations(0).unwrap();
+    assert_eq!(back.iter().filter(|a| a.group.is_some()).count(), 1);
+}
+
+#[test]
+fn ungroup_splits_and_undoes() {
+    let (_d, _p, mut d) = blank();
+    let ids = three_notes(&mut d);
+    d.apply(AnnotOp::Group {
+        page: 0,
+        ids: ids.clone(),
+    })
+    .unwrap();
+    d.apply(AnnotOp::Ungroup {
+        page: 0,
+        id: ids[2],
+    })
+    .unwrap();
+    assert!(d.annotations(0).unwrap().iter().all(|a| a.group.is_none()));
+    d.undo().unwrap();
+    assert_eq!(
+        d.annotations(0)
+            .unwrap()
+            .iter()
+            .filter(|a| a.group == Some(ids[0]))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn replies_and_single_items_are_not_grouped() {
+    let (_d, _p, mut d, id) = doc_with_note();
+    d.apply(reply(id, "resposta")).unwrap();
+    let r = d
+        .annotations(0)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.reply_to.is_some())
+        .unwrap();
+    assert!(d
+        .apply(AnnotOp::Group {
+            page: 0,
+            ids: vec![id, r.id],
+        })
+        .is_err());
+    assert!(d
+        .apply(AnnotOp::Group {
+            page: 0,
+            ids: vec![id],
+        })
+        .is_err());
+}
+
+#[test]
+fn delete_many_is_one_step() {
+    let (_d, _p, mut d) = blank();
+    let ids = three_notes(&mut d);
+    d.apply(AnnotOp::DeleteMany {
+        page: 0,
+        ids: vec![ids[0], ids[2]],
+    })
+    .unwrap();
+    assert_eq!(d.annotations(0).unwrap().len(), 1);
+    d.undo().unwrap();
+    assert_eq!(d.annotations(0).unwrap().len(), 3);
+}

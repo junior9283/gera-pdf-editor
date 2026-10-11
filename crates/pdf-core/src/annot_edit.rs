@@ -86,6 +86,8 @@ pub(crate) enum Edit {
         size: f32,
         color: [f32; 3],
     },
+    /// Grupo (/IRT com /RT /Group): `to` é o principal, `None` tira do grupo.
+    Group { page: i32, id: i32, to: Option<i32> },
     /// Intensidade da borda de nuvem (/BE /I).
     Cloud { page: i32, id: i32, intensity: f32 },
     /// Várias mudanças da mesma anotação num passo só do desfazer (ex.: texto e tamanho da caixa).
@@ -104,6 +106,7 @@ impl Edit {
             | Self::Callout { page, .. }
             | Self::Fill { page, .. }
             | Self::Cloud { page, .. }
+            | Self::Group { page, .. }
             | Self::Font { page, .. } => *page,
             Self::Batch(edits) => edits.first().map_or(0, Edit::page),
         }
@@ -594,6 +597,7 @@ pub(crate) fn apply_edit(
         | Edit::Callout { page, id, .. }
         | Edit::Fill { page, id, .. }
         | Edit::Cloud { page, id, .. }
+        | Edit::Group { page, id, .. }
         | Edit::Font { page, id, .. } => (*page, *id),
     };
     let (mut page_ref, mut a) = find(doc, page, id)?;
@@ -711,6 +715,22 @@ pub(crate) fn apply_edit(
                 id,
                 color: old,
             }
+        }
+        Edit::Group { to, .. } => {
+            let old = group_of(&a)?;
+            let mut obj = a.object();
+            match to {
+                Some(root) => {
+                    let (_, principal) = find(doc, page, root)?;
+                    obj.dict_put("IRT", principal.object())?;
+                    obj.dict_put("RT", PdfObject::new_name("Group")?)?;
+                }
+                None => {
+                    obj.dict_delete("IRT")?;
+                    obj.dict_delete("RT")?;
+                }
+            }
+            Edit::Group { page, id, to: old }
         }
         Edit::Cloud { intensity, .. } => {
             if !is_cloudy(&a)? {
