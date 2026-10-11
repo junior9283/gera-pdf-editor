@@ -21,6 +21,7 @@ pub fn show_pages(
     view: &mut DocView,
     worker: &Worker,
     jump_to: Option<f32>,
+    jump_x: Option<f32>,
     on_page: &mut dyn FnMut(&mut egui::Ui, usize, egui::Rect, &PageMap),
 ) -> CanvasFrame {
     view.set_ppp(ui.ctx().pixels_per_point());
@@ -30,6 +31,9 @@ pub fn show_pages(
     let mut area = egui::ScrollArea::both().auto_shrink(false);
     if let Some(y) = jump_to {
         area = area.vertical_scroll_offset(y.max(0.0));
+    }
+    if let Some(x) = jump_x {
+        area = area.horizontal_scroll_offset(x.max(0.0));
     }
     let out = area.show_viewport(ui, |ui, viewport| {
         let total = egui::vec2(view.layout.max_width(), win_h);
@@ -59,6 +63,7 @@ pub fn show_pages(
             );
             let scale = view.scale_for(i);
             paint_page(ui, view, i as i32, rect, scale);
+            paint_tiles(ui, view, worker, i, rect);
             let map = view.page_map(i, rect.min.into());
             on_page(ui, i, rect, &map);
         }
@@ -113,6 +118,19 @@ fn paint_page(ui: &egui::Ui, view: &mut DocView, page: i32, rect: egui::Rect, sc
         None => {
             let gray = if view.dark { 30 } else { 245 };
             painter.rect_filled(rect, 0.0, egui::Color32::from_gray(gray));
+        }
+    }
+}
+
+/// Acima do teto da página inteira, cobre a parte visível com ladrilhos na escala exata do zoom
+/// (os que ainda não chegaram deixam ver a página ampliada por baixo).
+fn paint_tiles(ui: &egui::Ui, view: &mut DocView, worker: &Worker, page: usize, rect: egui::Rect) {
+    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    for tile in view.wanted_tiles(page, rect, ui.clip_rect()) {
+        view.request_tile(worker, page as i32, tile);
+        if let Some((id, offset, size)) = view.tile_texture(page as i32, tile) {
+            let at = egui::Rect::from_min_size(rect.min + offset, size);
+            ui.painter().image(id, at, uv, egui::Color32::WHITE);
         }
     }
 }

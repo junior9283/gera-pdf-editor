@@ -7,7 +7,6 @@ use app_state::fill_sign::{self as fs, FillTool};
 use app_state::stamps::StampKind;
 use app_state::tools::Tool;
 use app_state::tools_catalog;
-use app_state::zoom::Fit;
 use pdf_core::{AnnotKind, AnnotOp, Mark};
 
 pub fn show(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
@@ -23,22 +22,10 @@ pub fn show(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
         doc.page_controls(ui);
         ui.separator();
         button(ui, &mut out, "−", Command::Doc(DocCommand::ZoomOut), true);
-        if let Some(pct) = doc.zoom_percent() {
-            ui.label(format!("{pct:.0}%"));
-        }
         button(ui, &mut out, "+", Command::Doc(DocCommand::ZoomIn), true);
-        ui.menu_button("⏷", |ui| {
-            for cmd in [
-                DocCommand::Fit(Fit::Width),
-                DocCommand::Fit(Fit::Page),
-                DocCommand::ZoomReset,
-            ] {
-                let cmd = Command::Doc(cmd);
-                if ui.button(cmd.label()).clicked() {
-                    out = Some(cmd);
-                }
-            }
-        });
+        if let Some(fit) = doc.zoom_controls(ui) {
+            out = Some(Command::Doc(fit));
+        }
         ui.separator();
         doc.search_box(ui);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

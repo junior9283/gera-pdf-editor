@@ -18,6 +18,11 @@ const DEFAULT_MAX_SIDE: f32 = 8192.0;
 
 /// Orçamento de texturas de página em memória (RGBA).
 const CACHE_BUDGET_BYTES: usize = 96 * 1024 * 1024;
+/// Orçamento dos ladrilhos de alta resolução (uma tela 4K usa uns 40 de 1 MB).
+const TILE_BUDGET_BYTES: usize = 48 * 1024 * 1024;
+
+/// (página, escala quantizada, invertido, rotação, coluna, linha)
+pub type TileKey = (i32, u32, bool, Rotation, u32, u32);
 
 struct CachedTexture {
     handle: egui::TextureHandle,
@@ -53,6 +58,11 @@ pub struct DocView {
     cache: LruCache<RenderKey, CachedTexture>,
     requested: HashMap<RenderKey, CancelToken>,
     wanted: HashSet<RenderKey>,
+    tiles: LruCache<TileKey, CachedTexture>,
+    requested_tiles: HashMap<TileKey, CancelToken>,
+    wanted_tiles: HashSet<TileKey>,
+    /// Ajustar ao conteúdo visível: caixa da tinta da página (pontos do MuPDF) e a página dela.
+    pub visible_box: Option<(usize, pdf_core::PdfRect)>,
 }
 
 impl DocView {
@@ -75,6 +85,10 @@ impl DocView {
             cache: LruCache::new(CACHE_BUDGET_BYTES),
             requested: HashMap::new(),
             wanted: HashSet::new(),
+            tiles: LruCache::new(TILE_BUDGET_BYTES),
+            requested_tiles: HashMap::new(),
+            wanted_tiles: HashSet::new(),
+            visible_box: None,
         };
         view.reshape();
         view
@@ -132,9 +146,32 @@ impl DocView {
             Fit::Width => zoom::fit_width(self.base.0, avail_w),
             Fit::Page => zoom::fit_page(self.base, (avail_w, avail_h)),
             Fit::Height => zoom::fit_height(self.base.1, avail_h),
-            Fit::Visible => return None, // Tarefa 6: largura da caixa de conteúdo
+            Fit::Visible => {
+                let width = self.visible_extent()?.1;
+                zoom::fit_width(width, avail_w * 0.96)
+            }
         };
         (zoom::quantize(z) != zoom::quantize(self.zoom)).then(|| self.set_zoom(z))
+    }
+
+    /// Ajustar ao conteúdo visível: (borda esquerda, largura) da caixa da tinta na tela com zoom 1,
+    /// relativas à página dela, já com a rotação da vista.
+    fn visible_extent(&self) -> Option<(f32, f32)> {
+        let (page, r) = self.visible_box?;
+        let map = PageMap {
+            zoom: 1.0,
+            ..self.page_map(page, (0.0, 0.0))
+        };
+        let xs = [(r.x0, r.y0), (r.x1, r.y1)].map(|p| map.to_screen(p).0);
+        let (left, right) = (xs[0].min(xs[1]), xs[0].max(xs[1]));
+        (right - left > 1.0).then_some((left, right - left))
+    }
+
+    /// Rolagem horizontal que põe a borda esquerda do conteúdo visível na margem da janela.
+    pub fn visible_left(&self, avail_w: f32) -> Option<f32> {
+        let page = self.visible_box?.0;
+        let (left, _) = self.visible_extent()?;
+        Some((self.layout.page_x(page) + left * self.zoom - avail_w * 0.02).max(0.0))
     }
 
     pub fn set_rotation(&mut self, rotation: Rotation) {
@@ -276,14 +313,120 @@ impl DocView {
         Some(y.max(0.0))
     }
 
+    /// Escala da página inteira menor que a do zoom: o canvas cobre a parte visível com ladrilhos.
+    pub fn needs_tiles(&self, page: usize) -> bool {
+        self.scale_for(page) < self.page_scale() * 0.999
+    }
+
+    /// Ladrilhos da página desenhada em `rect` (tela) que aparecem em `clip`; vazio se a imagem da
+    /// página inteira já tem a nitidez do zoom.
+    pub fn wanted_tiles(&self, page: usize, rect: egui::Rect, clip: egui::Rect) -> Vec<(u32, u32)> {
+        if !self.needs_tiles(page) {
+            return Vec::new();
+        }
+        let px = |v: f32| v * self.ppp;
+        let vis = rect.intersect(clip);
+        app_state::tiles::visible_tiles(
+            (px(rect.width()), px(rect.height())),
+            (
+                px(vis.min.x - rect.min.x),
+                px(vis.min.y - rect.min.y),
+                px(vis.max.x - rect.min.x),
+                px(vis.max.y - rect.min.y),
+            ),
+            pdf_core::TILE as f32,
+        )
+    }
+
+    fn tile_key(&self, page: i32, tile: (u32, u32)) -> TileKey {
+        let scale = zoom::quantize(self.page_scale());
+        (page, scale, self.dark, self.rotation, tile.0, tile.1)
+    }
+
+    /// Textura do ladrilho e onde desenhá-lo dentro da página (`offset`, `size` em pontos de tela).
+    pub fn tile_texture(
+        &mut self,
+        page: i32,
+        tile: (u32, u32),
+    ) -> Option<(egui::TextureId, egui::Vec2, egui::Vec2)> {
+        let key = self.tile_key(page, tile);
+        let side = pdf_core::TILE as f32 / self.ppp;
+        let t = self.tiles.get(&key)?;
+        let size = t.handle.size_vec2() / self.ppp;
+        Some((
+            t.handle.id(),
+            egui::vec2(tile.0 as f32 * side, tile.1 as f32 * side),
+            size,
+        ))
+    }
+
+    pub fn request_tile(&mut self, worker: &Worker, page: i32, tile: (u32, u32)) {
+        let key = self.tile_key(page, tile);
+        self.wanted_tiles.insert(key);
+        if self.tiles.contains(&key) || self.requested_tiles.contains_key(&key) {
+            return;
+        }
+        let cancel = CancelToken::new();
+        self.requested_tiles.insert(key, cancel.clone());
+        worker.send(Request::RenderTile {
+            page,
+            scale: self.page_scale(),
+            invert: self.dark,
+            rotation: self.rotation,
+            tile,
+            cancel,
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn on_tile(
+        &mut self,
+        ctx: &egui::Context,
+        page: i32,
+        scale: f32,
+        invert: bool,
+        rotation: Rotation,
+        tile: (u32, u32),
+        img: RenderedPage,
+    ) {
+        let key = (
+            page,
+            zoom::quantize(scale),
+            invert,
+            rotation,
+            tile.0,
+            tile.1,
+        );
+        if self.requested_tiles.remove(&key).is_none() {
+            return;
+        }
+        let image = egui::ColorImage::from_rgb([img.width as usize, img.height as usize], &img.rgb);
+        let handle = ctx.load_texture(
+            format!("t{page}-{}-{}-{}", key.1, tile.0, tile.1),
+            image,
+            egui::TextureOptions::LINEAR,
+        );
+        let bytes = img.width as usize * img.height as usize * 4;
+        self.tiles.insert(key, CachedTexture { handle, bytes });
+    }
+
     pub fn begin_frame(&mut self) {
         self.wanted.clear();
+        self.wanted_tiles.clear();
     }
 
     /// Cancela os pedidos de render que ninguém pediu neste quadro.
     pub fn end_frame(&mut self) {
         let wanted = &self.wanted;
         self.requested.retain(|k, token| {
+            let keep = wanted.contains(k);
+            if !keep {
+                token.cancel();
+            }
+            keep
+        });
+        let wanted = &self.wanted_tiles;
+        self.requested_tiles.retain(|k, token| {
             let keep = wanted.contains(k);
             if !keep {
                 token.cancel();
@@ -359,6 +502,13 @@ impl DocView {
             k.0 != page
         });
         self.cache.retain(|k| k.0 != page);
+        self.requested_tiles.retain(|k, token| {
+            if k.0 == page {
+                token.cancel();
+            }
+            k.0 != page
+        });
+        self.tiles.retain(|k| k.0 != page);
     }
 
     pub fn clear_cache(&mut self) {
@@ -367,6 +517,11 @@ impl DocView {
         }
         self.requested.clear();
         self.cache.clear();
+        for token in self.requested_tiles.values() {
+            token.cancel();
+        }
+        self.requested_tiles.clear();
+        self.tiles.clear();
     }
 }
 
@@ -470,6 +625,46 @@ mod tests {
         // a 90°, o y do PDF vira x na tela: o ponto (30, 50) fica 30pt abaixo do topo
         let m = v.page_map(0, (0.0, 0.0));
         assert_eq!(m.to_screen((30.0, 50.0)), (150.0, 30.0));
+    }
+
+    #[test]
+    fn tiles_are_wanted_only_above_the_cap() {
+        let mut v = view(); // 100 × 200 pt
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 200.0));
+        let clip = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        assert!(
+            v.wanted_tiles(0, rect, clip).is_empty(),
+            "a página inteira basta"
+        );
+        v.set_max_side(256.0); // GPU pequena: 200 pt viram no máximo 256 px
+        v.set_manual_zoom(8.0);
+        let big = egui::Rect::from_min_size(egui::pos2(-300.0, -900.0), egui::vec2(800.0, 1600.0));
+        let tiles = v.wanted_tiles(0, big, clip);
+        // visível: x 300..800 e y 900..1500 da página → colunas 0..=1, linhas 1..=2
+        assert_eq!(tiles, vec![(0, 1), (1, 1), (0, 2), (1, 2)]);
+    }
+
+    #[test]
+    fn fit_visible_follows_the_content_width() {
+        let mut v = view(); // páginas de 100 pt
+        v.fit = Fit::Visible;
+        assert_eq!(v.apply_fit(500.0, 500.0), None, "sem a caixa, espera");
+        v.visible_box = Some((
+            1,
+            pdf_core::PdfRect {
+                x0: 20.0,
+                y0: 10.0,
+                x1: 70.0,
+                y1: 50.0,
+            },
+        ));
+        v.apply_fit(500.0, 500.0);
+        assert!((v.zoom - 500.0 * 0.96 / 50.0).abs() < 1e-3, "{}", v.zoom);
+        let left = v.visible_left(500.0).unwrap();
+        assert!((left - (v.layout.page_x(1) + 20.0 * v.zoom - 10.0)).abs() < 1e-3);
+        v.fit = Fit::Height;
+        v.apply_fit(500.0, 400.0);
+        assert!((v.zoom - 2.0).abs() < 1e-3, "200 pt em 400");
     }
 
     #[test]

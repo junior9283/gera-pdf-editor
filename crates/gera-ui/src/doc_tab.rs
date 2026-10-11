@@ -61,6 +61,8 @@ pub enum DocCommand {
     LastPage,
     /// Leva o foco ao campo da página.
     GoToPage,
+    /// Zoom para…: leva o foco ao campo de zoom.
+    ZoomTo,
     /// Histórico de vistas (Alt+← / Alt+→).
     ViewBack,
     ViewForward,
@@ -111,6 +113,11 @@ pub struct DocTab {
     /// Último quadro do canvas (rolagem e página atual).
     pub(crate) last: CanvasFrame,
     pub(crate) jump_to: Option<f32>,
+    /// Rolagem horizontal pedida (Ajustar ao conteúdo visível).
+    jump_x: Option<f32>,
+    /// Zoom para… (Ctrl+Y): o campo de zoom pede o foco; `zoom_text` é o que está sendo digitado.
+    focus_zoom: bool,
+    zoom_text: Option<String>,
     /// Vista anterior e seguinte (Alt+← / Alt+→).
     history_views: app_state::view_history::ViewHistory,
     /// Ir para página: o campo da página pede o foco no próximo quadro.
@@ -245,6 +252,9 @@ impl DocTab {
             status: String::new(),
             last: CanvasFrame::default(),
             jump_to: None,
+            jump_x: None,
+            focus_zoom: false,
+            zoom_text: None,
             history_views: Default::default(),
             focus_page: false,
             links: Vec::new(),
@@ -395,7 +405,13 @@ impl DocTab {
                 };
                 self.zoom_to(z);
             }
+            DocCommand::Fit(Fit::Visible) => {
+                view.fit = Fit::Visible;
+                view.visible_box = None;
+                self.worker.send(Request::ContentBox { page: page as i32 });
+            }
             DocCommand::Fit(fit) => view.fit = fit,
+            DocCommand::ZoomTo => self.focus_zoom = true,
             DocCommand::NextChange
             | DocCommand::PrevChange
             | DocCommand::FirstPage
@@ -804,7 +820,30 @@ impl DocTab {
                         self.events.push(DocEvent::Failed(msg));
                     }
                 }
-                Response::Tile { .. } | Response::ContentBox { .. } => {} // Tarefa 6
+                Response::Tile {
+                    page,
+                    scale,
+                    invert,
+                    rotation,
+                    tile,
+                    image,
+                } => {
+                    if let Some(view) = self.view.as_mut() {
+                        view.on_tile(ctx, page, scale, invert, rotation, tile, image);
+                    }
+                }
+                Response::ContentBox { page, rect } => {
+                    if let Some(view) = self.view.as_mut().filter(|v| v.fit == Fit::Visible) {
+                        // página em branco: a página inteira
+                        let full = view.sizes.get(page as usize).map(|s| pdf_core::PdfRect {
+                            x0: 0.0,
+                            y0: 0.0,
+                            x1: s.width,
+                            y1: s.height,
+                        });
+                        view.visible_box = rect.or(full).map(|r| (page as usize, r));
+                    }
+                }
                 Response::Rendered {
                     page,
                     scale,
@@ -1816,8 +1855,45 @@ impl DocTab {
         }
     }
 
-    pub fn zoom_percent(&self) -> Option<f32> {
-        self.view.as_ref().map(|v| v.zoom * 100.0)
+    /// Campo de zoom editável ("150" e Enter) e a lista ⏷ com os níveis e os ajustes, como no
+    /// Acrobat. Devolve o ajuste escolhido na lista.
+    pub fn zoom_controls(&mut self, ui: &mut egui::Ui) -> Option<DocCommand> {
+        let zoom = self.view.as_ref()?.zoom;
+        let mut text = self
+            .zoom_text
+            .take()
+            .unwrap_or_else(|| zoom::percent_text(zoom));
+        let field = ui
+            .add(egui::TextEdit::singleline(&mut text).desired_width(60.0))
+            .on_hover_text(commands::hover(&Command::Doc(DocCommand::ZoomTo)));
+        if std::mem::take(&mut self.focus_zoom) {
+            field.request_focus();
+        }
+        if field.lost_focus() {
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                if let Some(z) = zoom::parse_zoom(&text) {
+                    self.zoom_to(z); // valor inválido: o campo volta ao zoom atual
+                }
+            }
+        } else if field.has_focus() {
+            self.zoom_text = Some(text);
+        }
+        let mut picked = None;
+        ui.menu_button("⏷", |ui| {
+            for level in zoom::LEVELS {
+                if ui.button(zoom::percent_text(level)).clicked() {
+                    self.zoom_to(level);
+                }
+            }
+            ui.separator();
+            for fit in [Fit::Page, Fit::Width, Fit::Height, Fit::Visible] {
+                let cmd = DocCommand::Fit(fit);
+                if ui.button(Command::Doc(cmd).label()).clicked() {
+                    picked = Some(cmd);
+                }
+            }
+        });
+        picked
     }
 
     /// Abre o diálogo Dividir documento (partes na pasta do documento, por padrão).
@@ -2139,10 +2215,12 @@ impl DocTab {
             });
             return;
         };
-        if let Some(ratio) =
-            view.apply_fit(ui.available_width() - 24.0, ui.available_height() - 24.0)
-        {
+        let avail_w = ui.available_width() - 24.0;
+        if let Some(ratio) = view.apply_fit(avail_w, ui.available_height() - 24.0) {
             self.jump_to = Some(self.last.scroll_y * ratio);
+            if view.fit == Fit::Visible {
+                self.jump_x = view.visible_left(avail_w);
+            }
         }
         let (worker, edit, search, annots) =
             (&self.worker, &mut self.edit, &self.search, &self.annots);
@@ -2160,6 +2238,7 @@ impl DocTab {
         let links = &self.links;
         let mut link_clicked = None;
         let jump_to = self.jump_to.take();
+        let jump_x = self.jump_x.take();
         // cada aba com seu id: a área de rolagem guarda a posição de cada documento
         self.last = ui
             .push_id(self.id, |ui| {
@@ -2168,6 +2247,7 @@ impl DocTab {
                     view,
                     worker,
                     jump_to,
+                    jump_x,
                     &mut |ui, page, rect, map: &PageMap| {
                         paint_search_hits(ui, search, page as i32, map);
                         if signing {

@@ -123,7 +123,12 @@ impl LinkWarning {
                     "Se você confia neste destino, escolha Permitir. Se não confia, escolha \
                      Bloquear.",
                 );
-                if matches!(self.target, Target::Url(_)) {
+                // endereço ambíguo (sem site reconhecível): nada a lembrar, o aviso volta sempre
+                let rememberable = match &self.target {
+                    Target::Url(url) => link_policy::site_key(url).is_some(),
+                    Target::File(..) => false,
+                };
+                if rememberable {
                     ui.checkbox(
                         &mut self.remember,
                         "Lembrar desta ação para este site em todos os documentos PDF",

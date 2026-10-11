@@ -86,6 +86,7 @@ impl Command {
                 DocCommand::NextPage => "Próxima página",
                 DocCommand::LastPage => "Última página",
                 DocCommand::GoToPage => "Ir para página…",
+                DocCommand::ZoomTo => "Zoom para…",
                 DocCommand::ViewBack => "Vista anterior",
                 DocCommand::ViewForward => "Vista seguinte",
             },
@@ -148,6 +149,8 @@ pub fn shortcuts() -> Vec<(KeyboardShortcut, Command)> {
         (cmd(Key::Num0), doc(DocCommand::Fit(Fit::Page))),
         (cmd(Key::Num1), doc(DocCommand::ZoomReset)),
         (cmd(Key::Num2), doc(DocCommand::Fit(Fit::Width))),
+        (cmd(Key::Num3), doc(DocCommand::Fit(Fit::Visible))),
+        (cmd(Key::Y), doc(DocCommand::ZoomTo)),
         (
             KeyboardShortcut::new(Modifiers::NONE, Key::F11),
             Command::FullScreen,
@@ -203,6 +206,8 @@ fn belongs_to_text_fields(cmd: &Command) -> bool {
                 | DocCommand::Copy
                 | DocCommand::SelectAll
                 | DocCommand::Delete
+                // Ctrl+Y também é Refazer nos campos de texto
+                | DocCommand::ZoomTo
         )
     )
 }
@@ -307,6 +312,15 @@ mod tests {
         let cs = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
         assert!(has(cs, Key::ArrowUp, DocCommand::FirstPage));
         assert!(has(cs, Key::ArrowDown, DocCommand::LastPage));
+    }
+
+    #[test]
+    fn zoom_shortcuts_match_acrobat() {
+        let text = |c| shortcut_text(&shortcut_of(&Command::Doc(c)).unwrap());
+        assert_eq!(text(DocCommand::Fit(Fit::Visible)), "Ctrl+3");
+        assert_eq!(text(DocCommand::ZoomTo), "Ctrl+Y");
+        assert_eq!(text(DocCommand::Fit(Fit::Page)), "Ctrl+0");
+        assert_eq!(text(DocCommand::Fit(Fit::Width)), "Ctrl+2");
     }
 
     #[test]

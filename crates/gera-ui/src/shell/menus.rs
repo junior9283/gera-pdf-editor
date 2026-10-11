@@ -95,8 +95,11 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
                     DocCommand::ZoomIn,
                     DocCommand::ZoomOut,
                     DocCommand::ZoomReset,
-                    DocCommand::Fit(Fit::Width),
                     DocCommand::Fit(Fit::Page),
+                    DocCommand::Fit(Fit::Width),
+                    DocCommand::Fit(Fit::Height),
+                    DocCommand::Fit(Fit::Visible),
+                    DocCommand::ZoomTo,
                 ] {
                     item(ui, &mut out, doc(c), has_doc);
                 }

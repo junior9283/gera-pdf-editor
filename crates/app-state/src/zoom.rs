@@ -48,6 +48,13 @@ pub fn parse_zoom(text: &str) -> Option<f32> {
     (pct.is_finite() && pct > 0.0).then(|| clamp_zoom(pct / 100.0))
 }
 
+/// Zoom escrito como no campo do Acrobat em português: "100%", "8,33%", "12,5%".
+pub fn percent_text(z: f32) -> String {
+    let text = format!("{:.2}", z * 100.0);
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    format!("{}%", text.replace('.', ","))
+}
+
 /// Zoom em que a altura da página cabe em `avail_h`.
 pub fn fit_height(page_h: f32, avail_h: f32) -> f32 {
     fit_width(page_h, avail_h)
@@ -131,6 +138,16 @@ mod tests {
         for bad in ["", "abc", "0", "-5", "NaN", "inf"] {
             assert_eq!(parse_zoom(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn percent_text_is_brazilian() {
+        assert_eq!(percent_text(1.0), "100%");
+        assert_eq!(percent_text(MIN_ZOOM), "8,33%");
+        assert_eq!(percent_text(0.125), "12,5%");
+        assert_eq!(percent_text(0.6667), "66,67%");
+        assert_eq!(percent_text(64.0), "6400%");
+        assert_eq!(parse_zoom(&percent_text(0.6667)), Some(0.6667));
     }
 
     #[test]
