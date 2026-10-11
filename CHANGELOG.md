@@ -6,8 +6,36 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 ## [Não lançado]
 
-- v6d — comentários completos: inserir e substituir texto, nuvem, polígono, texto explicativo,
-  FDF/XFDF.
+- v6d2 — carimbos personalizados, exportar e importar FDF/XFDF, Resumir comentários e agrupar.
+
+## [0.17.0] — 2026-10-11 · Ferramentas de comentário (v6d)
+
+### Adicionado
+- **Marcação de texto na barra Comentar:** Riscar, e `U`/`Shift+U` alternam Destacar,
+  Sublinhar e Riscar, como no Acrobat.
+- **Editar texto:**
+  - **Substituir texto:** arrastar sobre o texto risca e abre a nota do texto novo. O par
+    (riscado e cursor) é um item só no painel Comentários e sai junto ao excluir.
+  - **Inserir texto:** um clique põe o cursor de inserção com nota.
+- **Menu Desenho** (`D`/`Shift+D` alternam):
+  - **Polígono**, **Linhas conectadas** e **Nuvem** (`Q`), desenhados por cliques. Clique
+    duplo termina, clicar no primeiro ponto fecha, `Backspace` tira o último vértice e `Esc`
+    cancela.
+  - **Borracha** do lápis: corta os traços sob o arraste, e cada passada é uma etapa do
+    desfazer.
+- **Texto explicativo:** arraste a caixa e clique na ponta da seta. A caixa, a ponta e o joelho
+  se movem em separado.
+- **Anexar arquivo como comentário** (`Shift+J` alterna com Carimbo): o arquivo vai no
+  comentário (até 100 MB), com o ícone de clipe.
+- **Edição dos comentários novos:**
+  - alças em cada vértice;
+  - Propriedades com preenchimento e estilo Nuvem 1/Nuvem 2;
+  - o texto explicativo tem fonte e fundo como a caixa de texto.
+
+### Corrigido
+- A janela de nota abre com o cursor no campo (antes era preciso clicar nele).
+- Polígono de outro programa com mais de 1000 vértices não perde vértices ao ser editado.
+- Riscado agrupado de outro programa, com o par fora da página, volta a poder ser excluído.
 
 ## [0.16.0] — 2026-10-11 · Miniaturas, Camadas, Destinos e rótulos de página (v6c2)
 
