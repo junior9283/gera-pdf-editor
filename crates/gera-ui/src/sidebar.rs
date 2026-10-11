@@ -36,6 +36,8 @@ pub(crate) fn kind_label(kind: AnnotKind) -> &'static str {
         AnnotKind::Polygon => "Polígono",
         AnnotKind::PolyLine => "Linhas conectadas",
         AnnotKind::Cloud => "Nuvem",
+        AnnotKind::Caret => "Inserir texto",
+        AnnotKind::Callout => "Texto explicativo",
         AnnotKind::Other => "Anotação",
     }
 }

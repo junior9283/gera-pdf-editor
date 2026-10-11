@@ -7,7 +7,7 @@ use crate::text_fit;
 use crate::types::{
     AnnotInfo, AnnotKind, AnnotOp, Changed, DocProperties, DocSummary, HistoryState, LineEnd, Mark,
     NewAnnot, OutlineItem, PageSize, PdfRect, RenderedPage, Rotation, StateModel, TextSelection,
-    Word, COMMENT_RED,
+    Word, COMMENT_RED, TEXT_EDIT_BLUE,
 };
 use mupdf::color::AnnotationColor;
 use mupdf::pdf::{
@@ -519,6 +519,33 @@ fn add_one(doc: &mut PdfDocument, page: &mut PdfPage, a: &NewAnnot) -> Result<Pd
             let img = stamp::image(title, subtitle.as_deref(), *color, page.rotation()?)?;
             add_stamp(doc, page, *rect, title, &img)?
         }
+        NewAnnot::Caret { rect, text, .. } => {
+            let mut a = page.add_caret_annotation(Rect::from(*rect))?;
+            a.set_contents(text)?;
+            a.set_color(rgb(TEXT_EDIT_BLUE))?;
+            a
+        }
+        NewAnnot::Callout {
+            rect,
+            knee,
+            tip,
+            text,
+            size,
+            color,
+            ..
+        } => {
+            let mut a = page.add_free_text_annotation(Rect::from(*rect), text)?;
+            a.set_default_appearance("Helv", *size, Some(rgb(*color)))?;
+            a.set_border_width(1.0)?;
+            let ctm = page.ctm()?;
+            annot_edit::set_callout(doc, &mut a, &ctm, *rect, [*tip, *knee, *knee])?;
+            a
+        }
+        NewAnnot::ReplaceText { .. } => {
+            return Err(PdfError::InvalidAnnotation(
+                "substituir texto cria duas anotações (replace_text)".into(),
+            ))
+        }
         NewAnnot::Polygon {
             vertices,
             closed,
@@ -687,6 +714,7 @@ fn kind_of(t: PdfAnnotationType) -> AnnotKind {
         PdfAnnotationType::Stamp => AnnotKind::Stamp,
         PdfAnnotationType::Redact => AnnotKind::Redact,
         PdfAnnotationType::Polygon => AnnotKind::Polygon,
+        PdfAnnotationType::Caret => AnnotKind::Caret,
         PdfAnnotationType::PolyLine => AnnotKind::PolyLine,
         _ => AnnotKind::Other,
     }
@@ -711,13 +739,15 @@ pub(crate) fn annot_id(annot: &PdfAnnotation) -> Result<i32> {
     Ok(annot.object().as_indirect()?)
 }
 
-pub(crate) fn annot_info(annot: &PdfAnnotation, page: i32) -> Result<AnnotInfo> {
+pub(crate) fn annot_info(annot: &PdfAnnotation, page: i32, ctm: &Matrix) -> Result<AnnotInfo> {
     let kind = match kind_of(annot.r#type()?) {
         // a nuvem é um polígono com borda de nuvem (/BE /S /C)
         AnnotKind::Polygon if annot_edit::is_cloudy(annot)? => AnnotKind::Cloud,
+        AnnotKind::TextBox if annot_edit::is_callout(annot)? => AnnotKind::Callout,
         k => k,
     };
-    let font = (kind == AnnotKind::TextBox)
+    let callout = annot_edit::callout(annot, ctm)?;
+    let font = matches!(kind, AnnotKind::TextBox | AnnotKind::Callout)
         .then(|| annot.default_appearance())
         .transpose()?
         .flatten()
@@ -727,11 +757,15 @@ pub(crate) fn annot_info(annot: &PdfAnnotation, page: i32) -> Result<AnnotInfo> 
         id: annot_id(annot)?,
         kind,
         page,
-        rect: annot.bounds()?.into(),
+        // texto explicativo: a caixa (a linha de chamada vem à parte)
+        rect: match callout {
+            Some((boxed, _)) => boxed,
+            None => annot.bounds()?.into(),
+        },
         contents: annot.contents()?.unwrap_or_default().to_owned(),
         // caixa de texto: a cor é a do texto e da borda; /C é o fundo
         color: match kind {
-            AnnotKind::TextBox => font.map(|f| f.1),
+            AnnotKind::TextBox | AnnotKind::Callout => font.map(|f| f.1),
             _ => own_color,
         },
         opacity: annot.opacity()?,
@@ -740,11 +774,13 @@ pub(crate) fn annot_info(annot: &PdfAnnotation, page: i32) -> Result<AnnotInfo> 
             .then(|| annot.border_width())
             .transpose()?,
         fill: match kind {
-            AnnotKind::TextBox => own_color,
+            AnnotKind::TextBox | AnnotKind::Callout => own_color,
             k if k.has_fill() => annot.interior_color()?.map(rgb_of),
             _ => None,
         },
         vertices: annot_edit::vertices(annot)?,
+        callout: callout.map(|(_, line)| line),
+        group: annot_edit::group_of(annot)?,
         line: (kind == AnnotKind::Line)
             .then(|| annot.line())
             .transpose()?
@@ -849,6 +885,7 @@ impl PdfDoc {
     /// Anotações da página já carregada (a abertura carrega cada página uma vez só).
     fn annotations_in(&self, page_ref: &mut PdfPage, page: i32) -> Result<Vec<AnnotInfo>> {
         let mut out = Vec::new();
+        let ctm = page_ref.ctm()?;
         for mut annot in page_ref.annotations() {
             // campos de formulário não são comentários (ficam em `fields`)
             if annot.r#type()? == PdfAnnotationType::Widget {
@@ -867,7 +904,7 @@ impl PdfDoc {
             } else if flags.contains(AnnotationFlags::IS_HIDDEN) {
                 continue; // escondida de fábrica: invisível, fora da lista
             }
-            out.push(annot_info(&annot, page)?);
+            out.push(annot_info(&annot, page, &ctm)?);
         }
         Ok(out)
     }
@@ -991,6 +1028,14 @@ impl PdfDoc {
 
     /// A mudança que leva a anotação `(page, id)` por (`dx`, `dy`).
     fn move_edit(&self, page: i32, id: i32, dx: f32, dy: f32) -> Result<Edit> {
+        if let Some((rect, line)) = annot_edit::callout_of(&self.inner, page, id)? {
+            return Ok(Edit::Callout {
+                page,
+                id,
+                rect: rect.translated(dx, dy),
+                line: line.map(|(x, y)| (x + dx, y + dy)),
+            });
+        }
         if let Some(points) = annot_edit::vertices_of(&self.inner, page, id)? {
             return Ok(Edit::Vertices {
                 page,
@@ -1099,6 +1144,9 @@ impl PdfDoc {
                 if a.is_empty() {
                     return Err(PdfError::InvalidAnnotation("anotação vazia".into()));
                 }
+                if let NewAnnot::ReplaceText { rects, text, .. } = &a {
+                    return self.replace_text(page, rects, text);
+                }
                 let mut page_ref = self.inner.load_pdf_page(page)?;
                 let mut annot = add_one(&mut self.inner, &mut page_ref, &a)?;
                 self.sign(&mut annot)?;
@@ -1168,6 +1216,35 @@ impl PdfDoc {
                     .unwrap_or_default();
                 Edit::Vertices { page, id, points }
             }
+            AnnotOp::MoveCallout {
+                page,
+                id,
+                knee,
+                tip,
+            } => {
+                let (rect, [_, _, end]) = annot_edit::callout_of(&self.inner, page, id)?
+                    .ok_or_else(|| {
+                        PdfError::InvalidAnnotation("não é um texto explicativo".into())
+                    })?;
+                Edit::Callout {
+                    page,
+                    id,
+                    rect,
+                    line: [tip, knee, end],
+                }
+            }
+            AnnotOp::Resize { page, id, rect }
+                if annot_edit::callout_of(&self.inner, page, id)?.is_some() =>
+            {
+                // texto explicativo: só a caixa muda; a linha continua apontando para o mesmo lugar
+                let (_, line) = annot_edit::callout_of(&self.inner, page, id)?.unwrap_or_default();
+                Edit::Callout {
+                    page,
+                    id,
+                    rect,
+                    line,
+                }
+            }
             AnnotOp::MoveVertex {
                 page,
                 id,
@@ -1225,14 +1302,25 @@ impl PdfDoc {
                     id,
                     hidden: true,
                 };
-                let children: Vec<Edit> = descendants(&self.annotations(page)?, id)
-                    .into_iter()
+                let annots = self.annotations(page)?;
+                // anotação agrupada (Substituir texto): o grupo inteiro sai, a partir da principal
+                let root = annots
+                    .iter()
+                    .find(|a| a.id == id)
+                    .and_then(|a| a.group)
+                    .unwrap_or(id);
+                let members = annots
+                    .iter()
+                    .filter(|a| a.group == Some(root))
+                    .map(|a| a.id);
+                let children: Vec<Edit> = members
+                    .chain(descendants(&annots, root))
                     .map(hide)
                     .collect();
                 if children.is_empty() {
-                    hide(id)
+                    hide(root)
                 } else {
-                    Edit::Batch(std::iter::once(hide(id)).chain(children).collect())
+                    Edit::Batch(std::iter::once(hide(root)).chain(children).collect())
                 }
             }
             AnnotOp::Reply { page, parent, text } => {
@@ -1414,6 +1502,53 @@ impl PdfDoc {
             id,
             hidden: true,
         });
+        Ok(vec![page])
+    }
+
+    /// Substituir texto: riscado e cursor de inserção (com a nota) agrupados, como o Acrobat grava
+    /// (o riscado aponta para o cursor com /IRT e /RT /Group). Uma etapa do desfazer.
+    fn replace_text(&mut self, page: i32, rects: &[PdfRect], text: &str) -> Result<Vec<i32>> {
+        let last = *rects
+            .last()
+            .ok_or_else(|| PdfError::InvalidAnnotation("sem texto para substituir".into()))?;
+        let mut page_ref = self.inner.load_pdf_page(page)?;
+        // o cursor fica no fim do texto riscado, logo abaixo da linha
+        let h = last.height().max(4.0);
+        let caret = PdfRect::new(
+            last.x1 - h * 0.3,
+            last.y1 - h * 0.4,
+            last.x1 + h * 0.3,
+            last.y1 + h * 0.1,
+        );
+        let mut caret = add_one(
+            &mut self.inner,
+            &mut page_ref,
+            &NewAnnot::Caret {
+                page,
+                rect: caret,
+                text: text.to_owned(),
+            },
+        )?;
+        let mut strike = page_ref.add_strikeout_annotation(quads(rects)?)?;
+        strike.set_color(rgb(TEXT_EDIT_BLUE))?;
+        let mut obj = strike.object();
+        obj.dict_put("IRT", caret.object())?;
+        obj.dict_put("RT", PdfObject::new_name("Group")?)?;
+        obj.dict_put("IT", PdfObject::new_name("StrikeOutTextEdit")?)?;
+        for a in [&mut caret, &mut strike] {
+            self.sign(a)?;
+            a.update()?;
+        }
+        page_ref.update()?;
+        let hide = |id| Edit::Visibility {
+            page,
+            id,
+            hidden: true,
+        };
+        self.history.record(Edit::Batch(vec![
+            hide(annot_id(&caret)?),
+            hide(annot_id(&strike)?),
+        ]));
         Ok(vec![page])
     }
 

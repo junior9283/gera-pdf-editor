@@ -213,3 +213,150 @@ fn replies_from_other_programs_are_not_drawn() {
         "sem ícone fantasma"
     );
 }
+
+fn blank() -> (tempfile::TempDir, std::path::PathBuf, PdfDoc) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_sample(&dir, "a.pdf", 1, 0);
+    let d = PdfDoc::open(&path, None).unwrap();
+    (dir, path, d)
+}
+
+#[test]
+fn caret_with_note_round_trip() {
+    let (_d, path, mut d) = blank();
+    d.apply(AnnotOp::Create(NewAnnot::Caret {
+        page: 0,
+        rect: pdf_core::PdfRect::new(100.0, 100.0, 110.0, 112.0),
+        text: "faltou uma vírgula".into(),
+    }))
+    .unwrap();
+    d.save(&path).unwrap();
+    let all = PdfDoc::open(&path, None).unwrap().annotations(0).unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].kind, pdf_core::AnnotKind::Caret);
+    assert_eq!(all[0].contents, "faltou uma vírgula");
+}
+
+#[test]
+fn replace_text_is_one_undo_step_and_deletes_as_a_pair() {
+    let (_d, path, mut d) = blank();
+    d.apply(AnnotOp::Create(NewAnnot::ReplaceText {
+        page: 0,
+        rects: vec![pdf_core::PdfRect::new(100.0, 100.0, 160.0, 112.0)],
+        text: "novo texto".into(),
+    }))
+    .unwrap();
+    let all = d.annotations(0).unwrap();
+    assert_eq!(all.len(), 2, "riscado e cursor");
+    let caret = all
+        .iter()
+        .find(|a| a.kind == pdf_core::AnnotKind::Caret)
+        .unwrap();
+    let strike = all
+        .iter()
+        .find(|a| a.kind == pdf_core::AnnotKind::StrikeOut)
+        .unwrap();
+    assert_eq!(caret.contents, "novo texto");
+    assert_eq!(
+        strike.group,
+        Some(caret.id),
+        "o riscado é do grupo do cursor"
+    );
+    assert_eq!(strike.reply_to, None, "grupo não é resposta");
+    // excluir o riscado exclui o par
+    d.apply(AnnotOp::Delete {
+        page: 0,
+        id: strike.id,
+    })
+    .unwrap();
+    assert!(d.annotations(0).unwrap().is_empty());
+    d.undo().unwrap();
+    assert_eq!(d.annotations(0).unwrap().len(), 2, "desfazer volta os dois");
+    d.undo().unwrap();
+    assert!(
+        d.annotations(0).unwrap().is_empty(),
+        "criar foi uma etapa só"
+    );
+    d.redo().unwrap();
+    d.save(&path).unwrap();
+    let back = PdfDoc::open(&path, None).unwrap().annotations(0).unwrap();
+    assert!(back.iter().any(|a| a.group.is_some()));
+}
+
+#[test]
+fn callout_round_trip_and_move_tip() {
+    let (_d, path, mut d) = blank();
+    let rect = pdf_core::PdfRect::new(200.0, 100.0, 320.0, 140.0);
+    d.apply(AnnotOp::Create(NewAnnot::Callout {
+        page: 0,
+        rect,
+        knee: (150.0, 160.0),
+        tip: (100.0, 200.0),
+        text: "veja aqui".into(),
+        size: 12.0,
+        color: [0.0; 3],
+    }))
+    .unwrap();
+    let a = d.annotations(0).unwrap().remove(0);
+    assert_eq!(a.kind, pdf_core::AnnotKind::Callout);
+    let [tip, knee, _end] = a.callout.unwrap();
+    assert!(
+        (tip.0 - 100.0).abs() < 0.5 && (tip.1 - 200.0).abs() < 0.5,
+        "{tip:?}"
+    );
+    assert!((knee.0 - 150.0).abs() < 0.5, "{knee:?}");
+    d.apply(AnnotOp::MoveCallout {
+        page: 0,
+        id: a.id,
+        knee: (160.0, 170.0),
+        tip: (90.0, 250.0),
+    })
+    .unwrap();
+    d.save(&path).unwrap();
+    let back = PdfDoc::open(&path, None)
+        .unwrap()
+        .annotations(0)
+        .unwrap()
+        .remove(0);
+    let [tip, _, _] = back.callout.unwrap();
+    assert!(
+        (tip.0 - 90.0).abs() < 0.5 && (tip.1 - 250.0).abs() < 0.5,
+        "{tip:?}"
+    );
+    assert_eq!(back.contents, "veja aqui");
+}
+
+#[test]
+fn editing_a_callout_text_keeps_box_and_line() {
+    let (_d, _p, mut d) = blank();
+    let rect = pdf_core::PdfRect::new(200.0, 100.0, 320.0, 140.0);
+    d.apply(AnnotOp::Create(NewAnnot::Callout {
+        page: 0,
+        rect,
+        knee: (150.0, 160.0),
+        tip: (100.0, 200.0),
+        text: "veja".into(),
+        size: 12.0,
+        color: [0.0; 3],
+    }))
+    .unwrap();
+    let a = d.annotations(0).unwrap().remove(0);
+    d.apply(AnnotOp::SetContents {
+        page: 0,
+        id: a.id,
+        text: "veja aqui também".into(),
+    })
+    .unwrap();
+    let b = d.annotations(0).unwrap().remove(0);
+    assert_eq!(b.kind, pdf_core::AnnotKind::Callout);
+    assert_eq!(
+        b.callout.unwrap()[0],
+        a.callout.unwrap()[0],
+        "a ponta não sai do lugar"
+    );
+    assert!(
+        (b.rect.x0 - 200.0).abs() < 0.5 && (b.rect.y0 - 100.0).abs() < 0.5,
+        "{:?}",
+        b.rect
+    );
+}

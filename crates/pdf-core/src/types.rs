@@ -111,6 +111,10 @@ pub enum AnnotKind {
     PolyLine,
     /// Nuvem (polígono com borda de nuvem).
     Cloud,
+    /// Cursor de inserção (Inserir texto; com riscado agrupado, Substituir texto).
+    Caret,
+    /// Texto explicativo (caixa de texto com linha de chamada).
+    Callout,
     /// Tipo que não criamos (de outro programa): selecionável e apagável.
     #[default]
     Other,
@@ -121,6 +125,8 @@ pub type Segment = ((f32, f32), (f32, f32));
 
 /// Cor dos comentários novos (contorno das formas e linhas, texto da caixa), como no Acrobat.
 pub const COMMENT_RED: [f32; 3] = [1.0, 0.0, 0.0];
+/// Azul das marcações de edição de texto (Inserir e Substituir texto), como no Acrobat.
+pub const TEXT_EDIT_BLUE: [f32; 3] = [0.0, 0.0, 1.0];
 
 /// Modelo de estado de um comentário (como o Acrobat grava): revisão ou visto.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +160,7 @@ impl AnnotKind {
             self,
             Self::Ink
                 | Self::TextBox
+                | Self::Callout
                 | Self::Rect
                 | Self::Ellipse
                 | Self::Line
@@ -167,7 +174,12 @@ impl AnnotKind {
     pub fn has_fill(self) -> bool {
         matches!(
             self,
-            Self::Rect | Self::Ellipse | Self::TextBox | Self::Polygon | Self::Cloud
+            Self::Rect
+                | Self::Ellipse
+                | Self::TextBox
+                | Self::Callout
+                | Self::Polygon
+                | Self::Cloud
         )
     }
 }
@@ -190,6 +202,10 @@ pub struct AnnotInfo {
     pub line: Option<Segment>,
     /// Vértices (polígono, linhas conectadas e nuvem).
     pub vertices: Vec<(f32, f32)>,
+    /// Texto explicativo: ponta da seta, joelho e ponto na caixa.
+    pub callout: Option<[(f32, f32); 3]>,
+    /// Anotação agrupada a outra (Substituir texto: o riscado aponta para o cursor).
+    pub group: Option<i32>,
     /// Linha com ponta de seta.
     pub arrow: bool,
     /// Tamanho e cor do texto (caixa de texto).
@@ -213,6 +229,7 @@ impl AnnotInfo {
             AnnotKind::Highlight
                 | AnnotKind::Underline
                 | AnnotKind::StrikeOut
+                | AnnotKind::Caret
                 | AnnotKind::Redact
                 | AnnotKind::Other
         )
@@ -312,6 +329,28 @@ pub enum NewAnnot {
         subtitle: Option<String>,
         color: [f32; 3],
     },
+    /// Inserir texto: cursor de inserção com a nota do texto a inserir.
+    Caret {
+        page: i32,
+        rect: PdfRect,
+        text: String,
+    },
+    /// Substituir texto: riscado nas `rects` e cursor (com a nota) agrupados, numa etapa só.
+    ReplaceText {
+        page: i32,
+        rects: Vec<PdfRect>,
+        text: String,
+    },
+    /// Texto explicativo: a caixa `rect` e a linha de chamada do `knee` até a ponta `tip`.
+    Callout {
+        page: i32,
+        rect: PdfRect,
+        knee: (f32, f32),
+        tip: (f32, f32),
+        text: String,
+        size: f32,
+        color: [f32; 3],
+    },
     /// Polígono (`closed`), linhas conectadas (aberto) ou nuvem (`cloud`, sempre fechada).
     Polygon {
         page: i32,
@@ -380,7 +419,10 @@ impl NewAnnot {
             | Self::Mark { page, .. }
             | Self::Redact { page, .. }
             | Self::Stamp { page, .. }
-            | Self::Polygon { page, .. } => *page,
+            | Self::Polygon { page, .. }
+            | Self::Caret { page, .. }
+            | Self::ReplaceText { page, .. }
+            | Self::Callout { page, .. } => *page,
         }
     }
 
@@ -390,6 +432,11 @@ impl NewAnnot {
             Self::Highlight { rects, .. }
             | Self::Underline { rects, .. }
             | Self::StrikeOut { rects, .. } => rects.is_empty(),
+            Self::ReplaceText { rects, .. } => rects.is_empty(),
+            Self::Caret { rect, .. } => rect.width() <= 0.0 || rect.height() <= 0.0,
+            Self::Callout { text, rect, .. } => {
+                text.trim().is_empty() || rect.width() < 3.0 || rect.height() < 3.0
+            }
             Self::Redact { rects, .. } => rects.iter().all(|r| r.width() < 2.0 || r.height() < 2.0),
             Self::Note { text, .. } => text.trim().is_empty(),
             Self::Ink { strokes, .. } => strokes.iter().all(|s| s.len() < 2),
@@ -686,6 +733,13 @@ pub enum AnnotOp {
         parent: i32,
         model: StateModel,
         state: String,
+    },
+    /// Texto explicativo: leva o joelho e a ponta da linha de chamada.
+    MoveCallout {
+        page: i32,
+        id: i32,
+        knee: (f32, f32),
+        tip: (f32, f32),
     },
     /// Leva o vértice `index` (polígono, linhas conectadas, nuvem) para `to`.
     MoveVertex {
