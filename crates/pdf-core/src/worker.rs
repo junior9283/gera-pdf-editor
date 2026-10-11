@@ -449,6 +449,8 @@ pub enum Response {
     },
     /// Nomes dos campos na ordem de cálculo (/CO).
     CalcOrder(Vec<String>),
+    /// O valor não foi aceito pelo campo (formato ou validação): o aviso a mostrar.
+    FieldRefused(String),
 }
 
 const NO_DOC: &str = "nenhum documento aberto";
@@ -674,9 +676,20 @@ impl State {
                 });
             }
             Request::Annot(op) => self.edit(send, |d| d.apply(op).map(Changed::Pages)),
-            Request::SetField { page, id, value } => self.edit(send, |d| {
-                d.set_field(page, id, &value).map(|()| Changed::Fields)
-            }),
+            Request::SetField { page, id, value } => {
+                // valor recusado pelo Formatar ou pelo Validar: o aviso do Acrobat, numa janela
+                let refused = std::cell::RefCell::new(None);
+                self.edit(
+                    &|r| match r {
+                        Response::EditFailed(msg) => *refused.borrow_mut() = Some(msg),
+                        other => send(other),
+                    },
+                    |d| d.set_field(page, id, &value).map(|()| Changed::Fields),
+                );
+                if let Some(msg) = refused.into_inner() {
+                    send(Response::FieldRefused(msg));
+                }
+            }
             Request::ResetForm => self.edit(send, |d| d.reset_form().map(|()| Changed::Document)),
             Request::SignDigitally {
                 place,

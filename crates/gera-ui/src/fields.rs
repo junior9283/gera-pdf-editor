@@ -11,6 +11,10 @@ struct TextDraft {
     text: String,
     original: String,
     focused: bool,
+    /// Último texto aceito pelo filtro de teclas do Formatar.
+    last_ok: String,
+    /// Calendário aberto (campo de data): (ano, mês) mostrado.
+    calendar: Option<(i32, u32)>,
 }
 
 /// O que o usuário pediu nos campos.
@@ -20,6 +24,8 @@ pub enum FieldAction {
         id: i32,
         value: String,
     },
+    /// Botão com a ação Redefinir formulário.
+    Reset,
     /// Campo de assinatura clicado (página e retângulo do campo).
     Sign {
         page: i32,
@@ -47,7 +53,57 @@ pub struct FormState {
     combo_text: String,
     /// XFA ou scripts de campo que o app não executa (a barra avisa).
     pub notes: pdf_core::FormNotes,
+    /// Valor recusado pelo campo: o aviso (janela, como o alerta do Acrobat).
+    pub alert: Option<String>,
 }
+
+/// O texto digitado, se o Formatar o aceita; senão o último aceito (a tecla não entra).
+pub fn keep_typed(fmt: &pdf_core::FieldFormat, last_ok: &str, now: &str) -> String {
+    if pdf_core::keystroke_ok(fmt, now) {
+        now.to_string()
+    } else {
+        last_ok.to_string()
+    }
+}
+
+/// Dias do mês numa grade que começa no domingo (casas vazias antes do dia 1).
+pub fn month_cells(year: i32, month: u32) -> Vec<Option<u32>> {
+    use chrono::Datelike;
+    let Some(first) = chrono::NaiveDate::from_ymd_opt(year, month, 1) else {
+        return Vec::new();
+    };
+    let next = if month == 12 {
+        chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1)
+    } else {
+        chrono::NaiveDate::from_ymd_opt(year, month + 1, 1)
+    };
+    let days = next.map_or(31, |n| (n - first).num_days() as u32);
+    let blank = first.weekday().num_days_from_sunday() as usize;
+    std::iter::repeat_n(None, blank)
+        .chain((1..=days).map(Some))
+        .collect()
+}
+
+/// A data escolhida no calendário, no formato do campo.
+pub fn picked_date(fmt: &pdf_core::FieldFormat, year: i32, month: u32, day: u32) -> String {
+    let iso = format!("{year:04}-{month:02}-{day:02}");
+    pdf_core::format_value(fmt, &iso).map_or(iso, |f| f.text)
+}
+
+const MONTH_NAMES: [&str; 12] = [
+    "Janeiro",
+    "Fevereiro",
+    "Março",
+    "Abril",
+    "Maio",
+    "Junho",
+    "Julho",
+    "Agosto",
+    "Setembro",
+    "Outubro",
+    "Novembro",
+    "Dezembro",
+];
 
 impl Default for FormState {
     fn default() -> Self {
@@ -61,6 +117,7 @@ impl Default for FormState {
             scroll_to: None,
             combo_text: String::new(),
             notes: Default::default(),
+            alert: None,
         }
     }
 }
@@ -288,14 +345,19 @@ fn open(st: &mut FormState, f: &FieldInfo, out: &mut Vec<FieldAction>) {
     }
     match f.kind {
         FieldKind::Text { .. } => {
+            // o teclado passa a ser do texto em edição (o Enter de lá não reabre o campo)
+            st.focused = None;
             st.draft = Some(TextDraft {
                 page: f.page,
                 id: f.id,
                 text: f.value.clone(),
                 original: f.value.clone(),
                 focused: false,
+                last_ok: f.value.clone(),
+                calendar: None,
             })
         }
+        FieldKind::Button { reset: true } => out.push(FieldAction::Reset),
         FieldKind::Combo { .. } | FieldKind::List { .. } => {
             st.choices = Some((f.page, f.id));
             st.combo_text = f.value.clone();
@@ -351,6 +413,28 @@ fn text_overlay(
         field = field.char_limit(n);
     }
     let resp = ui.put(r, field);
+    // filtro de teclas do Formatar (com Número, letras não entram)
+    if resp.changed() {
+        d.text = keep_typed(&f.format, &d.last_ok, &d.text);
+        d.last_ok = d.text.clone();
+    }
+    // campo de data: o seletor de calendário ao lado (como no Acrobat)
+    if matches!(f.format, pdf_core::FieldFormat::Date(_)) {
+        if let Some(value) = calendar(ui, d, &f.format, r) {
+            d.text = value;
+            d.last_ok = d.text.clone();
+            let d = st.draft.take().expect("rascunho existe");
+            out.push(FieldAction::Set {
+                page: d.page,
+                id: d.id,
+                value: d.text,
+            });
+            return;
+        }
+        if d.calendar.is_some() {
+            return; // o foco está no calendário: o campo continua em edição
+        }
+    }
     ui.painter().rect_stroke(
         r,
         0.0,
@@ -384,6 +468,82 @@ fn text_overlay(
     if tab {
         st.tab(fields, (d.page, d.id), shift);
     }
+}
+
+/// Botão do calendário ao lado do campo e o calendário aberto. Devolve a data escolhida.
+fn calendar(
+    ui: &mut egui::Ui,
+    d: &mut TextDraft,
+    fmt: &pdf_core::FieldFormat,
+    r: egui::Rect,
+) -> Option<String> {
+    use chrono::Datelike;
+    let button = egui::Rect::from_min_size(
+        r.right_top() + egui::vec2(2.0, 0.0),
+        egui::vec2(18.0, r.height().min(22.0)),
+    );
+    if ui
+        .put(button, egui::Button::new("⏷").small())
+        .on_hover_text("Escolher a data")
+        .clicked()
+    {
+        d.calendar = match d.calendar {
+            Some(_) => None,
+            None => {
+                let today = chrono::Local::now().date_naive();
+                Some((today.year(), today.month()))
+            }
+        };
+    }
+    let (year, month) = d.calendar?;
+    let mut picked = None;
+    let mut shown = (year, month);
+    egui::Area::new(egui::Id::new(("calendario", d.page, d.id)))
+        .fixed_pos(r.left_bottom())
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.small_button("◀").clicked() {
+                        shown = if month == 1 {
+                            (year - 1, 12)
+                        } else {
+                            (year, month - 1)
+                        };
+                    }
+                    ui.label(format!("{} de {year}", MONTH_NAMES[(month - 1) as usize]));
+                    if ui.small_button("▶").clicked() {
+                        shown = if month == 12 {
+                            (year + 1, 1)
+                        } else {
+                            (year, month + 1)
+                        };
+                    }
+                });
+                egui::Grid::new(("dias", d.page, d.id)).show(ui, |ui| {
+                    for w in ["D", "S", "T", "Q", "Q", "S", "S"] {
+                        ui.label(egui::RichText::new(w).small().strong());
+                    }
+                    ui.end_row();
+                    for (k, cell) in month_cells(year, month).into_iter().enumerate() {
+                        match cell {
+                            Some(day) if ui.small_button(day.to_string()).clicked() => {
+                                picked = Some(picked_date(fmt, year, month, day));
+                            }
+                            Some(_) => {}
+                            None => {
+                                ui.label("");
+                            }
+                        }
+                        if k % 7 == 6 {
+                            ui.end_row();
+                        }
+                    }
+                });
+            });
+        });
+    d.calendar = if picked.is_some() { None } else { Some(shown) };
+    picked
 }
 
 fn choices_popup(
@@ -466,7 +626,18 @@ fn notes_warning(n: pdf_core::FormNotes) -> Option<&'static str> {
 /// Barra roxa (como no Acrobat) quando o documento tem campos.
 pub fn bar(ui: &mut egui::Ui, st: &mut FormState) -> bool {
     let mut reset = false;
-    let purple = egui::Color32::from_rgb(232, 226, 250);
+    // roxo claro no tema claro e escuro no tema escuro (o texto do tema continua legível)
+    let dark = ui.visuals().dark_mode;
+    let purple = if dark {
+        egui::Color32::from_rgb(52, 42, 82)
+    } else {
+        egui::Color32::from_rgb(232, 226, 250)
+    };
+    let ink = if dark {
+        egui::Color32::from_rgb(225, 215, 250)
+    } else {
+        egui::Color32::from_rgb(60, 40, 110)
+    };
     egui::Frame::new()
         .fill(purple)
         .inner_margin(egui::Margin::symmetric(8, 4))
@@ -474,8 +645,7 @@ pub fn bar(ui: &mut egui::Ui, st: &mut FormState) -> bool {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new("Este documento contém campos de formulário.")
-                        .color(egui::Color32::from_rgb(60, 40, 110)),
+                    egui::RichText::new("Este documento contém campos de formulário.").color(ink),
                 );
                 ui.checkbox(&mut st.highlight, "Realçar campos");
                 if let Some(warning) = notes_warning(st.notes) {
@@ -502,6 +672,52 @@ pub fn bar(ui: &mut egui::Ui, st: &mut FormState) -> bool {
 mod tests {
     use super::*;
     use pdf_core::PdfRect;
+
+    #[test]
+    fn keystroke_filter_blocks_letters_in_numbers() {
+        let money = pdf_core::FieldFormat::Number {
+            dec: 2,
+            sep: 2,
+            neg: 0,
+            currency: "R$ ".into(),
+            prepend: true,
+        };
+        assert_eq!(keep_typed(&money, "12", "12,5"), "12,5");
+        assert_eq!(keep_typed(&money, "12", "12a"), "12", "a letra não entra");
+        assert_eq!(keep_typed(&pdf_core::FieldFormat::None, "a", "ab"), "ab");
+    }
+
+    #[test]
+    fn date_picker_writes_the_format() {
+        // março de 2026 começa num domingo
+        let cells = month_cells(2026, 3);
+        assert_eq!(cells[0], Some(1));
+        assert_eq!(cells.iter().flatten().count(), 31);
+        // fevereiro de 2026 começa num domingo também; abril, numa quarta
+        assert_eq!(month_cells(2026, 4)[3], Some(1));
+        let fmt = pdf_core::FieldFormat::Date("dd/mm/yyyy".into());
+        assert_eq!(picked_date(&fmt, 2026, 3, 5), "05/03/2026");
+    }
+
+    #[test]
+    fn editing_a_text_field_does_not_keep_the_key_focus() {
+        // o Enter digitado no campo seguinte (depois do Tab) não pode reabrir este
+        let mut st = FormState::default();
+        st.focus_for_test(Some((0, 1)));
+        let mut out = Vec::new();
+        open(&mut st, &f(1, 0, 0.0, 0.0, "t", text()), &mut out);
+        assert!(!st.has_focus());
+        assert!(st.draft.is_some());
+    }
+
+    #[test]
+    fn a_reset_button_asks_to_clear_the_form() {
+        let mut st = FormState::default();
+        let mut out = Vec::new();
+        let b = f(1, 0, 0.0, 0.0, "Limpar", FieldKind::Button { reset: true });
+        open(&mut st, &b, &mut out);
+        assert!(matches!(out[..], [FieldAction::Reset]));
+    }
 
     fn f(id: i32, page: i32, y: f32, x: f32, name: &str, kind: FieldKind) -> FieldInfo {
         FieldInfo {

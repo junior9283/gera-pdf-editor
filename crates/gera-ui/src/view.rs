@@ -60,7 +60,10 @@ pub struct DocView {
     /// Largura e altura da maior linha com zoom 1 (base dos ajustes).
     base: (f32, f32),
     pub layout: Layout,
+    /// Tema escuro: só o fundo em volta das páginas escurece (as páginas ficam brancas).
     pub dark: bool,
+    /// Páginas renderizadas com as cores invertidas (desligado: o tema não muda as páginas).
+    pub invert: bool,
     ppp: f32,
     /// Maior lado de textura aceito pela GPU (em pixels).
     max_side: f32,
@@ -89,6 +92,7 @@ impl DocView {
             base: (1.0, 1.0),
             layout: Layout::default(),
             dark: false,
+            invert: false,
             ppp: 1.0,
             max_side: DEFAULT_MAX_SIDE,
             cache: LruCache::new(CACHE_BUDGET_BYTES),
@@ -309,7 +313,7 @@ impl DocView {
     }
 
     fn key(&self, page: i32, scale: f32) -> RenderKey {
-        (page, zoom::quantize(scale), self.dark, self.rotation)
+        (page, zoom::quantize(scale), self.invert, self.rotation)
     }
 
     /// Posição de rolagem que mostra a página `page` (no ponto `at` dela, ou no topo), com folga
@@ -399,7 +403,7 @@ impl DocView {
         let key = (
             page,
             zoom::quantize(scale),
-            self.dark,
+            self.invert,
             self.rotation,
             tile.0,
             tile.1,
@@ -415,7 +419,7 @@ impl DocView {
             worker.send(Request::RenderTile {
                 page,
                 scale,
-                invert: self.dark,
+                invert: self.invert,
                 rotation: self.rotation,
                 tile,
                 cancel,
@@ -445,7 +449,7 @@ impl DocView {
         );
         // como em `on_rendered`: só o que ainda está sendo esperado
         if self.requested_tiles.remove(&key).is_none()
-            || invert != self.dark
+            || invert != self.invert
             || rotation != self.rotation
         {
             return;
@@ -473,7 +477,7 @@ impl DocView {
 
     /// Qualquer textura da página (de outra escala): serve de placeholder enquanto a nítida não chega.
     pub fn any_texture(&self, page: i32) -> Option<egui::TextureId> {
-        let (dark, rotation) = (self.dark, self.rotation);
+        let (dark, rotation) = (self.invert, self.rotation);
         let key = self
             .cache
             .keys()
@@ -492,7 +496,7 @@ impl DocView {
         worker.send(Request::Render {
             page,
             scale,
-            invert: self.dark,
+            invert: self.invert,
             rotation: self.rotation,
             cancel,
         });
@@ -510,7 +514,9 @@ impl DocView {
         let key = (page, zoom::quantize(scale), invert, rotation);
         // Só entra no cache o que ainda está sendo esperado: respostas de pedidos cancelados
         // (outra rotação, outro tema, aba suspensa) seriam memória desperdiçada.
-        if self.requested.remove(&key).is_none() || invert != self.dark || rotation != self.rotation
+        if self.requested.remove(&key).is_none()
+            || invert != self.invert
+            || rotation != self.rotation
         {
             return;
         }
@@ -569,6 +575,13 @@ mod tests {
             3
         ];
         DocView::new(PathBuf::from("x.pdf"), sizes)
+    }
+
+    #[test]
+    fn dark_theme_keeps_pages_white() {
+        let mut v = view();
+        v.dark = true;
+        assert!(!v.key(0, 1.0).2, "o tema escuro não inverte as páginas");
     }
 
     #[test]

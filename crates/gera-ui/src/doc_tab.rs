@@ -1090,11 +1090,11 @@ impl DocTab {
         }
     }
 
+    /// Tema escuro: escurece o fundo em volta das páginas; as páginas continuam brancas.
     pub fn set_dark(&mut self, dark: bool) {
         self.dark = dark;
         if let Some(view) = self.view.as_mut() {
             view.dark = dark;
-            view.clear_cache();
         }
     }
 
@@ -1628,6 +1628,7 @@ impl DocTab {
                         pages.into_iter().for_each(|p| view.invalidate_page(p));
                     }
                 }
+                Response::FieldRefused(msg) => self.form.alert = Some(msg),
                 Response::CalcOrder(names) => {
                     if self.prepare.calc_order.is_some() {
                         self.prepare.calc_order = Some(names);
@@ -2459,6 +2460,7 @@ impl DocTab {
         self.sign_window(ui.ctx());
         self.split_window(ui);
         self.calc_order_window(ui.ctx());
+        self.field_alert_window(ui.ctx());
         self.stamp_windows(ui.ctx());
         self.poll_files();
         self.identity_window(ui);
@@ -3408,13 +3410,43 @@ impl DocTab {
         self.worker.send(Request::CalcOrder);
     }
 
-    /// Atalhos do Preparar formulário: `Shift+N` mostra e esconde a ordem de tabulação.
+    /// Atalhos do Preparar formulário: `Shift+N` mostra e esconde a ordem de tabulação. Ao
+    /// preencher, `Shift+L` liga e desliga Realçar campos.
     fn prepare_keys(&mut self, ctx: &egui::Context) {
-        if !self.prepare_tools || ctx.egui_wants_keyboard_input() {
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        if !self.prepare_tools {
+            if !self.fields.is_empty()
+                && ctx.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::L))
+            {
+                self.form.highlight = !self.form.highlight;
+            }
             return;
         }
         if ctx.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::N)) {
             self.prepare.show_order = !self.prepare.show_order;
+        }
+    }
+
+    /// Aviso de valor recusado pelo campo (Formatar ou Validar), como o alerta do Acrobat.
+    fn field_alert_window(&mut self, ctx: &egui::Context) {
+        let Some(msg) = self.form.alert.clone() else {
+            return;
+        };
+        let mut open = true;
+        let mut ok = false;
+        egui::Window::new("Aviso")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(crate::links::safe_display(&msg));
+                ok = ui.button("OK").clicked();
+            });
+        if ok || !open {
+            self.form.alert = None;
         }
     }
 
@@ -3724,6 +3756,8 @@ impl DocTab {
                 crate::fields::FieldAction::Set { page, id, value } => {
                     self.worker.send(Request::SetField { page, id, value })
                 }
+                // botão Redefinir formulário: limpa na hora (como o Acrobat; o desfazer volta)
+                crate::fields::FieldAction::Reset => self.worker.send(Request::ResetForm),
                 // como no Acrobat: com Preencher e assinar ativo, o campo recebe a assinatura
                 // manuscrita; senão, o campo vazio abre a assinatura com ID digital
                 crate::fields::FieldAction::Sign { page, rect, .. }
