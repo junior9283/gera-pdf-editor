@@ -2170,7 +2170,6 @@ impl DocTab {
         if let Some(view) = self.view.as_mut() {
             view.end_frame();
         }
-        self.drop_unused_focus();
     }
 
     /// Conteúdo do painel esquerdo; clicar leva à página.

@@ -1038,6 +1038,11 @@ impl eframe::App for GeraApp {
         }
         self.link_warning_window(ui.ctx());
         self.preferences_window(ui.ctx());
+        // fim do quadro: barras (também a flutuante) já desenhadas; pedido de foco sem campo
+        // visível não fica esperando
+        if let Some(doc) = self.active_doc() {
+            doc.drop_unused_focus();
+        }
         // a pergunta é da aba que pediu: se outra veio para a frente, some
         let active = self.tabs.active();
         self.full_screen_request = self
