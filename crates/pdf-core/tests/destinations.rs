@@ -130,3 +130,25 @@ fn removing_a_missing_name_is_refused() {
     assert!(missing.is_err());
     assert!(!d.is_dirty());
 }
+
+#[test]
+fn many_names_in_both_places_are_read_quickly() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = 40_000;
+    let tree: String = (0..n).map(|k| format!("(t{k:06})[3 0 R/Fit]")).collect();
+    let old: String = (0..n).map(|k| format!("/o{k:06}[3 0 R/Fit]")).collect();
+    let objs = vec![
+        "<</Type/Catalog/Pages 2 0 R/Names<</Dests 4 0 R>>/Dests 5 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>".to_string(),
+        format!("<</Names[{tree}]>>"),
+        format!("<<{old}>>"),
+    ];
+    let path = dir.path().join("muitos.pdf");
+    std::fs::write(&path, pdf_from_objects(&objs)).unwrap();
+    let d = PdfDoc::open(&path, None).unwrap();
+    let t = std::time::Instant::now();
+    let list = d.destinations();
+    assert!(list.len() >= 40_000);
+    assert!(t.elapsed().as_secs() < 5, "{:?}", t.elapsed());
+}

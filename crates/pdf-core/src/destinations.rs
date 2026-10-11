@@ -86,7 +86,10 @@ fn read_tree(
         }
     }
     if let Some(kids) = get(node, "Kids").filter(|k| k.is_array().unwrap_or(false)) {
-        for k in 0..kids.len().unwrap_or(0) as i32 {
+        for k in 0..kids.len().unwrap_or(0).min(MAX_NAMES) as i32 {
+            if out.len() >= MAX_NAMES {
+                return;
+            }
             if let Ok(Some(kid)) = kids.get_array(k) {
                 read_tree(&kid, depth + 1, visited, out);
             }
@@ -133,6 +136,7 @@ impl PdfDoc {
         if let Some(root) = get(&catalog, "Names").and_then(|n| get(&n, "Dests")) {
             read_tree(&root, 0, &mut HashSet::new(), &mut tree);
         }
+        let mut seen: HashSet<String> = tree.iter().map(|(n, _)| n.clone()).collect();
         let mut out: Vec<_> = tree
             .into_iter()
             .map(|(n, v)| (n, v, Source::Tree))
@@ -146,7 +150,7 @@ impl PdfDoc {
                 let key = old.get_dict_key(k).ok().flatten().and_then(|k| name_of(&k));
                 let value = old.get_dict_val(k).ok().flatten();
                 if let (Some(key), Some(value)) = (key, value) {
-                    if !out.iter().any(|(n, _, _)| *n == key) {
+                    if seen.insert(key.clone()) {
                         out.push((key, value, Source::OldDict));
                     }
                 }
