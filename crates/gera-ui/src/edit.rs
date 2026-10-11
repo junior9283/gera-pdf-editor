@@ -240,6 +240,8 @@ pub struct EditState {
     props: Option<PropsDraft>,
     /// Carimbo escolhido no menu da ferramenta Carimbo.
     pub stamp: StampKind,
+    /// Carimbo personalizado escolhido (vale no lugar de `stamp`).
+    pub custom_stamp: Option<CustomStamp>,
     pub(crate) shape_drag: Option<ShapeDrag>,
     /// Caixa de texto sendo digitada sobre a página.
     pub(crate) text_draft: Option<TextDraft>,
@@ -265,6 +267,14 @@ pub struct EditState {
     note_focus: bool,
     /// Ferramenta dos gestos em andamento: trocar de ferramenta os descarta.
     gesture_tool: Tool,
+}
+
+/// Carimbo personalizado escolhido no menu: nome, imagem e tamanho natural (pontos).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CustomStamp {
+    pub name: String,
+    pub path: std::path::PathBuf,
+    pub size: (f32, f32),
 }
 
 /// O que a caixa de texto em digitação vai virar.

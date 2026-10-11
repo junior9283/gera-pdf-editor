@@ -93,6 +93,15 @@ fn open_source(src: &Path) -> Result<Document> {
     opened.map_err(|_| refused("o arquivo não é um PDF ou uma imagem que dê para abrir"))
 }
 
+/// Quantas páginas tem a fonte de um carimbo (imagem: 1).
+pub fn stamp_source_pages(src: &Path) -> Result<i32> {
+    let doc = open_source(src)?;
+    if doc.needs_password()? {
+        return Err(refused("o PDF está protegido por senha"));
+    }
+    Ok(doc.page_count()?)
+}
+
 /// Tamanho natural do carimbo guardado em `png` (a imagem tem 300 dpi).
 pub fn stamp_image_size(png: &Path) -> Option<(f32, f32)> {
     let img = Image::from_file(png.to_str()?).ok()?;

@@ -177,6 +177,19 @@ impl FileDialogs {
         });
     }
 
+    /// PDF ou imagem para um carimbo personalizado.
+    pub fn pick_stamp_source(&mut self, ctx: &egui::Context) {
+        self.spawn(ctx, move || {
+            let mut exts = vec!["pdf"];
+            exts.extend_from_slice(IMAGE_EXTS);
+            rfd::FileDialog::new()
+                .set_title("Criar carimbo personalizado")
+                .add_filter("PDF ou imagem", &exts)
+                .pick_file_or_e2e()
+                .map_or(Picked::Cancelled, |p| Picked::Open(vec![p]))
+        });
+    }
+
     /// Arquivo de dados de comentários (FDF, XFDF ou PDF) para importar.
     pub fn pick_comment_data(&mut self, ctx: &egui::Context) {
         self.spawn(ctx, move || {

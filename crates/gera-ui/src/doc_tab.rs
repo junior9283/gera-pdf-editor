@@ -283,6 +283,9 @@ pub struct DocTab {
     identity_name: String,
     /// Painel Comentários (busca, filtros, ordenação e resposta em digitação).
     comments: crate::comments_panel::PanelState,
+    /// Diálogos dos carimbos personalizados (menu do Carimbo).
+    pub(crate) stamp_create: Option<crate::stamp_dialogs::CreateStamp>,
+    pub(crate) stamp_manage: Option<crate::stamp_dialogs::ManageStamps>,
     /// Diálogo Resumir comentários, se aberto.
     summary: Option<crate::summary_dialog::SummaryDialog>,
     /// Preencher formulários: realce, campo em edição, lista aberta.
@@ -325,6 +328,8 @@ enum PickFor {
     ExportComments(Option<Vec<(i32, i32)>>),
     /// Comentários → Importar arquivo de dados.
     ImportComments,
+    /// Carimbo personalizado: o PDF ou a imagem de origem.
+    StampSource,
 }
 
 /// Diálogo Dividir documento.
@@ -431,6 +436,8 @@ impl DocTab {
             identity_name: String::new(),
             comments: Default::default(),
             summary: None,
+            stamp_create: None,
+            stamp_manage: None,
             form: Default::default(),
             organize: None,
             split: None,
@@ -2431,6 +2438,7 @@ impl DocTab {
         self.ocr_window(ui.ctx());
         self.sign_window(ui.ctx());
         self.split_window(ui);
+        self.stamp_windows(ui.ctx());
         self.poll_files();
         self.identity_window(ui);
         self.pick_attachment_for_comment(ui.ctx());
@@ -3266,6 +3274,13 @@ impl DocTab {
                 self.worker
                     .send(Request::ExportComments { path, format, only });
             }
+            (Some(PickFor::StampSource), Picked::Open(files)) => {
+                if let (Some(d), Some(path)) =
+                    (self.stamp_create.as_mut(), files.into_iter().next())
+                {
+                    d.set_source(path);
+                }
+            }
             (Some(PickFor::ImportComments), Picked::Open(files)) => {
                 if let Some(path) = files.into_iter().next() {
                     self.worker.send(Request::ImportComments { path });
@@ -3334,6 +3349,31 @@ impl DocTab {
         }
         self.summary_window(ui.ctx());
         self.send_edits();
+    }
+
+    /// Diálogos Criar e Gerenciar carimbos personalizados.
+    fn stamp_windows(&mut self, ctx: &egui::Context) {
+        use crate::stamp_dialogs::CreateAction;
+        match self.stamp_create.as_mut().and_then(|d| d.window(ctx)) {
+            Some(CreateAction::PickFile) => {
+                self.picking = Some(PickFor::StampSource);
+                self.files.pick_stamp_source(ctx);
+            }
+            Some(CreateAction::Done(stamp)) => {
+                self.stamp_create = None;
+                self.status = format!(
+                    "Carimbo \"{}\" criado: clique na página para colocá-lo.",
+                    crate::links::safe_display(&stamp.name)
+                );
+                self.edit.custom_stamp = Some(stamp);
+                self.edit.tool = app_state::tools::Tool::Stamp;
+            }
+            Some(CreateAction::Cancel) => self.stamp_create = None,
+            None => {}
+        }
+        if self.stamp_manage.as_mut().is_some_and(|m| !m.window(ctx)) {
+            self.stamp_manage = None;
+        }
     }
 
     /// Janela Resumir comentários: o resumo vai para a pasta privada e abre numa aba nova, sem
