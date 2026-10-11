@@ -2,8 +2,9 @@
 //! comentário (`FileAttachment`). Adicionar, remover e descrever são etapas do desfazer.
 use crate::doc::PdfDoc;
 use crate::error::{refused, Result};
+use crate::pdf_obj::{get, text};
 use crate::types::{AttachmentInfo, AttachmentOrigin};
-use mupdf::pdf::{EmbeddedFileOptions, PdfAnnotationType, PdfObject};
+use mupdf::pdf::{EmbeddedFileOptions, PdfAnnotationType, PdfObject, PdfPage};
 use std::path::Path;
 
 /// Maior anexo que o app adiciona.
@@ -12,16 +13,6 @@ pub const MAX_ATTACHMENT_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_READ_BYTES: usize = 512 * 1024 * 1024;
 /// Teto de anexos listados.
 const MAX_LISTED: usize = 10_000;
-
-fn get(obj: &PdfObject, key: &str) -> Option<PdfObject> {
-    obj.get_dict(key).ok().flatten()
-}
-
-fn text(obj: &PdfObject, key: &str) -> String {
-    get(obj, key)
-        .and_then(|v| v.as_string().ok())
-        .unwrap_or_default()
-}
 
 /// Nome do arquivo no filespec (`/UF`, Unicode, ou `/F`).
 fn file_name(fs: &PdfObject) -> String {
@@ -65,6 +56,27 @@ fn unique_name(wanted: &str, taken: &[String]) -> String {
         .unwrap_or_else(|| wanted.to_owned())
 }
 
+/// Anexos de comentário (`FileAttachment`) da página já carregada, até o teto da lista.
+pub(crate) fn comment_attachments(pdf_page: &PdfPage, page: i32, out: &mut Vec<AttachmentInfo>) {
+    for annot in pdf_page.annotations() {
+        if out.len() >= MAX_LISTED {
+            return;
+        }
+        if annot.r#type().ok() != Some(PdfAnnotationType::FileAttachment) {
+            continue;
+        }
+        let obj = annot.object();
+        let Some(fs) = get(&obj, "FS") else { continue };
+        let Ok(id) = obj.as_indirect() else { continue };
+        out.push(AttachmentInfo {
+            name: file_name(&fs),
+            description: text(&obj, "Contents"),
+            size: embedded_stream(&fs).map_or(0, |s| declared_size(&s)),
+            origin: AttachmentOrigin::Comment { page, id },
+        });
+    }
+}
+
 impl PdfDoc {
     /// Os pares (nome, filespec) da árvore `/EmbeddedFiles` (lista simples, como o MuPDF lê).
     fn document_files(&self) -> Vec<(String, PdfObject)> {
@@ -90,45 +102,29 @@ impl PdfDoc {
 
     /// Anexos do documento e dos comentários.
     pub fn attachments(&self) -> Vec<AttachmentInfo> {
-        let mut out: Vec<AttachmentInfo> = self
-            .document_files()
+        let mut out = self.document_attachments();
+        for page in 0..self.page_count().unwrap_or(0) {
+            if let Ok(pdf_page) = self.inner.load_pdf_page(page) {
+                comment_attachments(&pdf_page, page, &mut out);
+            }
+        }
+        out
+    }
+
+    /// Anexos do documento (`/EmbeddedFiles`).
+    pub(crate) fn document_attachments(&self) -> Vec<AttachmentInfo> {
+        self.document_files()
             .into_iter()
             .map(|(name, fs)| {
                 let size = embedded_stream(&fs).map_or(0, |s| declared_size(&s));
                 AttachmentInfo {
-                    filename: file_name(&fs),
                     description: text(&fs, "Desc"),
                     size,
                     name,
                     origin: AttachmentOrigin::Document,
                 }
             })
-            .collect();
-        for page in 0..self.page_count().unwrap_or(0) {
-            let Ok(pdf_page) = self.inner.load_pdf_page(page) else {
-                continue;
-            };
-            for annot in pdf_page.annotations() {
-                if out.len() >= MAX_LISTED {
-                    return out;
-                }
-                if annot.r#type().ok() != Some(PdfAnnotationType::FileAttachment) {
-                    continue;
-                }
-                let obj = annot.object();
-                let Some(fs) = get(&obj, "FS") else { continue };
-                let filename = file_name(&fs);
-                let Ok(id) = obj.as_indirect() else { continue };
-                out.push(AttachmentInfo {
-                    name: filename.clone(),
-                    filename,
-                    description: text(&obj, "Contents"),
-                    size: embedded_stream(&fs).map_or(0, |s| declared_size(&s)),
-                    origin: AttachmentOrigin::Comment { page, id },
-                });
-            }
-        }
-        out
+            .collect()
     }
 
     /// Conteúdo do anexo (com teto).

@@ -1035,15 +1035,12 @@ impl DocTab {
 
     /// Rótulo da aba: o nome do arquivo, ou o título do documento quando ele pede.
     pub fn title(&self) -> String {
-        match self.display_title.as_ref().or(self.attachment_name.as_ref()) {
-            Some(t) => {
-                let short: String = t.chars().take(28).collect();
-                if short.len() < t.len() {
-                    format!("{short}…")
-                } else {
-                    short
-                }
-            }
+        match self
+            .display_title
+            .as_ref()
+            .or(self.attachment_name.as_ref())
+        {
+            Some(t) => app_state::tabs::shorten(t, 28),
             None => app_state::tabs::tab_title(&self.path, 28),
         }
     }
@@ -1562,7 +1559,7 @@ impl DocTab {
         }
         if !typing && self.bookmarks.focused {
             // painel Marcadores focado: setas, Enter, Delete e F2 são dele
-            let nodes = self.outline_shown();
+            let nodes = outline_shown(&self.outline, &self.bookmarks_open);
             let actions = self.bookmarks.keys(ctx, &nodes);
             self.bookmark_actions(actions);
         }
@@ -2302,7 +2299,7 @@ impl DocTab {
     pub fn side_panel(&mut self, ui: &mut egui::Ui, panel: LeftPanel) {
         if panel == LeftPanel::Outline {
             let can_edit = self.security.permissions.modify;
-            let nodes = self.outline_shown();
+            let nodes = outline_shown(&self.outline, &self.bookmarks_open);
             let actions = ui
                 .push_id(self.id, |ui| {
                     ui.strong(panel.label());
@@ -2389,35 +2386,11 @@ impl DocTab {
         let Some((a, opened)) = self.attach_warning.as_mut() else {
             return;
         };
-        let now = ctx.input(|i| i.time);
-        let ready = crate::links::armed(*opened.get_or_insert(now), now);
-        if !ready {
-            ctx.request_repaint_after(std::time::Duration::from_secs_f64(crate::links::ARM_DELAY));
-        }
-        let mut answer = None;
-        egui::Window::new("Aviso de segurança")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |ui| {
-                ui.label("O documento está tentando abrir o anexo:");
-                ui.monospace(crate::links::safe_display(&a.name));
-                ui.label("Se você confia neste anexo, escolha Permitir.");
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(ready, egui::Button::new("Permitir"))
-                        .clicked()
-                    {
-                        answer = Some(true);
-                    }
-                    if ui
-                        .add_enabled(ready, egui::Button::new("Bloquear"))
-                        .clicked()
-                    {
-                        answer = Some(false);
-                    }
-                });
-            });
+        let answer = crate::links::security_warning(ctx, opened, |ui| {
+            ui.label("O documento está tentando abrir o anexo:");
+            ui.monospace(crate::links::safe_display(&a.name));
+            ui.label("Se você confia neste anexo, escolha Permitir.");
+        });
         let Some(allow) = answer else { return };
         let Some((a, _)) = self.attach_warning.take() else {
             return;
@@ -2427,12 +2400,9 @@ impl DocTab {
         }
         match crate::print_job::spool_dir() {
             Ok(dir) => {
-                use std::sync::atomic::{AtomicU32, Ordering};
-                static N: AtomicU32 = AtomicU32::new(0);
-                let n = N.fetch_add(1, Ordering::Relaxed);
+                use crate::print_job::{spool_file_name, ATTACHMENT_PREFIX};
                 let name = crate::attachments_panel::save_name(&a.name);
-                let prefix = crate::attachments_panel::SPOOL_PREFIX;
-                let dest = dir.join(format!("{prefix}{}-{n}-{name}", std::process::id()));
+                let dest = dir.join(spool_file_name(ATTACHMENT_PREFIX, &format!("-{name}")));
                 self.worker.send(Request::WriteAttachment {
                     origin: a.origin,
                     name: a.name,
@@ -2442,18 +2412,6 @@ impl DocTab {
             }
             Err(e) => self.status = format!("Não foi possível abrir o anexo: {e}"),
         }
-    }
-
-    /// Marcadores como aparecem: com expandir e recolher locais quando o documento não permite
-    /// alterar.
-    fn outline_shown(&self) -> Vec<pdf_core::OutlineNode> {
-        let mut nodes = self.outline.clone();
-        for n in &mut nodes {
-            if let Some(&open) = self.bookmarks_open.get(&n.id) {
-                n.open = open;
-            }
-        }
-        nodes
     }
 
     /// Executa o que o painel Marcadores pediu.
@@ -2499,13 +2457,11 @@ impl DocTab {
     }
 
     fn outline_op(&mut self, op: pdf_core::OutlineOp) {
-        if let pdf_core::OutlineOp::SetOpen { id, open } = op {
-            if !self.security.permissions.modify {
+        if !self.security.permissions.modify {
+            if let pdf_core::OutlineOp::SetOpen { id, open } = op {
                 self.bookmarks_open.insert(id, open); // só na tela
                 return;
             }
-        }
-        if !self.security.permissions.modify {
             return self.deny("alterar os marcadores");
         }
         self.worker.send(Request::Outline(op));
@@ -2905,10 +2861,7 @@ impl DocTab {
             }
             (Some(PickFor::Attachment), Picked::Open(files)) => {
                 if let Some(path) = files.into_iter().next() {
-                    self.worker.send(Request::AddAttachment {
-                        path,
-                        description: String::new(),
-                    });
+                    self.worker.send(Request::AddAttachment { path });
                 }
             }
             (Some(PickFor::SaveAttachment(a)), Picked::SaveTo(dest)) => {
@@ -3518,6 +3471,24 @@ fn link_gesture(
         .clone()
         .on_hover_text_at_pointer(crate::links::hint(&link.target));
     clicked.then(|| link.target.clone())
+}
+
+/// Marcadores como aparecem: com expandir e recolher locais (`open`) quando o documento não
+/// permite alterar; sem eles, empresta a lista como está.
+fn outline_shown<'a>(
+    outline: &'a [pdf_core::OutlineNode],
+    open: &std::collections::HashMap<i32, bool>,
+) -> std::borrow::Cow<'a, [pdf_core::OutlineNode]> {
+    if open.is_empty() {
+        return std::borrow::Cow::Borrowed(outline);
+    }
+    let mut nodes = outline.to_vec();
+    for n in &mut nodes {
+        if let Some(&o) = open.get(&n.id) {
+            n.open = o;
+        }
+    }
+    std::borrow::Cow::Owned(nodes)
 }
 
 #[cfg(test)]

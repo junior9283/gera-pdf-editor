@@ -45,7 +45,6 @@ pub enum Request {
     /// Anexos (respondem `AttachmentsChanged`).
     AddAttachment {
         path: PathBuf,
-        description: String,
     },
     RemoveAttachment {
         name: String,
@@ -486,8 +485,8 @@ impl State {
                 }
             }
             Request::Outline(op) => self.edit(send, |d| Ok(Changed::Outline(d.edit_outline(op)?))),
-            Request::AddAttachment { path, description } => self.edit(send, |d| {
-                d.add_attachment(&path, &description)?;
+            Request::AddAttachment { path } => self.edit(send, |d| {
+                d.add_attachment(&path, "")?;
                 Ok(Changed::Attachments)
             }),
             Request::RemoveAttachment { name } => self.edit(send, |d| {

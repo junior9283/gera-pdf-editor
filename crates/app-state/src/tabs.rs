@@ -17,10 +17,15 @@ pub fn tab_title(path: &Path, max: usize) -> String {
         .file_name()
         .map_or_else(|| path.to_string_lossy(), |n| n.to_string_lossy())
         .into_owned();
-    if name.chars().count() <= max {
-        return name;
+    shorten(&name, max)
+}
+
+/// O texto com no máximo `max` caracteres, terminando em "…" quando cortado.
+pub fn shorten(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
     }
-    let keep: String = name.chars().take(max.saturating_sub(1)).collect();
+    let keep: String = text.chars().take(max.saturating_sub(1)).collect();
     format!("{keep}…")
 }
 

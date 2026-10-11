@@ -257,6 +257,9 @@ impl BookmarksPanel {
         can_edit: bool,
     ) -> Vec<BookmarkAction> {
         let mut out = Vec::new();
+        // marcadores com filhos (uma passada por quadro, não uma por linha)
+        let parents: std::collections::HashSet<i32> =
+            nodes.iter().filter_map(|n| n.parent).collect();
         ui.horizontal(|ui| {
             let new = ui
                 .add_enabled(can_edit, egui::Button::new("+").small())
@@ -280,7 +283,7 @@ impl BookmarksPanel {
                         nodes
                             .iter()
                             .filter(|n| n.open != open)
-                            .filter(|n| nodes.iter().any(|k| k.parent == Some(n.id)))
+                            .filter(|n| parents.contains(&n.id))
                             .map(|n| BookmarkAction::Op(OutlineOp::SetOpen { id: n.id, open })),
                     );
                 }
@@ -299,8 +302,7 @@ impl BookmarksPanel {
                 for n in &shown {
                     let row = ui.horizontal(|ui| {
                         ui.add_space(14.0 * n.depth as f32);
-                        let has_kids = nodes.iter().any(|k| k.parent == Some(n.id));
-                        if has_kids {
+                        if parents.contains(&n.id) {
                             let arrow = if n.open { "⏷" } else { "⏵" };
                             if ui
                                 .add(egui::Button::new(arrow).frame(false).small())
@@ -347,9 +349,8 @@ impl BookmarksPanel {
                             return None;
                         }
                         let mut text = egui::RichText::new(&n.title);
-                        if let Some([r, g, b]) = n.color {
-                            let c = |v: f32| (v * 255.0).round() as u8;
-                            text = text.color(egui::Color32::from_rgb(c(r), c(g), c(b)));
+                        if let Some(c) = n.color {
+                            text = text.color(crate::shell::annot_props::color32(c));
                         }
                         if n.bold {
                             text = text.strong();

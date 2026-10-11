@@ -3,6 +3,7 @@
 //! (`/ViewerPreferences`); e a lista das fontes usadas.
 use crate::doc::{pdf_now, PdfDoc};
 use crate::error::{refused, Result};
+use crate::pdf_obj::{get, get_bool, name_of};
 use crate::types::{
     Duplex, FontInfo, InitialLayout, InitialPanel, InitialView, InitialZoom, PrintPrefs,
     PropertiesEdit, WindowOptions,
@@ -28,20 +29,15 @@ const MAX_NAME_BYTES: usize = 127;
 const MAX_FONTS: usize = 10_000;
 const MAX_XOBJECT_DEPTH: u32 = 10;
 
-fn name_of(obj: &PdfObject) -> Option<String> {
-    obj.is_name()
-        .ok()?
-        .then(|| obj.as_name().ok())
-        .flatten()
-        .map(|n| String::from_utf8_lossy(&n).into_owned())
-}
-
-fn get(obj: &PdfObject, key: &str) -> Option<PdfObject> {
-    obj.get_dict(key).ok().flatten()
-}
-
-fn get_bool(obj: &PdfObject, key: &str) -> bool {
-    get(obj, key).is_some_and(|v| v.as_bool().unwrap_or(false))
+/// Nome aceito numa propriedade personalizada: não vazio, curto, fora dos nomes padrão do `/Info`
+/// e sem espaço, controle ou delimitador do PDF.
+pub fn valid_custom_name(name: &str) -> bool {
+    !name.trim().is_empty()
+        && name.len() <= MAX_NAME_BYTES
+        && !STANDARD_INFO.contains(&name)
+        && !name
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || "/()<>[]{}%#".contains(c))
 }
 
 impl PdfDoc {
@@ -67,7 +63,7 @@ impl PdfDoc {
         out
     }
 
-    fn info_dict(&self) -> Option<PdfObject> {
+    pub(crate) fn info_dict(&self) -> Option<PdfObject> {
         self.inner.trailer().ok().and_then(|t| get(&t, "Info"))
     }
 
@@ -178,13 +174,7 @@ impl PdfDoc {
     /// Grava as propriedades (uma etapa do desfazer).
     pub fn set_properties(&mut self, e: &PropertiesEdit) -> Result<()> {
         for (name, _) in &e.custom {
-            let bad = name.trim().is_empty()
-                || name.len() > MAX_NAME_BYTES
-                || STANDARD_INFO.contains(&name.as_str())
-                || name
-                    .chars()
-                    .any(|c| c.is_whitespace() || c.is_control() || "/()<>[]{}%#".contains(c));
-            if bad {
+            if !valid_custom_name(name) {
                 return Err(refused(format!("nome de propriedade inválido: {name:?}")));
             }
         }

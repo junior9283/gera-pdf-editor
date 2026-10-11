@@ -453,7 +453,6 @@ pub enum InitialZoom {
 pub struct AttachmentInfo {
     /// Nome na árvore de anexos (ou o do arquivo, nos de comentário).
     pub name: String,
-    pub filename: String,
     pub description: String,
     pub size: usize,
     pub origin: AttachmentOrigin,

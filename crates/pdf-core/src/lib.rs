@@ -20,6 +20,7 @@ mod owner_password;
 mod page_content;
 mod pages;
 mod pagination;
+mod pdf_obj;
 mod prepare;
 mod properties_edit;
 mod redact;
@@ -52,6 +53,7 @@ pub use pagination::{
     StdFont, TextLook, Watermark, WatermarkSource,
 };
 pub use prepare::{FieldProps, NewFieldKind, PrepareOp};
+pub use properties_edit::valid_custom_name;
 pub use redact::{RedactHit, RedactLook, RedactPattern, RedactQuery, SanitizeOptions};
 pub use security::{Permissions, Protection, SecurityInfo};
 pub use sign::{display_date, Integrity, SignPlace, SignatureInfo};

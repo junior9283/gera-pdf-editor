@@ -4,6 +4,7 @@
 //! dicionário (e chaves como `/A` e `/SE`).
 use crate::doc::PdfDoc;
 use crate::error::{refused, PdfError, Result};
+use crate::pdf_obj::{get, name_of, text};
 use crate::types::{OutlineNode, OutlineOp};
 use mupdf::pdf::PdfObject;
 use mupdf::Matrix;
@@ -16,6 +17,8 @@ const MAX_TITLE_CHARS: usize = 512;
 
 /// Página e ponto de um destino.
 type Target = (Option<i32>, Option<(f32, f32)>);
+/// Matriz e altura de cada página já carregada (destinos dos marcadores).
+type PageCache = std::collections::HashMap<i32, (Matrix, f32)>;
 
 /// Item da árvore em memória.
 struct Item {
@@ -25,21 +28,9 @@ struct Item {
     kids: Vec<Item>,
 }
 
-fn get(obj: &PdfObject, key: &str) -> Option<PdfObject> {
-    obj.get_dict(key).ok().flatten()
-}
-
 fn num(obj: Option<PdfObject>) -> Option<f32> {
     obj.and_then(|o| o.as_float().ok())
         .filter(|v| v.is_finite())
-}
-
-fn name_of(obj: &PdfObject) -> Option<String> {
-    obj.is_name()
-        .ok()?
-        .then(|| obj.as_name().ok())
-        .flatten()
-        .map(|n| String::from_utf8_lossy(&n).into_owned())
 }
 
 /// Irmãos a partir de `first` (e os filhos de cada um), uma vez cada objeto.
@@ -188,7 +179,7 @@ impl PdfDoc {
     pub fn outline_tree(&self) -> Result<Vec<OutlineNode>> {
         let (_, items) = self.read_outline()?;
         let mut out = Vec::new();
-        self.flatten_items(&items, None, 0, &mut out);
+        self.flatten_items(&items, None, 0, &mut out, &mut PageCache::new());
         Ok(out)
     }
 
@@ -198,11 +189,10 @@ impl PdfDoc {
         parent: Option<i32>,
         depth: usize,
         out: &mut Vec<OutlineNode>,
+        pages: &mut PageCache,
     ) {
         for item in items {
-            let title: String = get(&item.obj, "Title")
-                .and_then(|t| t.as_string().ok())
-                .unwrap_or_default()
+            let title: String = text(&item.obj, "Title")
                 .chars()
                 .take(MAX_TITLE_CHARS)
                 .collect();
@@ -215,7 +205,7 @@ impl PdfDoc {
             let flags = get(&item.obj, "F")
                 .and_then(|f| f.as_int().ok())
                 .unwrap_or(0);
-            let (page, at) = self.destination(&item.obj).unwrap_or((None, None));
+            let (page, at) = self.destination(&item.obj, pages).unwrap_or((None, None));
             out.push(OutlineNode {
                 id: item.id,
                 parent,
@@ -228,12 +218,12 @@ impl PdfDoc {
                 bold: flags & 2 != 0,
                 italic: flags & 1 != 0,
             });
-            self.flatten_items(&item.kids, Some(item.id), depth + 1, out);
+            self.flatten_items(&item.kids, Some(item.id), depth + 1, out, pages);
         }
     }
 
     /// Página e ponto (coordenadas do MuPDF) do destino do marcador: `/Dest` ou `/A` GoTo.
-    fn destination(&self, item: &PdfObject) -> Option<Target> {
+    fn destination(&self, item: &PdfObject, pages: &mut PageCache) -> Option<Target> {
         let dest = match get(item, "Dest") {
             Some(d) => d,
             None => {
@@ -243,26 +233,10 @@ impl PdfDoc {
                 get(&action, "D")?
             }
         };
-        let count = self.page_count().ok()?;
-        if dest.is_string().ok()? || dest.is_name().ok()? {
-            let name = if dest.is_string().ok()? {
-                dest.as_string().ok()?
-            } else {
-                name_of(&dest)?
-            };
-            let d = self
-                .inner
-                .resolve_link(&format!("#nameddest={name}"))
-                .ok()??;
-            let page = i32::try_from(d.loc.page_number).ok().filter(|p| *p < count);
+        let (page, array) = self.resolve_dest(&dest)?;
+        let (Some(page), Some(dest)) = (page, array) else {
             return Some((page, None));
-        }
-        (dest.is_array().ok()? && dest.len().ok()? >= 2).then_some(())?;
-        let page = self
-            .inner
-            .lookup_page_number(&dest.get_array(0).ok()??)
-            .ok()
-            .filter(|p| (0..count).contains(p))?;
+        };
         let kind = name_of(&dest.get_array(1).ok()??).unwrap_or_default();
         let arg = |i| num(dest.get_array(i).ok().flatten());
         let (x, y) = match kind.as_str() {
@@ -274,8 +248,16 @@ impl PdfDoc {
         if x.is_none() && y.is_none() {
             return Some((Some(page), None));
         }
-        let ctm = self.inner.load_pdf_page(page).ok()?.ctm().ok()?;
-        let page_h = self.page_size(page).map(|s| s.height).unwrap_or(0.0);
+        // cada página é carregada uma vez, mesmo com muitos marcadores apontando para ela
+        let (ctm, page_h) = match pages.get(&page) {
+            Some(known) => known.clone(),
+            None => {
+                let pdf_page = self.inner.load_pdf_page(page).ok()?;
+                let ctm = pdf_page.ctm().ok()?;
+                let page_h = pdf_page.bounds().map(|b| b.y1 - b.y0).unwrap_or(0.0);
+                pages.entry(page).or_insert((ctm, page_h)).clone()
+            }
+        };
         let p = mupdf::Point::new(x.unwrap_or(0.0), y.unwrap_or(page_h)).transform(&ctm);
         Some((Some(page), Some((p.x, p.y))))
     }
@@ -286,8 +268,7 @@ impl PdfDoc {
         self.require_modifiable("alterar os marcadores")?;
         if let OutlineOp::SetOpen { id, open } = op {
             let (root, mut items) = self.read_outline()?;
-            let item =
-                find_mut(&mut items, id).ok_or_else(|| refused("marcador não encontrado"))?;
+            let item = find_mut(&mut items, id).ok_or_else(not_found)?;
             item.open = open;
             self.write_outline(root, &items)?;
             return Ok(None);

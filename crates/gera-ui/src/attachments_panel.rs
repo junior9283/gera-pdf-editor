@@ -19,26 +19,16 @@ pub fn save_name(name: &str) -> String {
     pdf_core::safe_file_name(last)
 }
 
-/// Prefixo das cópias de anexos abertos na pasta privada ("gera-anexo-<pid>-<n>-<nome>").
-pub const SPOOL_PREFIX: &str = "gera-anexo-";
-
 /// Nome original do anexo a partir da cópia na pasta privada (None se não for uma cópia).
 pub fn spool_name(path: &std::path::Path) -> Option<String> {
-    let file = path.file_name()?.to_str()?.strip_prefix(SPOOL_PREFIX)?;
+    let file = path
+        .file_name()?
+        .to_str()?
+        .strip_prefix(crate::print_job::ATTACHMENT_PREFIX)?;
     let mut parts = file.splitn(3, '-');
     parts.next()?.parse::<u32>().ok()?;
     parts.next()?.parse::<u32>().ok()?;
     parts.next().filter(|n| !n.is_empty()).map(String::from)
-}
-
-/// Tamanho legível ("900 bytes", "1,5 KB", "2,3 MB").
-pub fn size_text(bytes: usize) -> String {
-    let b = bytes as f64;
-    match bytes {
-        0..=1023 => format!("{bytes} bytes"),
-        1024..=1_048_575 => format!("{:.1} KB", b / 1024.0).replace('.', ","),
-        _ => format!("{:.1} MB", b / 1_048_576.0).replace('.', ","),
-    }
 }
 
 /// O que o painel pede à aba.
@@ -74,18 +64,14 @@ impl AttachmentsPanel {
     ) -> Vec<AttachmentAction> {
         let mut out = Vec::new();
         let sel = self.selected.and_then(|k| list.get(k));
+        let non_pdf = sel.is_some_and(|a| !opens_in_app(&a.name));
         ui.horizontal_wrapped(|ui| {
-            let open_label = match sel {
-                Some(a) if !opens_in_app(&a.name) => None,
-                _ => Some("Abrir"),
-            };
-            if let Some(label) = open_label {
-                if ui
-                    .add_enabled(sel.is_some(), egui::Button::new(label))
+            if !non_pdf
+                && ui
+                    .add_enabled(sel.is_some(), egui::Button::new("Abrir"))
                     .clicked()
-                {
-                    out.extend(sel.cloned().map(AttachmentAction::Open));
-                }
+            {
+                out.extend(sel.cloned().map(AttachmentAction::Open));
             }
             if ui
                 .add_enabled(sel.is_some(), egui::Button::new("Salvar…"))
@@ -108,7 +94,7 @@ impl AttachmentsPanel {
                 self.selected = None;
             }
         });
-        if sel.is_some_and(|a| !opens_in_app(&a.name)) {
+        if non_pdf {
             ui.weak("Por segurança, só anexos PDF abrem aqui; salve o arquivo para abri-lo.");
         }
         ui.separator();
@@ -124,7 +110,11 @@ impl AttachmentsPanel {
                         AttachmentOrigin::Document => String::new(),
                         AttachmentOrigin::Comment { page, .. } => format!(" · p. {}", page + 1),
                     };
-                    let text = format!("📎 {}  ({}{place})", a.name, size_text(a.size));
+                    let text = format!(
+                        "📎 {}  ({}{place})",
+                        a.name,
+                        crate::shell::properties::size_text(a.size as u64)
+                    );
                     let row = ui.add(egui::Button::selectable(self.selected == Some(k), text));
                     if row.clicked() {
                         self.selected = Some(k);
@@ -203,12 +193,5 @@ mod tests {
         let p = std::path::Path::new("/run/x/gera-anexo-123-4-meu-relatorio.pdf");
         assert_eq!(spool_name(p).as_deref(), Some("meu-relatorio.pdf"));
         assert_eq!(spool_name(std::path::Path::new("/home/a/outro.pdf")), None);
-    }
-
-    #[test]
-    fn sizes() {
-        assert_eq!(size_text(900), "900 bytes");
-        assert_eq!(size_text(1536), "1,5 KB");
-        assert_eq!(size_text(3 * 1_048_576), "3,0 MB");
     }
 }

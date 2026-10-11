@@ -11,7 +11,7 @@ fn decimal(v: f64, places: usize) -> String {
 }
 
 /// Tamanho de arquivo legível: "900 bytes", "1,5 KB", "1,11 MB".
-fn size_text(bytes: u64) -> String {
+pub(crate) fn size_text(bytes: u64) -> String {
     let b = bytes as f64;
     match bytes {
         0..=1023 => format!("{bytes} bytes"),
@@ -40,19 +40,6 @@ fn or_dash(s: &str) -> &str {
         s
     }
 }
-
-/// Nomes do `/Info` que a aba Personalizado não aceita (são as propriedades padrão).
-const STANDARD_NAMES: [&str; 9] = [
-    "Title",
-    "Author",
-    "Subject",
-    "Keywords",
-    "Creator",
-    "Producer",
-    "CreationDate",
-    "ModDate",
-    "Trapped",
-];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Tab {
@@ -118,13 +105,7 @@ impl PropertiesDialog {
     /// Acrescenta (ou troca o valor de) a propriedade da linha nova; recusa nome vazio ou padrão.
     pub fn add_custom(&mut self) -> bool {
         let name = self.new_custom.0.trim().to_owned();
-        let ok = !name.is_empty()
-            && name.len() <= 127
-            && !STANDARD_NAMES.contains(&name.as_str())
-            && !name
-                .chars()
-                .any(|c| c.is_whitespace() || "/()<>[]{}%#".contains(c));
-        if !ok {
+        if !pdf_core::valid_custom_name(&name) {
             return false;
         }
         let value = std::mem::take(&mut self.new_custom.1);

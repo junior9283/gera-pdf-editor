@@ -352,7 +352,8 @@ impl GeraApp {
                     DocEvent::OpenFile(path) => to_open.push(path),
                     DocEvent::NeedSaveAs => {
                         let doc = self.docs[i].path.clone();
-                        self.dialogs.save_as(ctx, doc, self.docs[i].save_suggestion())
+                        self.dialogs
+                            .save_as(ctx, doc, self.docs[i].save_suggestion())
                     }
                     DocEvent::FullScreen if tab == active && !self.fullscreen => {
                         full_screen = Some(tab)
@@ -380,7 +381,8 @@ impl GeraApp {
         // anexo aberto: a cópia na pasta privada não é um lugar para salvar (Salvar pergunta onde)
         for path in attachments {
             self.open_path(ctx, path.clone());
-            if let Some(doc) = self.docs.iter_mut().find(|d| d.path == canonical(&path)) {
+            let id = canonical(&path);
+            if let Some(doc) = self.docs.iter_mut().find(|d| d.path == id) {
                 doc.attachment_name = crate::attachments_panel::spool_name(&path);
             }
         }
