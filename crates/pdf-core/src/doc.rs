@@ -519,6 +519,29 @@ fn add_one(doc: &mut PdfDocument, page: &mut PdfPage, a: &NewAnnot) -> Result<Pd
             let img = stamp::image(title, subtitle.as_deref(), *color, page.rotation()?)?;
             add_stamp(doc, page, *rect, title, &img)?
         }
+        NewAnnot::Polygon {
+            vertices,
+            closed,
+            cloud,
+            ..
+        } => {
+            let points = vertices
+                .iter()
+                .filter(|(x, y)| x.is_finite() && y.is_finite())
+                .take(annot_edit::MAX_VERTICES)
+                .map(|&(x, y)| Point::new(x, y));
+            let mut a = outlined(if *closed || *cloud {
+                page.add_polygon_annotation(points)?
+            } else {
+                page.add_polyline_annotation(points)?
+            })?;
+            if *cloud {
+                // nuvem do Acrobat: polígono com borda de nuvem (/BE /S /C), intensidade 2
+                a.set_border_effect(mupdf::pdf::AnnotationBorderEffect::Cloudy)?;
+                a.set_border_effect_intensity(2.0)?;
+            }
+            a
+        }
     })
 }
 
@@ -663,6 +686,8 @@ fn kind_of(t: PdfAnnotationType) -> AnnotKind {
         PdfAnnotationType::Line => AnnotKind::Line,
         PdfAnnotationType::Stamp => AnnotKind::Stamp,
         PdfAnnotationType::Redact => AnnotKind::Redact,
+        PdfAnnotationType::Polygon => AnnotKind::Polygon,
+        PdfAnnotationType::PolyLine => AnnotKind::PolyLine,
         _ => AnnotKind::Other,
     }
 }
@@ -687,7 +712,11 @@ pub(crate) fn annot_id(annot: &PdfAnnotation) -> Result<i32> {
 }
 
 pub(crate) fn annot_info(annot: &PdfAnnotation, page: i32) -> Result<AnnotInfo> {
-    let kind = kind_of(annot.r#type()?);
+    let kind = match kind_of(annot.r#type()?) {
+        // a nuvem é um polígono com borda de nuvem (/BE /S /C)
+        AnnotKind::Polygon if annot_edit::is_cloudy(annot)? => AnnotKind::Cloud,
+        k => k,
+    };
     let font = (kind == AnnotKind::TextBox)
         .then(|| annot.default_appearance())
         .transpose()?
@@ -715,6 +744,7 @@ pub(crate) fn annot_info(annot: &PdfAnnotation, page: i32) -> Result<AnnotInfo> 
             k if k.has_fill() => annot.interior_color()?.map(rgb_of),
             _ => None,
         },
+        vertices: annot_edit::vertices(annot)?,
         line: (kind == AnnotKind::Line)
             .then(|| annot.line())
             .transpose()?
@@ -961,6 +991,13 @@ impl PdfDoc {
 
     /// A mudança que leva a anotação `(page, id)` por (`dx`, `dy`).
     fn move_edit(&self, page: i32, id: i32, dx: f32, dy: f32) -> Result<Edit> {
+        if let Some(points) = annot_edit::vertices_of(&self.inner, page, id)? {
+            return Ok(Edit::Vertices {
+                page,
+                id,
+                points: points.into_iter().map(|(x, y)| (x + dx, y + dy)).collect(),
+            });
+        }
         Ok(match annot_edit::line_of(&self.inner, page, id)? {
             Some((a, b)) => {
                 let shift = |p: (f32, f32)| (p.0 + dx, p.1 + dy);
@@ -1119,6 +1156,31 @@ impl PdfDoc {
                     id,
                     fit,
                 )
+            }
+            AnnotOp::Resize { page, id, rect }
+                if annot_edit::vertices_of(&self.inner, page, id)?.is_some() =>
+            {
+                // os vértices acompanham a caixa (como os traços do desenho)
+                let (old, _) = annot_edit::geometry_of(&self.inner, page, id)?;
+                let points = annot_edit::vertices_of(&self.inner, page, id)?.unwrap_or_default();
+                let points = annot_edit::scaled(old, rect, Some(vec![points]))
+                    .and_then(|mut s| s.pop())
+                    .unwrap_or_default();
+                Edit::Vertices { page, id, points }
+            }
+            AnnotOp::MoveVertex {
+                page,
+                id,
+                index,
+                to,
+            } => {
+                let mut points = annot_edit::vertices_of(&self.inner, page, id)?
+                    .ok_or_else(|| PdfError::InvalidAnnotation("não tem vértices".into()))?;
+                let slot = points
+                    .get_mut(index)
+                    .ok_or_else(|| PdfError::InvalidAnnotation("vértice inexistente".into()))?;
+                *slot = to;
+                Edit::Vertices { page, id, points }
             }
             AnnotOp::Resize { page, id, rect } => {
                 let (old, ink) = annot_edit::geometry_of(&self.inner, page, id)?;

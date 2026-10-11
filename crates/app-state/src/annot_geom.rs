@@ -127,8 +127,30 @@ pub fn line_handle_at(a: (f32, f32), b: (f32, f32), p: (f32, f32), size: f32) ->
     }
 }
 
+/// Clicar perto do primeiro ponto fecha o polígono (a partir de 3 pontos), como no Acrobat.
+pub fn close_polygon(points: &[(f32, f32)], click: (f32, f32), tolerance: f32) -> bool {
+    match points.first() {
+        Some(&(x, y)) if points.len() >= 3 => (click.0 - x).hypot(click.1 - y) <= tolerance,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_click_near_the_first_point_closes_the_polygon() {
+        let pts = [(0.0, 0.0), (100.0, 0.0), (50.0, 80.0)];
+        assert!(
+            close_polygon(&pts, (3.0, 4.0), 6.0),
+            "a 5 px do primeiro ponto"
+        );
+        assert!(!close_polygon(&pts, (10.0, 0.0), 6.0), "longe");
+        assert!(
+            !close_polygon(&pts[..2], (1.0, 1.0), 6.0),
+            "com menos de 3 pontos não fecha"
+        );
+    }
     use super::*;
 
     #[test]

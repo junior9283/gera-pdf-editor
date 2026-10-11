@@ -105,6 +105,12 @@ pub enum AnnotKind {
     Stamp,
     /// Marca de redação (a aplicar).
     Redact,
+    /// Polígono (cliques nos vértices).
+    Polygon,
+    /// Linhas conectadas (polilinha).
+    PolyLine,
+    /// Nuvem (polígono com borda de nuvem).
+    Cloud,
     /// Tipo que não criamos (de outro programa): selecionável e apagável.
     #[default]
     Other,
@@ -146,13 +152,23 @@ impl AnnotKind {
     pub fn has_border(self) -> bool {
         matches!(
             self,
-            Self::Ink | Self::TextBox | Self::Rect | Self::Ellipse | Self::Line
+            Self::Ink
+                | Self::TextBox
+                | Self::Rect
+                | Self::Ellipse
+                | Self::Line
+                | Self::Polygon
+                | Self::PolyLine
+                | Self::Cloud
         )
     }
 
     /// Tem preenchimento (formas) ou fundo (caixa de texto).
     pub fn has_fill(self) -> bool {
-        matches!(self, Self::Rect | Self::Ellipse | Self::TextBox)
+        matches!(
+            self,
+            Self::Rect | Self::Ellipse | Self::TextBox | Self::Polygon | Self::Cloud
+        )
     }
 }
 
@@ -172,6 +188,8 @@ pub struct AnnotInfo {
     pub fill: Option<[f32; 3]>,
     /// Pontos de início e fim (linha e seta).
     pub line: Option<Segment>,
+    /// Vértices (polígono, linhas conectadas e nuvem).
+    pub vertices: Vec<(f32, f32)>,
     /// Linha com ponta de seta.
     pub arrow: bool,
     /// Tamanho e cor do texto (caixa de texto).
@@ -294,6 +312,13 @@ pub enum NewAnnot {
         subtitle: Option<String>,
         color: [f32; 3],
     },
+    /// Polígono (`closed`), linhas conectadas (aberto) ou nuvem (`cloud`, sempre fechada).
+    Polygon {
+        page: i32,
+        vertices: Vec<(f32, f32)>,
+        closed: bool,
+        cloud: bool,
+    },
 }
 
 /// Marcas do Preencher e assinar (como no Acrobat).
@@ -354,7 +379,8 @@ impl NewAnnot {
             | Self::FillText { page, .. }
             | Self::Mark { page, .. }
             | Self::Redact { page, .. }
-            | Self::Stamp { page, .. } => *page,
+            | Self::Stamp { page, .. }
+            | Self::Polygon { page, .. } => *page,
         }
     }
 
@@ -374,6 +400,13 @@ impl NewAnnot {
                 rect.width() < 3.0 || rect.height() < 3.0
             }
             Self::Line { a, b, .. } => (b.0 - a.0).hypot(b.1 - a.1) < 3.0,
+            // polígono e nuvem pedem 3 vértices; linhas conectadas, 2
+            Self::Polygon {
+                vertices,
+                closed,
+                cloud,
+                ..
+            } => vertices.len() < if *closed || *cloud { 3 } else { 2 },
         }
     }
 }
@@ -653,6 +686,13 @@ pub enum AnnotOp {
         parent: i32,
         model: StateModel,
         state: String,
+    },
+    /// Leva o vértice `index` (polígono, linhas conectadas, nuvem) para `to`.
+    MoveVertex {
+        page: i32,
+        id: i32,
+        index: usize,
+        to: (f32, f32),
     },
     /// Leva uma ponta da linha/seta para `to`.
     MoveLinePoint {

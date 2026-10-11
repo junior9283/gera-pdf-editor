@@ -59,6 +59,12 @@ pub(crate) enum Edit {
         a: (f32, f32),
         b: (f32, f32),
     },
+    /// Vértices do polígono, das linhas conectadas e da nuvem (mover, puxar um vértice).
+    Vertices {
+        page: i32,
+        id: i32,
+        points: Vec<(f32, f32)>,
+    },
     /// Preenchimento das formas (/IC) ou fundo da caixa de texto (/C).
     Fill {
         page: i32,
@@ -84,6 +90,7 @@ impl Edit {
             | Self::Style { page, .. }
             | Self::Contents { page, .. }
             | Self::LinePoints { page, .. }
+            | Self::Vertices { page, .. }
             | Self::Fill { page, .. }
             | Self::Font { page, .. } => *page,
             Self::Batch(edits) => edits.first().map_or(0, Edit::page),
@@ -273,6 +280,46 @@ pub(crate) fn line_of(doc: &PdfDocument, page: i32, id: i32) -> Result<Option<Se
     Ok(Some(((p.x, p.y), (q.x, q.y))))
 }
 
+/// Teto de vértices lidos (polígono de outro programa com milhares de pontos).
+pub(crate) const MAX_VERTICES: usize = 1000;
+
+/// Vértices da anotação (vazio se não tiver), com teto e sem coordenadas não finitas.
+pub(crate) fn vertices(a: &PdfAnnotation) -> Result<Vec<(f32, f32)>> {
+    if !matches!(
+        a.r#type()?,
+        PdfAnnotationType::Polygon | PdfAnnotationType::PolyLine
+    ) {
+        return Ok(Vec::new());
+    }
+    Ok(a.vertices()?
+        .into_iter()
+        .filter(|p| p.x.is_finite() && p.y.is_finite())
+        .take(MAX_VERTICES)
+        .map(|p| (p.x, p.y))
+        .collect())
+}
+
+/// Borda de nuvem (/BE /S /C): a nuvem do Acrobat.
+pub(crate) fn is_cloudy(a: &PdfAnnotation) -> Result<bool> {
+    Ok(match a.object().get_dict("BE")? {
+        Some(be) => be
+            .get_dict("S")?
+            .is_some_and(|s| s.as_name().is_ok_and(|n| n == b"C")),
+        None => false,
+    })
+}
+
+/// Vértices da anotação `id` (`None` se ela não tem vértices).
+pub(crate) fn vertices_of(
+    doc: &PdfDocument,
+    page: i32,
+    id: i32,
+) -> Result<Option<Vec<(f32, f32)>>> {
+    let (_, a) = find(doc, page, id)?;
+    let v = vertices(&a)?;
+    Ok((!v.is_empty()).then_some(v))
+}
+
 /// Geometria atual da anotação `id`.
 pub(crate) fn geometry_of(
     doc: &PdfDocument,
@@ -312,6 +359,7 @@ pub(crate) fn apply_edit(
         | Edit::Style { page, id, .. }
         | Edit::Contents { page, id, .. }
         | Edit::LinePoints { page, id, .. }
+        | Edit::Vertices { page, id, .. }
         | Edit::Fill { page, id, .. }
         | Edit::Font { page, id, .. } => (*page, *id),
     };
@@ -374,6 +422,15 @@ pub(crate) fn apply_edit(
                 color: old_color,
                 opacity: old_opacity,
                 width: old_width,
+            }
+        }
+        Edit::Vertices { points, .. } => {
+            let old = vertices(&a)?;
+            a.set_vertices(points.iter().map(|&(x, y)| Point::new(x, y)))?;
+            Edit::Vertices {
+                page,
+                id,
+                points: old,
             }
         }
         Edit::LinePoints { a: p, b: q, .. } => {
