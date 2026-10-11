@@ -4,6 +4,7 @@ use crate::edit::{screen_rect, EditState};
 use crate::print_job::{self, PrintJobs};
 use crate::search::SearchState;
 use crate::shell::print_dialog::{PrintChoice, PrintDialog};
+use crate::shell::commands::{self, Command};
 use crate::sidebar::{self, SidebarAction};
 use crate::view::DocView;
 use app_state::layout::ViewMode;
@@ -53,6 +54,16 @@ pub enum DocCommand {
     /// Resultado do Comparar arquivos: próxima / anterior alteração.
     NextChange,
     PrevChange,
+    /// Exibir → Navegação de páginas.
+    FirstPage,
+    PrevPage,
+    NextPage,
+    LastPage,
+    /// Leva o foco ao campo da página.
+    GoToPage,
+    /// Histórico de vistas (Alt+← / Alt+→).
+    ViewBack,
+    ViewForward,
 }
 
 /// O que aconteceu com o documento e interessa à casca (abas e recentes).
@@ -98,6 +109,10 @@ pub struct DocTab {
     /// Último quadro do canvas (rolagem e página atual).
     pub(crate) last: CanvasFrame,
     pub(crate) jump_to: Option<f32>,
+    /// Vista anterior e seguinte (Alt+← / Alt+→).
+    history_views: app_state::view_history::ViewHistory,
+    /// Ir para página: o campo da página pede o foco no próximo quadro.
+    focus_page: bool,
     pub(crate) search: SearchState,
     pub(crate) edit: EditState,
     /// Anotações visíveis do documento em memória (o worker manda a lista a cada mudança).
@@ -224,6 +239,8 @@ impl DocTab {
             status: String::new(),
             last: CanvasFrame::default(),
             jump_to: None,
+            history_views: Default::default(),
+            focus_page: false,
             search: SearchState::default(),
             edit: EditState::default(),
             annots: Vec::new(),
@@ -315,6 +332,9 @@ impl DocTab {
             }
             return;
         }
+        if self.navigate(cmd) {
+            return;
+        }
         let page = self.last.current_page;
         let Some(view) = self.view.as_mut() else {
             return;
@@ -368,7 +388,15 @@ impl DocTab {
                 self.zoom_to(z);
             }
             DocCommand::Fit(fit) => view.fit = fit,
-            DocCommand::NextChange | DocCommand::PrevChange => {} // já tratados no começo
+            DocCommand::NextChange
+            | DocCommand::PrevChange
+            | DocCommand::FirstPage
+            | DocCommand::PrevPage
+            | DocCommand::NextPage
+            | DocCommand::LastPage
+            | DocCommand::GoToPage
+            | DocCommand::ViewBack
+            | DocCommand::ViewForward => {} // já tratados no começo
             DocCommand::Mode(mode) => {
                 view.set_mode(mode, page);
                 self.jump_to = view.go_to(page as i32, None);
@@ -387,6 +415,59 @@ impl DocTab {
                 view.set_rotation(r);
                 self.jump_to = view.go_to(page as i32, None);
             }
+        }
+    }
+
+    /// Navegação de páginas e histórico de vistas; `false` se `cmd` não é de navegação.
+    fn navigate(&mut self, cmd: DocCommand) -> bool {
+        let page = self.last.current_page;
+        let Some(view) = self.view.as_ref() else {
+            return matches!(cmd, DocCommand::GoToPage);
+        };
+        let last = view.layout.page_count().saturating_sub(1);
+        match cmd {
+            DocCommand::PrevPage | DocCommand::NextPage => {
+                let step = if cmd == DocCommand::NextPage { 1 } else { -1 };
+                if let Some(target) = view.page_step(page, step) {
+                    self.scroll_to_page(target);
+                }
+            }
+            DocCommand::FirstPage => self.jump(0, None),
+            DocCommand::LastPage => self.jump(last as i32, None),
+            DocCommand::GoToPage => self.focus_page = true,
+            DocCommand::ViewBack | DocCommand::ViewForward => {
+                let current = view.view_entry(self.last.scroll_y, page);
+                let to = if cmd == DocCommand::ViewBack {
+                    self.history_views.back(current)
+                } else {
+                    self.history_views.forward(current)
+                };
+                if let Some(y) = to.and_then(|e| self.view.as_mut()?.restore(&e)) {
+                    self.jump_to = Some(y);
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Mostra a página `page` sem guardar no histórico (página anterior/próxima).
+    fn scroll_to_page(&mut self, page: usize) {
+        if let Some(y) = self.view.as_mut().and_then(|v| v.go_to(page as i32, None)) {
+            self.jump_to = Some(y);
+        }
+    }
+
+    /// Salto (link, marcador, miniatura, busca, comentário, Ir para página…): guarda a vista atual
+    /// para a Vista anterior e vai à página `page`, no ponto `at` dela.
+    pub(crate) fn jump(&mut self, page: i32, at: Option<(f32, f32)>) {
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        let current = view.view_entry(self.last.scroll_y, self.last.current_page);
+        if let Some(y) = view.go_to(page, at) {
+            self.history_views.push(current);
+            self.jump_to = Some(y);
         }
     }
 
@@ -556,9 +637,7 @@ impl DocTab {
             (changes[k].rect.x0, changes[k].rect.y0),
         );
         self.edit.selected = Some((page, id));
-        if let Some(y) = self.view.as_mut().and_then(|v| v.go_to(page, Some(at))) {
-            self.jump_to = Some(y);
-        }
+        self.jump(page, Some(at));
     }
 
     /// O documento mudou de páginas: recarrega tudo, ficando perto da página em que estava.
@@ -920,40 +999,41 @@ impl DocTab {
                 nav.into_iter()
                     .find(|&(_, k)| i.consume_key(egui::Modifiers::NONE, k))
             });
-            if let (Some((key, _)), Some(view)) = (pressed, self.view.as_mut()) {
-                if view.mode.is_paged() {
-                    match key {
-                        NavKey::PageUp => {
-                            view.turn(-1);
+            match pressed.map(|(key, _)| key) {
+                // Home/End são saltos: entram no histórico, como no Acrobat
+                Some(NavKey::Home) => self.run(ctx, DocCommand::FirstPage),
+                Some(NavKey::End) => self.run(ctx, DocCommand::LastPage),
+                Some(key) => {
+                    if let Some(view) = self.view.as_mut() {
+                        if view.mode.is_paged() {
+                            if view.turn(if key == NavKey::PageUp { -1 } else { 1 }) {
+                                self.jump_to = Some(0.0);
+                            }
+                        } else {
+                            let (scroll, height) = (self.last.scroll_y, self.last.viewport_h);
+                            self.jump_to =
+                                Some(nav_target(key, scroll, height, view.layout.total_height()));
                         }
-                        NavKey::PageDown => {
-                            view.turn(1);
-                        }
-                        NavKey::Home => view.turn_to(0),
-                        NavKey::End => view.turn_to(usize::MAX),
                     }
-                    self.jump_to = Some(0.0);
-                } else {
-                    let (scroll, height) = (self.last.scroll_y, self.last.viewport_h);
-                    self.jump_to =
-                        Some(nav_target(key, scroll, height, view.layout.total_height()));
                 }
+                None => {}
             }
-            // setas e espaço viram a página nos modos página a página
-            if let Some(view) = self.view.as_mut().filter(|v| v.mode.is_paged()) {
-                let step = ctx.input_mut(|i| {
-                    [
-                        (egui::Key::ArrowRight, 1),
-                        (egui::Key::Space, 1),
-                        (egui::Key::ArrowLeft, -1),
-                    ]
-                    .into_iter()
-                    .find(|&(k, _)| i.consume_key(egui::Modifiers::NONE, k))
-                    .map(|(_, s)| s)
-                });
-                if step.is_some_and(|s| view.turn(s)) {
-                    self.jump_to = Some(0.0);
-                }
+            // ←/→ mudam de página em qualquer modo; o espaço, só nos modos página a página. Com a
+            // janela de assinatura ou de propriedades do campo aberta, as setas são dela.
+            let paged = self.view.as_ref().is_some_and(|v| v.mode.is_paged());
+            let arrows = self.edit.fill.dialog.is_none() && self.prepare.props.is_none();
+            let step = ctx.input_mut(|i| {
+                [
+                    (egui::Key::ArrowRight, arrows, DocCommand::NextPage),
+                    (egui::Key::Space, paged, DocCommand::NextPage),
+                    (egui::Key::ArrowLeft, arrows, DocCommand::PrevPage),
+                ]
+                .into_iter()
+                .find(|&(k, on, _)| on && i.consume_key(egui::Modifiers::NONE, k))
+                .map(|(_, _, c)| c)
+            });
+            if let Some(cmd) = step {
+                self.run(ctx, cmd);
             }
         }
         let zoom_delta = ctx.input(|i| i.zoom_delta()); // Ctrl+roda e gesto de pinça
@@ -1632,13 +1712,7 @@ impl DocTab {
                     self.worker.send(Request::Signatures)
                 }
                 Some(crate::certificates::PanelAction::GoTo(page, r)) => {
-                    if let Some(y) = self
-                        .view
-                        .as_mut()
-                        .and_then(|v| v.go_to(page, Some((r.x0, r.y0))))
-                    {
-                        self.jump_to = Some(y);
-                    }
+                    self.jump(page, Some((r.x0, r.y0)));
                 }
                 None => {}
             }
@@ -1661,29 +1735,35 @@ impl DocTab {
                 (page, Some(at))
             }
         };
-        if let Some(y) = view.go_to(target.0, target.1) {
-            self.jump_to = Some(y);
-        }
+        self.jump(target.0, target.1);
     }
 
     /// ◀ campo da página / total ▶
     pub fn page_controls(&mut self, ui: &mut egui::Ui) {
-        let Some(view) = self.view.as_mut() else {
+        let Some(view) = self.view.as_ref() else {
             return;
         };
         let count = view.layout.page_count().max(1);
         let mut page = self.last.current_page + 1;
-        let prev = ui.button("◀").on_hover_text("Página anterior").clicked();
-        let go = ui.add(egui::DragValue::new(&mut page).range(1..=count).speed(0.2));
+        let prev = ui
+            .button("◀")
+            .on_hover_text(commands::hover(&Command::Doc(DocCommand::PrevPage)))
+            .clicked();
+        let go = ui
+            .add(egui::DragValue::new(&mut page).range(1..=count).speed(0.2))
+            .on_hover_text(commands::hover(&Command::Doc(DocCommand::GoToPage)));
+        if std::mem::take(&mut self.focus_page) {
+            go.request_focus(); // Ir para página: digita o número e Enter
+        }
         ui.label(format!("/ {count}"));
-        let next = ui.button("▶").on_hover_text("Próxima página").clicked();
-        let target = match (prev, next) {
-            (true, _) => Some(page.saturating_sub(1).max(1)),
-            (_, true) => Some((page + 1).min(count)),
-            _ => go.changed().then_some(page),
-        };
-        if let Some(y) = target.and_then(|p| view.go_to(p as i32 - 1, None)) {
-            self.jump_to = Some(y);
+        let next = ui
+            .button("▶")
+            .on_hover_text(commands::hover(&Command::Doc(DocCommand::NextPage)))
+            .clicked();
+        if prev || next {
+            self.navigate(if next { DocCommand::NextPage } else { DocCommand::PrevPage });
+        } else if go.changed() {
+            self.jump(page as i32 - 1, None);
         }
     }
 
@@ -1705,11 +1785,8 @@ impl DocTab {
         let prev = ui.button("⏶").clicked();
         let next = ui.button("⏷").clicked();
         if prev || next {
-            let target = self.search.step(next);
-            if let Some(y) = target
-                .and_then(|(page, rect)| self.view.as_mut()?.go_to(page, Some((rect.x0, rect.y0))))
-            {
-                self.jump_to = Some(y);
+            if let Some((page, rect)) = self.search.step(next) {
+                self.jump(page, Some((rect.x0, rect.y0)));
             }
         }
     }
@@ -1969,9 +2046,7 @@ impl DocTab {
             match action {
                 PanelAction::Select { page, id, at } => {
                     self.edit.selected = Some((page, id));
-                    if let Some(y) = self.view.as_mut().and_then(|v| v.go_to(page, Some(at))) {
-                        self.jump_to = Some(y);
-                    }
+                    self.jump(page, Some(at));
                 }
                 PanelAction::Op(op) => self.edit.push_op(op),
                 PanelAction::Properties { page, id } => {

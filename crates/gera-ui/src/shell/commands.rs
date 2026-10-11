@@ -28,6 +28,8 @@ pub enum Command {
     Identity,
     /// Ferramentas → Comparar arquivos.
     Compare,
+    /// Abre uma ferramenta do catálogo pelo menu (o mesmo que clicar nela em Ferramentas).
+    Tool(&'static str),
 }
 
 impl Command {
@@ -52,6 +54,9 @@ impl Command {
             Command::Print => "Imprimir…",
             Command::Identity => "Identidade…",
             Command::Compare => "Comparar arquivos…",
+            Command::Tool(id) => {
+                return app_state::tools_catalog::find(id).map_or(*id, |t| t.name).into()
+            }
             Command::Doc(d) => match d {
                 DocCommand::Save => "Salvar",
                 DocCommand::Undo => "Desfazer",
@@ -74,6 +79,13 @@ impl Command {
                 DocCommand::Rotate { clockwise: false } => "Girar no sentido anti-horário",
                 DocCommand::NextChange => "Próxima alteração",
                 DocCommand::PrevChange => "Alteração anterior",
+                DocCommand::FirstPage => "Primeira página",
+                DocCommand::PrevPage => "Página anterior",
+                DocCommand::NextPage => "Próxima página",
+                DocCommand::LastPage => "Última página",
+                DocCommand::GoToPage => "Ir para página…",
+                DocCommand::ViewBack => "Vista anterior",
+                DocCommand::ViewForward => "Vista seguinte",
             },
         };
         s.into()
@@ -85,9 +97,20 @@ impl Command {
 pub fn shortcuts() -> Vec<(KeyboardShortcut, Command)> {
     let cmd = |k| KeyboardShortcut::new(Modifiers::COMMAND, k);
     let cmd_shift = |k| KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, k);
+    let alt = |k| KeyboardShortcut::new(Modifiers::ALT, k);
     let doc = Command::Doc;
     vec![
         (cmd_shift(Key::S), Command::SaveAs),
+        // navegação de páginas: os do Acrobat
+        (cmd_shift(Key::N), doc(DocCommand::GoToPage)),
+        (cmd_shift(Key::PageUp), doc(DocCommand::FirstPage)),
+        (cmd_shift(Key::PageDown), doc(DocCommand::LastPage)),
+        (cmd_shift(Key::ArrowUp), doc(DocCommand::FirstPage)),
+        (cmd_shift(Key::ArrowDown), doc(DocCommand::LastPage)),
+        (cmd(Key::PageUp), doc(DocCommand::PrevPage)),
+        (cmd(Key::PageDown), doc(DocCommand::NextPage)),
+        (alt(Key::ArrowLeft), doc(DocCommand::ViewBack)),
+        (alt(Key::ArrowRight), doc(DocCommand::ViewForward)),
         (cmd_shift(Key::Z), doc(DocCommand::Redo)),
         // girar vista: os mesmos do Acrobat; antes do zoom, que usa as mesmas teclas sem Shift
         (
@@ -262,6 +285,28 @@ mod tests {
             assert!(shortcut_of(&cmd).is_some(), "{cmd:?}");
             assert!(!cmd.label().is_empty());
         }
+    }
+
+    #[test]
+    fn navigation_shortcuts_match_acrobat() {
+        let text = |c| shortcut_text(&shortcut_of(&Command::Doc(c)).unwrap());
+        assert_eq!(text(DocCommand::GoToPage), "Ctrl+Shift+N");
+        assert_eq!(text(DocCommand::ViewBack), "Alt+⏴");
+        assert_eq!(text(DocCommand::ViewForward), "Alt+⏵");
+        assert_eq!(text(DocCommand::PrevPage), "Ctrl+PageUp");
+        assert_eq!(text(DocCommand::NextPage), "Ctrl+PageDown");
+        assert_eq!(text(DocCommand::FirstPage), "Ctrl+Shift+PageUp");
+        assert_eq!(text(DocCommand::LastPage), "Ctrl+Shift+PageDown");
+        let all = shortcuts();
+        let has = |m, k, c: DocCommand| all.iter().any(|(s, x)| s.modifiers == m && s.logical_key == k && *x == Command::Doc(c));
+        let cs = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+        assert!(has(cs, Key::ArrowUp, DocCommand::FirstPage));
+        assert!(has(cs, Key::ArrowDown, DocCommand::LastPage));
+    }
+
+    #[test]
+    fn tool_commands_are_labelled_from_the_catalog() {
+        assert_eq!(Command::Tool(app_state::tools_catalog::EXPORT).label(), app_state::tools_catalog::find(app_state::tools_catalog::EXPORT).unwrap().name);
     }
 
     #[test]

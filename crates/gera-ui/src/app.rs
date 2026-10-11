@@ -403,6 +403,7 @@ impl GeraApp {
                 self.prefs.tools_panel = !self.prefs.tools_panel;
                 self.prefs_dirty = true;
             }
+            Command::Tool(id) => self.run_tool(ctx, id),
             Command::FullScreen => {
                 self.fullscreen = !self.fullscreen;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));

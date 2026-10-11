@@ -1,6 +1,7 @@
 use app_state::cache::{LruCache, Weighed};
 use app_state::layout::{Layout, ViewMode, PAGE_GAP};
 use app_state::transform::{self, PageMap};
+use app_state::view_history::ViewEntry;
 use app_state::zoom::{self, Fit};
 use pdf_core::{CancelToken, PageSize, RenderedPage, Request, Rotation, Worker};
 use std::collections::{HashMap, HashSet};
@@ -158,10 +159,6 @@ impl DocView {
         std::mem::replace(&mut self.spread, new) != new
     }
 
-    /// Modos página a página: vai para a linha `row` (limitada à última).
-    pub fn turn_to(&mut self, row: usize) {
-        self.spread = row.min(self.layout.last_row());
-    }
 
     /// Faixa vertical do layout mostrada na área de rolagem: `(topo, altura)`. Tudo, ou só a
     /// linha atual nos modos página a página.
@@ -241,6 +238,39 @@ impl DocView {
         }
         let inside = at.map_or(0.0, |p| self.page_map(i, (0.0, 0.0)).to_screen(p).1);
         Some((self.layout.page_top(i) - self.window().0 + inside - 80.0).max(0.0))
+    }
+
+    /// Primeira página da linha `step` linhas adiante (ou atrás) da que tem `page`; `None` se não
+    /// houver. Uma linha é uma página, ou um par nos modos de duas páginas.
+    pub fn page_step(&self, page: usize, step: i32) -> Option<usize> {
+        let row = self.layout.row_of(page.min(self.layout.page_count().checked_sub(1)?));
+        let target = row.checked_add_signed(step as isize)?;
+        (target != row && target <= self.layout.last_row())
+            .then(|| self.layout.row_pages(target).start)
+    }
+
+    /// A vista atual (`scroll_y` da área de rolagem, `page` em cima), para o histórico.
+    pub fn view_entry(&self, scroll_y: f32, page: usize) -> ViewEntry {
+        let top = self.layout.page_top(page.min(self.layout.page_count().saturating_sub(1)));
+        ViewEntry {
+            page,
+            y: (scroll_y + self.window().0 - top) / self.zoom,
+            zoom: self.zoom,
+            fit: self.fit,
+        }
+    }
+
+    /// Volta à vista `e` (zoom, ajuste e posição); devolve a rolagem. `None` se a página não existe
+    /// mais.
+    pub fn restore(&mut self, e: &ViewEntry) -> Option<f32> {
+        (e.page < self.layout.page_count()).then_some(())?;
+        self.fit = e.fit;
+        self.set_zoom(e.zoom);
+        if self.mode.is_paged() {
+            self.spread = self.layout.row_of(e.page);
+        }
+        let y = self.layout.page_top(e.page) - self.window().0 + e.y * self.zoom;
+        Some(y.max(0.0))
     }
 
     pub fn begin_frame(&mut self) {
@@ -440,6 +470,38 @@ mod tests {
     }
 
     #[test]
+    fn page_steps_move_one_row_in_every_mode() {
+        let mut v = view();
+        assert_eq!(v.page_step(0, 1), Some(1));
+        assert_eq!(v.page_step(2, 1), None, "já na última");
+        assert_eq!(v.page_step(0, -1), None);
+        v.set_mode(ViewMode::TwoUpContinuous, 0);
+        assert_eq!(v.page_step(0, 1), Some(2), "o par seguinte");
+        assert_eq!(v.page_step(3, -1), Some(0));
+    }
+
+    #[test]
+    fn a_saved_view_comes_back_to_the_same_place() {
+        let mut v = view();
+        v.set_manual_zoom(2.0);
+        let scroll = v.layout.page_top(1) + 30.0; // 15 pt abaixo do topo da página 1
+        let e = v.view_entry(scroll, 1);
+        assert_eq!((e.page, e.fit), (1, Fit::None));
+        assert!((e.y - 15.0).abs() < 1e-3 && (e.zoom - 2.0).abs() < 1e-6);
+        v.set_manual_zoom(1.0);
+        v.fit = Fit::Page;
+        let y = v.restore(&e).unwrap();
+        assert!((v.zoom - 2.0).abs() < 1e-6 && v.fit == Fit::None);
+        assert!((y - scroll).abs() < 1e-3, "{y} != {scroll}");
+        // modo página a página: troca a tela e conta a partir dela
+        v.set_mode(ViewMode::Single, 0);
+        let y = v.restore(&e).unwrap();
+        assert_eq!(v.spread, 1);
+        assert!((y - (PAGE_GAP + 30.0)).abs() < 1e-3, "{y}");
+        assert_eq!(v.restore(&ViewEntry { page: 9, ..e }), None);
+    }
+
+    #[test]
     fn paged_modes_turn_one_row_at_a_time() {
         let mut v = view();
         v.set_mode(ViewMode::Single, 1);
@@ -454,7 +516,7 @@ mod tests {
         );
         assert_eq!(v.go_to(0, None), Some(0.0));
         assert_eq!(v.spread, 0, "ir para uma página troca a tela");
-        v.turn_to(usize::MAX);
+        v.go_to(2, None);
         assert_eq!(v.spread, 2);
     }
 
