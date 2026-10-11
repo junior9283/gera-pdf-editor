@@ -149,3 +149,31 @@ O Preparar formulário ganha os campos **Botão** e **Data**, as abas **Formatar
   - ler um PDF feito no Acrobat com AFNumber_Format.
 - **E2E:** formulário com preço, quantidade e total; data pelo seletor; números da ordem;
   Destacar campos.
+
+## Decisões tomadas na execução
+
+6. A máscara do Especial não muda maiúsculas e minúsculas, como no Acrobat.
+7. Porcentagem grava o número digitado e mostra ×100 (0,15 → 15%), como no Acrobat.
+8. O bloco BVCALC só vale quando o código depois dele é a tradução que o Acrobat grava para a
+   expressão (números comparados pelo valor, nomes ao pé da letra). Senão o comentário poderia dizer
+   uma conta e o código fazer outra.
+9. Uma ação encadeada (/Next) ou de outro tipo não é confiável. Um script em stream é lido com teto.
+   O intervalo recusa texto que não é número.
+10. O recálculo não relê o documento a cada passada e tem teto de 2000 gravações. O que já mudou
+    entra no desfazer mesmo se um cálculo falhar no meio.
+11. O botão usa a aparência do MuPDF (/MK /CA, /BG e /BC). O Redefinir respeita /Fields e /Flags
+    da ação.
+12. `fields(page)` devolve os campos na ordem de tabulação. Ordem de tabulação e de cálculo ficam
+    no menu "Ordem" da barra.
+13. Destacar campos é o "Realçar campos" que já existia; `Shift+L` alterna (sem preferência
+    gravada).
+14. O tema escuro só escurece a interface: as páginas ficam sempre brancas (pedido do dono).
+15. Números:
+    - o valor cru em /V é lido direto;
+    - o digitado segue o estilo do campo, com milhar só em grupos de 3 ("1.234" no estilo 2 é 1234; "1,5" no estilo 0 é recusado);
+    - letras são recusadas;
+    - Calcular e Validar aceitam vírgula decimal (como o AFMakeNumber);
+    - ao editar, o rascunho mostra o cru com o decimal do estilo.
+16. A aparência formatada é refeita ao limpar, mover ou redimensionar e ao trocar o Formatar.
+17. No AFSimple_Calculate, um nome de grupo soma os campos de baixo. Na notação simplificada, um
+    grupo vale 0.
