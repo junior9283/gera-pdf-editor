@@ -5,6 +5,7 @@ mod bookmarks;
 mod canvas;
 mod certificates;
 mod clipboard;
+mod comment_tools;
 mod comments_panel;
 mod create;
 mod desktop;

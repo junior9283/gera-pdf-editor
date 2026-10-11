@@ -4,6 +4,10 @@ pub enum Tool {
     Select,
     Highlight,
     Underline,
+    StrikeOut,
+    /// Substituir texto (riscado + cursor com nota) e Inserir texto (cursor com nota).
+    ReplaceText,
+    InsertText,
     Note,
     Ink,
     TextBox,
@@ -11,8 +15,18 @@ pub enum Tool {
     Ellipse,
     Line,
     Arrow,
+    Polygon,
+    /// Linhas conectadas (polilinha).
+    PolyLine,
+    Cloud,
+    /// Borracha do lápis.
+    Eraser,
+    /// Texto explicativo.
+    Callout,
     /// O carimbo escolhido fica no estado de edição.
     Stamp,
+    /// Anexar arquivo como comentário.
+    Attach,
     /// Uma ferramenta do Preencher e assinar (qual, fica no estado de edição); fora de `ALL`,
     /// que é a linha Comentar.
     Fill,
@@ -33,18 +47,28 @@ impl Tool {
         Self::SCREEN.contains(&self)
     }
 
-    pub const ALL: [Tool; 11] = [
+    /// As ferramentas da linha Comentar.
+    pub const ALL: [Tool; 20] = [
         Tool::Select,
         Tool::Highlight,
         Tool::Underline,
+        Tool::StrikeOut,
+        Tool::ReplaceText,
+        Tool::InsertText,
         Tool::Note,
-        Tool::Ink,
         Tool::TextBox,
+        Tool::Callout,
         Tool::Rect,
         Tool::Ellipse,
-        Tool::Line,
         Tool::Arrow,
+        Tool::Line,
+        Tool::Cloud,
+        Tool::Polygon,
+        Tool::PolyLine,
+        Tool::Ink,
+        Tool::Eraser,
         Tool::Stamp,
+        Tool::Attach,
     ];
 
     pub fn label(self) -> &'static str {
@@ -52,6 +76,15 @@ impl Tool {
             Tool::Select => "Selecionar",
             Tool::Highlight => "Destacar",
             Tool::Underline => "Sublinhar",
+            Tool::StrikeOut => "Riscar",
+            Tool::ReplaceText => "Substituir texto",
+            Tool::InsertText => "Inserir texto",
+            Tool::Polygon => "Polígono",
+            Tool::PolyLine => "Linhas conectadas",
+            Tool::Cloud => "Nuvem",
+            Tool::Eraser => "Borracha",
+            Tool::Callout => "Texto explicativo",
+            Tool::Attach => "Anexar arquivo",
             Tool::Note => "Nota",
             Tool::Ink => "Desenhar",
             Tool::TextBox => "Caixa de texto",
@@ -66,6 +99,46 @@ impl Tool {
             Tool::Hand => "Mão",
             Tool::Zoom => "Zoom com marca",
         }
+    }
+}
+
+/// Grupos que uma tecla com Shift percorre (como no Acrobat).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolGroup {
+    /// `Shift+U`: Destacar, Sublinhar, Riscar.
+    Markup,
+    /// `Shift+D`: as ferramentas de desenho.
+    Drawing,
+    /// `Shift+J`: Carimbo e Anexar arquivo.
+    Stamp,
+}
+
+impl ToolGroup {
+    pub fn tools(self) -> &'static [Tool] {
+        match self {
+            ToolGroup::Markup => &[Tool::Highlight, Tool::Underline, Tool::StrikeOut],
+            ToolGroup::Drawing => &[
+                Tool::Rect,
+                Tool::Ellipse,
+                Tool::Arrow,
+                Tool::Line,
+                Tool::Cloud,
+                Tool::Polygon,
+                Tool::PolyLine,
+                Tool::Ink,
+                Tool::Eraser,
+            ],
+            ToolGroup::Stamp => &[Tool::Stamp, Tool::Attach],
+        }
+    }
+}
+
+/// A ferramenta seguinte do grupo (fora dele: a primeira).
+pub fn cycle(group: ToolGroup, current: Tool) -> Tool {
+    let tools = group.tools();
+    match tools.iter().position(|&t| t == current) {
+        Some(k) => tools[(k + 1) % tools.len()],
+        None => tools[0],
     }
 }
 
@@ -91,6 +164,38 @@ impl TempTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shift_u_cycles_highlight_underline_strikeout() {
+        use Tool::*;
+        let g = ToolGroup::Markup;
+        assert_eq!(cycle(g, Highlight), Underline);
+        assert_eq!(cycle(g, Underline), StrikeOut);
+        assert_eq!(cycle(g, StrikeOut), Highlight);
+        assert_eq!(cycle(g, Note), Highlight, "fora do grupo: a primeira");
+    }
+
+    #[test]
+    fn shift_d_cycles_the_drawing_tools_like_acrobat() {
+        use Tool::*;
+        let mut t = Rect;
+        let mut seen = vec![t];
+        for _ in 0..8 {
+            t = cycle(ToolGroup::Drawing, t);
+            seen.push(t);
+        }
+        assert_eq!(
+            seen,
+            [Rect, Ellipse, Arrow, Line, Cloud, Polygon, PolyLine, Ink, Eraser]
+        );
+        assert_eq!(cycle(ToolGroup::Drawing, Eraser), Rect);
+    }
+
+    #[test]
+    fn shift_j_alternates_stamp_and_attach() {
+        assert_eq!(cycle(ToolGroup::Stamp, Tool::Stamp), Tool::Attach);
+        assert_eq!(cycle(ToolGroup::Stamp, Tool::Attach), Tool::Stamp);
+    }
 
     #[test]
     fn space_hand_is_temporary() {

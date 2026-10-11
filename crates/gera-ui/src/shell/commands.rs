@@ -99,7 +99,15 @@ impl Command {
                 DocCommand::NewBookmark => "Novo marcador",
                 DocCommand::ZoomTo => "Zoom para…",
                 DocCommand::Tool(t) => return t.label().into(),
-                DocCommand::CycleMarkup => "Alternar destacar e sublinhar",
+                DocCommand::Cycle(app_state::tools::ToolGroup::Markup) => {
+                    "Alternar destacar, sublinhar e riscar"
+                }
+                DocCommand::Cycle(app_state::tools::ToolGroup::Drawing) => {
+                    "Alternar ferramentas de desenho"
+                }
+                DocCommand::Cycle(app_state::tools::ToolGroup::Stamp) => {
+                    "Alternar carimbo e anexar arquivo"
+                }
                 DocCommand::Cut => "Recortar",
                 DocCommand::FindNext => "Próximo resultado",
                 DocCommand::FindPrev => "Resultado anterior",
@@ -203,14 +211,22 @@ pub fn shortcuts() -> Vec<(KeyboardShortcut, Command)> {
 
 /// Aceleradores de tecla única do Acrobat (Preferências → Geral; desligados de fábrica).
 fn single_keys() -> Vec<(KeyboardShortcut, Command)> {
-    use app_state::tools::Tool;
+    use app_state::tools::{Tool, ToolGroup};
     let key = |k| KeyboardShortcut::new(Modifiers::NONE, k);
     let tool = |t| Command::Doc(DocCommand::Tool(t));
     vec![
-        // Shift+U antes do U (o egui aceita Shift a mais num atalho sem Shift)
+        // Shift+tecla antes da tecla sozinha (o egui aceita Shift a mais num atalho sem Shift)
         (
             KeyboardShortcut::new(Modifiers::SHIFT, Key::U),
-            Command::Doc(DocCommand::CycleMarkup),
+            Command::Doc(DocCommand::Cycle(ToolGroup::Markup)),
+        ),
+        (
+            KeyboardShortcut::new(Modifiers::SHIFT, Key::D),
+            Command::Doc(DocCommand::Cycle(ToolGroup::Drawing)),
+        ),
+        (
+            KeyboardShortcut::new(Modifiers::SHIFT, Key::J),
+            Command::Doc(DocCommand::Cycle(ToolGroup::Stamp)),
         ),
         (key(Key::V), tool(Tool::Select)),
         (key(Key::H), tool(Tool::Hand)),
@@ -220,6 +236,7 @@ fn single_keys() -> Vec<(KeyboardShortcut, Command)> {
         (key(Key::D), tool(Tool::Ink)),
         (key(Key::X), tool(Tool::TextBox)),
         (key(Key::K), tool(Tool::Stamp)),
+        (key(Key::Q), tool(Tool::Cloud)),
     ]
 }
 
@@ -441,9 +458,20 @@ mod tests {
         assert_eq!(plain(on, Key::D), tool(Tool::Ink));
         assert_eq!(plain(on, Key::X), tool(Tool::TextBox));
         assert_eq!(plain(on, Key::K), tool(Tool::Stamp));
-        assert!(on.iter().any(|(s, c)| s.modifiers == Modifiers::SHIFT
-            && s.logical_key == Key::U
-            && *c == Command::Doc(DocCommand::CycleMarkup)));
+        assert_eq!(plain(on, Key::Q), tool(Tool::Cloud), "Q: Nuvem");
+        use app_state::tools::ToolGroup;
+        for (k, group) in [
+            (Key::U, ToolGroup::Markup),
+            (Key::D, ToolGroup::Drawing),
+            (Key::J, ToolGroup::Stamp),
+        ] {
+            assert!(
+                on.iter().any(|(s, c)| s.modifiers == Modifiers::SHIFT
+                    && s.logical_key == k
+                    && *c == Command::Doc(DocCommand::Cycle(group))),
+                "Shift+{k:?}"
+            );
+        }
         let k = shortcut_of(&Command::Preferences).unwrap();
         assert_eq!(shortcut_text(&k), "Ctrl+K");
     }

@@ -125,6 +125,15 @@ impl AnnotDrag {
 enum NoteTarget {
     New((f32, f32)),
     Existing(i32),
+    /// Inserir texto: o cursor de inserção nesse retângulo.
+    Insert(PdfRect),
+    /// Substituir texto: o texto riscado (com o cursor no fim).
+    Replace(Vec<PdfRect>),
+    /// Texto explicativo: a caixa e a ponta da linha.
+    Callout {
+        rect: PdfRect,
+        tip: (f32, f32),
+    },
 }
 
 struct NoteDraft {
@@ -141,6 +150,8 @@ pub enum Markup {
     StrikeOut,
     /// Marca de redação sobre o texto (Redigir).
     Redact,
+    /// Substituir texto: o riscado vem com a nota do texto novo (pergunta antes de criar).
+    Replace,
 }
 
 impl Markup {
@@ -149,18 +160,22 @@ impl Markup {
         match tool {
             Tool::Highlight => Some(Self::Highlight),
             Tool::Underline => Some(Self::Underline),
+            Tool::StrikeOut => Some(Self::StrikeOut),
+            Tool::ReplaceText => Some(Self::Replace),
             Tool::RedactText => Some(Self::Redact),
             _ => None,
         }
     }
 
-    fn annot(self, page: i32, rects: Vec<PdfRect>) -> NewAnnot {
-        match self {
+    /// A anotação da marca (Substituir texto não: antes pergunta o texto novo).
+    fn annot(self, page: i32, rects: Vec<PdfRect>) -> Option<NewAnnot> {
+        Some(match self {
             Self::Highlight => NewAnnot::Highlight { page, rects },
             Self::Underline => NewAnnot::Underline { page, rects },
             Self::StrikeOut => NewAnnot::StrikeOut { page, rects },
             Self::Redact => NewAnnot::Redact { page, rects },
-        }
+            Self::Replace => return None,
+        })
     }
 }
 
@@ -200,6 +215,17 @@ pub struct EditState {
     pub can_annotate: bool,
     /// Carimbo dinâmico esperando a Identidade: (página, ponto).
     pub identity_for: Option<(i32, (f32, f32))>,
+    /// Polígono, linhas conectadas ou nuvem em construção.
+    poly: Option<crate::comment_tools::PolyBuilder>,
+    /// Texto explicativo: arrasto da caixa (página, início) e a caixa pronta esperando a ponta.
+    callout_drag: Option<(i32, (f32, f32))>,
+    callout_box: Option<(i32, PdfRect)>,
+    /// Borracha em andamento: (página, caminho).
+    eraser: Option<(i32, Vec<(f32, f32)>)>,
+    /// Anexar arquivo: a aba abre o seletor e cria o comentário em (página, ponto).
+    pub(crate) attach_at: Option<(i32, (f32, f32))>,
+    /// A janela de nota acabou de abrir: o campo recebe o foco (já dá para digitar).
+    note_focus: bool,
 }
 
 /// O que a caixa de texto em digitação vai virar.
@@ -235,6 +261,9 @@ pub(crate) fn press_point(
     let pressed = response.ctx.input(|i| i.pointer.press_origin());
     pressed.map(|p| map.to_page(p.into())).or(pointer)
 }
+
+/// Raio da borracha do lápis, em pixels da tela (como o círculo do Acrobat).
+const ERASER_RADIUS: f32 = 8.0;
 
 /// Folga do clique sobre uma anotação, em pixels da tela.
 const HIT_TOL: f32 = 3.0;
@@ -292,6 +321,13 @@ fn paint_stroke(painter: &egui::Painter, points: &[(f32, f32)], map: &PageMap) {
 impl EditState {
     /// Cria uma anotação (vai ao worker, que a grava no documento em memória).
     /// Vazia (nota em branco, clique sem traço) é ignorada sem aviso.
+    /// Abre a janela de nota (nova, editar, inserir/substituir texto, texto explicativo) já com o
+    /// cursor no campo.
+    fn open_note(&mut self, draft: NoteDraft) {
+        self.note_draft = Some(draft);
+        self.note_focus = true;
+    }
+
     pub fn add(&mut self, annot: NewAnnot) {
         if !annot.is_empty() {
             self.ops.push(AnnotOp::Create(annot));
@@ -334,6 +370,10 @@ impl EditState {
     /// Esc (como no Acrobat): volta para Selecionar, tira a seleção e cancela gestos em andamento.
     pub fn escape(&mut self) {
         self.tool = Tool::Select;
+        self.poly = None;
+        self.callout_drag = None;
+        self.callout_box = None;
+        self.eraser = None;
         self.fill.tool = None;
         self.selected = None;
         self.annot_drag = None;
@@ -392,7 +432,14 @@ impl EditState {
             self.finish_tag = None;
             self.selection = None;
             if !sel.quads.is_empty() {
-                self.add(markup.annot(page, sel.quads));
+                match markup.annot(page, sel.quads.clone()) {
+                    Some(annot) => self.add(annot),
+                    None => self.open_note(NoteDraft {
+                        page,
+                        target: NoteTarget::Replace(sel.quads),
+                        text: String::new(),
+                    }),
+                }
             }
             return;
         }
@@ -441,7 +488,9 @@ impl EditState {
             .selection
             .take_if(|s| s.page.is_some() && !s.quads.is_empty())
         {
-            self.add(markup.annot(page, quads));
+            if let Some(annot) = markup.annot(page, quads) {
+                self.add(annot);
+            }
         }
     }
 
@@ -464,7 +513,12 @@ impl EditState {
             .interact_pointer_pos()
             .map(|p| map.to_page(p.into()));
         match self.tool {
-            Tool::Select | Tool::Highlight | Tool::Underline | Tool::RedactText => {
+            Tool::Select
+            | Tool::Highlight
+            | Tool::Underline
+            | Tool::StrikeOut
+            | Tool::ReplaceText
+            | Tool::RedactText => {
                 let grabbed = self.tool == Tool::Select
                     && self.annot_gestures(&response, pointer, annots, page, map);
                 if !grabbed {
@@ -476,7 +530,7 @@ impl EditState {
             Tool::Hand | Tool::Zoom => {}
             Tool::Note => {
                 if let (true, Some(at)) = (response.clicked(), pointer) {
-                    self.note_draft = Some(NoteDraft {
+                    self.open_note(NoteDraft {
                         page,
                         target: NoteTarget::New(at),
                         text: String::new(),
@@ -484,6 +538,31 @@ impl EditState {
                 }
             }
             Tool::Ink => self.draw_ink(ui, &response, pointer, page, map),
+            Tool::InsertText => {
+                if let (true, Some((x, y))) = (response.clicked(), pointer) {
+                    // cursor de inserção no ponto clicado (altura de uma linha de 12 pt)
+                    self.open_note(NoteDraft {
+                        page,
+                        target: NoteTarget::Insert(PdfRect::new(
+                            x - 4.0,
+                            y - 9.0,
+                            x + 4.0,
+                            y + 3.0,
+                        )),
+                        text: String::new(),
+                    });
+                }
+            }
+            Tool::Polygon | Tool::PolyLine | Tool::Cloud => {
+                self.poly_gestures(ui, &response, pointer, page, map)
+            }
+            Tool::Callout => self.callout_gestures(ui, &response, pointer, page, map),
+            Tool::Eraser => self.eraser_gestures(ui, &response, pointer, annots, page, map),
+            Tool::Attach => {
+                if let (true, Some(at)) = (response.clicked(), pointer) {
+                    self.attach_at = Some((page, at));
+                }
+            }
             Tool::Fill => self.fill_gestures(ui, &response, pointer, page, map),
             Tool::TextBox
             | Tool::Rect
@@ -522,7 +601,7 @@ impl EditState {
         if response.double_clicked() {
             match pointer.and_then(hit).and_then(|s| find(annots, s)) {
                 Some(note) if note.kind == AnnotKind::Note => {
-                    self.note_draft = Some(NoteDraft {
+                    self.open_note(NoteDraft {
                         page,
                         target: NoteTarget::Existing(note.id),
                         text: note.contents.clone(),
@@ -827,6 +906,171 @@ impl EditState {
     }
 
     /// Desenho à mão livre: acumula os pontos e, ao soltar, guarda o traço.
+    /// Polígono, linhas conectadas e nuvem: clique acrescenta vértice; clique duplo (ou clique
+    /// no primeiro ponto, no polígono e na nuvem) termina; Backspace tira o último; Esc cancela.
+    fn poly_gestures(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        pointer: Option<(f32, f32)>,
+        page: i32,
+        map: &PageMap,
+    ) {
+        use crate::comment_tools::PolyBuilder;
+        let closable = self.tool != Tool::PolyLine;
+        if let (true, Some(p)) = (response.clicked(), pointer) {
+            let builder = self.poly.get_or_insert_with(|| PolyBuilder::new(page));
+            if builder.page != page {
+                *builder = PolyBuilder::new(page);
+            }
+            let min = if closable { 3 } else { 2 };
+            let double = response.double_clicked();
+            if let Some(vertices) = builder.click(p, double, closable, min, 6.0 / map.zoom) {
+                self.poly = None;
+                self.add(NewAnnot::Polygon {
+                    page,
+                    vertices,
+                    closed: closable,
+                    cloud: self.tool == Tool::Cloud,
+                });
+            }
+        }
+        let Some(builder) = self.poly.as_mut().filter(|b| b.page == page) else {
+            return;
+        };
+        if ui.input(|i| i.key_pressed(egui::Key::Backspace)) {
+            builder.undo_last();
+        }
+        // pré-visualização: os vértices e o trecho até o ponteiro
+        let mut preview = builder.points.clone();
+        if let Some(h) = response.hover_pos() {
+            preview.push(map.to_page(h.into()));
+        }
+        if preview.len() > 1 {
+            paint_stroke(ui.painter(), &preview, map);
+        }
+    }
+
+    /// Texto explicativo: arrastar desenha a caixa; o clique seguinte põe a ponta da seta e abre o
+    /// texto.
+    fn callout_gestures(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        pointer: Option<(f32, f32)>,
+        page: i32,
+        map: &PageMap,
+    ) {
+        if let Some((box_page, rect)) = self.callout_box.filter(|(p, _)| *p == page) {
+            if let (true, Some(tip)) = (response.clicked(), pointer) {
+                self.callout_box = None;
+                self.open_note(NoteDraft {
+                    page: box_page,
+                    target: NoteTarget::Callout { rect, tip },
+                    text: String::new(),
+                });
+                return;
+            }
+            let painter = ui.painter();
+            let corners = [
+                (rect.x0, rect.y0),
+                (rect.x1, rect.y0),
+                (rect.x1, rect.y1),
+                (rect.x0, rect.y1),
+                (rect.x0, rect.y0),
+            ];
+            paint_stroke(painter, &corners, map);
+            if let Some(h) = response.hover_pos() {
+                let tip = map.to_page(h.into());
+                let knee = crate::comment_tools::callout_knee(rect, tip);
+                let edge = (tip.0.clamp(rect.x0, rect.x1), tip.1.clamp(rect.y0, rect.y1));
+                paint_stroke(painter, &[tip, knee, edge], map);
+            }
+            return;
+        }
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            if let Some(p) = press_point(response, map, pointer) {
+                self.callout_drag = Some((page, p));
+            }
+        }
+        if let (Some((drag_page, from)), Some(to)) = (self.callout_drag, pointer) {
+            if drag_page == page {
+                let rect = app_state::annot_geom::rect_from_drag(from, to, false);
+                if response.drag_stopped_by(egui::PointerButton::Primary) {
+                    self.callout_drag = None;
+                    // clique sem arrasto: caixa padrão a partir do ponto
+                    let rect = if rect.width() < 10.0 || rect.height() < 10.0 {
+                        PdfRect::new(from.0, from.1, from.0 + 150.0, from.1 + 40.0)
+                    } else {
+                        rect
+                    };
+                    self.callout_box = Some((page, rect));
+                } else {
+                    let corners = [
+                        (rect.x0, rect.y0),
+                        (rect.x1, rect.y0),
+                        (rect.x1, rect.y1),
+                        (rect.x0, rect.y1),
+                        (rect.x0, rect.y0),
+                    ];
+                    paint_stroke(ui.painter(), &corners, map);
+                }
+            }
+        }
+    }
+
+    /// Borracha: arrastar sobre um desenho apaga o que fica sob o círculo (uma etapa ao soltar).
+    fn eraser_gestures(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        pointer: Option<(f32, f32)>,
+        annots: &[AnnotInfo],
+        page: i32,
+        map: &PageMap,
+    ) {
+        let radius = ERASER_RADIUS / map.zoom;
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            self.eraser = Some((page, Vec::new()));
+        }
+        if let (Some((p, path)), Some(at)) = (self.eraser.as_mut(), pointer) {
+            if *p == page && response.dragged_by(egui::PointerButton::Primary) {
+                path.push(at);
+            }
+        }
+        if response.drag_stopped_by(egui::PointerButton::Primary) {
+            if let Some((p, path)) = self.eraser.take().filter(|(p, _)| *p == page) {
+                let reach = |r: &PdfRect| {
+                    path.iter().any(|&(x, y)| {
+                        x >= r.x0 - radius
+                            && x <= r.x1 + radius
+                            && y >= r.y0 - radius
+                            && y <= r.y1 + radius
+                    })
+                };
+                for a in annots
+                    .iter()
+                    .filter(|a| a.page == p && a.kind == AnnotKind::Ink && reach(&a.rect))
+                {
+                    self.ops.push(AnnotOp::Erase {
+                        page: p,
+                        id: a.id,
+                        path: path.clone(),
+                        radius,
+                    });
+                }
+            }
+        }
+        // o círculo da borracha sob o ponteiro
+        if let Some(h) = response.hover_pos() {
+            ui.painter().circle_stroke(
+                h,
+                ERASER_RADIUS,
+                egui::Stroke::new(1.0, egui::Color32::from_gray(90)),
+            );
+        }
+    }
+
     fn draw_ink(
         &mut self,
         ui: &egui::Ui,
@@ -861,10 +1105,17 @@ impl EditState {
         let (title, ok) = match draft.target {
             NoteTarget::New(_) => ("Nova nota", "Adicionar"),
             NoteTarget::Existing(_) => ("Editar nota", "OK"),
+            NoteTarget::Insert(_) => ("Inserir texto", "Adicionar"),
+            NoteTarget::Replace(_) => ("Substituir texto", "Adicionar"),
+            NoteTarget::Callout { .. } => ("Texto explicativo", "Adicionar"),
         };
         let mut choice = None; // Some(true) = confirmar, Some(false) = cancelar
+        let focus = std::mem::take(&mut self.note_focus);
         egui::Window::new(title).collapsible(false).show(ui, |ui| {
-            ui.text_edit_multiline(&mut draft.text);
+            let edit = ui.text_edit_multiline(&mut draft.text);
+            if focus {
+                edit.request_focus();
+            }
             ui.horizontal(|ui| {
                 if ui.button(ok).clicked() {
                     choice = Some(true);
@@ -879,6 +1130,19 @@ impl EditState {
                 let (page, text) = (draft.page, draft.text);
                 match draft.target {
                     NoteTarget::New(at) => self.add(NewAnnot::Note { page, at, text }),
+                    NoteTarget::Insert(rect) => self.add(NewAnnot::Caret { page, rect, text }),
+                    NoteTarget::Replace(rects) => {
+                        self.add(NewAnnot::ReplaceText { page, rects, text })
+                    }
+                    NoteTarget::Callout { rect, tip } => self.add(NewAnnot::Callout {
+                        page,
+                        rect,
+                        knee: crate::comment_tools::callout_knee(rect, tip),
+                        tip,
+                        text,
+                        size: crate::create::TEXT_SIZE,
+                        color: [0.0; 3],
+                    }),
                     NoteTarget::Existing(id) => {
                         self.ops.push(AnnotOp::SetContents { page, id, text })
                     }

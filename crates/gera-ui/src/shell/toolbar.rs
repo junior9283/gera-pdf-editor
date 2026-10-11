@@ -475,14 +475,58 @@ fn sign_menu(ui: &mut egui::Ui, doc: &mut DocTab) {
 pub fn comment_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     let mut out = None;
     ui.horizontal(|ui| {
-        for tool in Tool::ALL.into_iter().filter(|t| *t != Tool::Stamp) {
+        for tool in [
+            Tool::Select,
+            Tool::Highlight,
+            Tool::Underline,
+            Tool::StrikeOut,
+        ] {
             ui.selectable_value(&mut doc.edit.tool, tool, tool.label());
         }
+        tool_menu(
+            ui,
+            doc,
+            "Editar texto",
+            &[Tool::ReplaceText, Tool::InsertText],
+        );
+        for tool in [Tool::Note, Tool::TextBox, Tool::Callout] {
+            ui.selectable_value(&mut doc.edit.tool, tool, tool.label());
+        }
+        tool_menu(
+            ui,
+            doc,
+            "Desenho",
+            app_state::tools::ToolGroup::Drawing.tools(),
+        );
         stamp_menu(ui, doc);
+        ui.selectable_value(&mut doc.edit.tool, Tool::Attach, Tool::Attach.label());
         ui.separator();
         undo_redo(ui, doc, &mut out);
     });
     out
+}
+
+/// Botão com menu de ferramentas (como "Ferramentas de desenho" no Acrobat): mostra a ativa do
+/// grupo, ou o nome do grupo.
+fn tool_menu(ui: &mut egui::Ui, doc: &mut DocTab, group: &str, tools: &[Tool]) {
+    let active = tools.contains(&doc.edit.tool);
+    let label = if active {
+        format!("{group}: {}", doc.edit.tool.label())
+    } else {
+        group.to_owned()
+    };
+    let button = egui::Button::selectable(active, label);
+    egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
+        for &tool in tools {
+            if ui
+                .selectable_label(doc.edit.tool == tool, tool.label())
+                .clicked()
+            {
+                doc.edit.tool = tool;
+                ui.close();
+            }
+        }
+    });
 }
 
 /// Ferramenta Carimbo com o menu dos carimbos, nos dois grupos do Acrobat.
