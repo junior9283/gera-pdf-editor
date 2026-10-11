@@ -519,6 +519,12 @@ fn add_one(doc: &mut PdfDocument, page: &mut PdfPage, a: &NewAnnot) -> Result<Pd
             let img = stamp::image(title, subtitle.as_deref(), *color, page.rotation()?)?;
             add_stamp(doc, page, *rect, title, &img)?
         }
+        NewAnnot::CustomStamp {
+            rect, image, name, ..
+        } => {
+            let img = stamp::custom_image(image, page.rotation()?)?;
+            add_stamp(doc, page, *rect, name, &img)?
+        }
         NewAnnot::Caret { rect, text, .. } => {
             let mut a = page.add_caret_annotation(Rect::from(*rect))?;
             a.set_contents(text)?;

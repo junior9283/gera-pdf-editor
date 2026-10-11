@@ -358,6 +358,13 @@ pub enum NewAnnot {
         subtitle: Option<String>,
         color: [f32; 3],
     },
+    /// Carimbo personalizado: a imagem guardada no catálogo do usuário.
+    CustomStamp {
+        page: i32,
+        rect: PdfRect,
+        image: std::path::PathBuf,
+        name: String,
+    },
     /// Inserir texto: cursor de inserção com a nota do texto a inserir.
     Caret {
         page: i32,
@@ -455,6 +462,7 @@ impl NewAnnot {
             | Self::Mark { page, .. }
             | Self::Redact { page, .. }
             | Self::Stamp { page, .. }
+            | Self::CustomStamp { page, .. }
             | Self::Polygon { page, .. }
             | Self::Caret { page, .. }
             | Self::ReplaceText { page, .. }
@@ -481,9 +489,10 @@ impl NewAnnot {
             Self::TextBox { text, .. } | Self::FillText { text, .. } => text.trim().is_empty(),
             Self::Mark { rect, .. } => rect.width() < 2.0 || rect.height() < 2.0,
             Self::Signature { art, .. } if art.is_empty() => true,
-            Self::Shape { rect, .. } | Self::Stamp { rect, .. } | Self::Signature { rect, .. } => {
-                rect.width() < 3.0 || rect.height() < 3.0
-            }
+            Self::Shape { rect, .. }
+            | Self::Stamp { rect, .. }
+            | Self::CustomStamp { rect, .. }
+            | Self::Signature { rect, .. } => rect.width() < 3.0 || rect.height() < 3.0,
             Self::Line { a, b, .. } => (b.0 - a.0).hypot(b.1 - a.1) < 3.0,
             // polígono e nuvem pedem 3 vértices; linhas conectadas, 2
             Self::Polygon {
