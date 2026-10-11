@@ -42,7 +42,6 @@ fn check(ui: &mut egui::Ui, out: &mut Option<Command>, cmd: Command, checked: bo
     }
 }
 
-/// Ferramenta do catálogo ainda não pronta: o texto "em breve" vem do próprio catálogo.
 
 pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
     let mut out = None;
