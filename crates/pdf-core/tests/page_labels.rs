@@ -71,3 +71,31 @@ fn a_new_section_keeps_the_other_ranges() {
     d.set_page_labels(new).unwrap();
     assert_eq!(d.labels(), ["i", "A", "iii", "1", "2", "3", "4", "5"]);
 }
+
+#[test]
+fn page_operations_do_not_invent_or_shift_labels() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut d = PdfDoc::open(&write_sample(&dir, "a.pdf", 5, 0), None).unwrap();
+    d.apply_pages(pdf_core::PageOp::Move {
+        pages: vec![1, 2],
+        to: 0,
+    })
+    .unwrap();
+    assert!(
+        d.labels().is_empty(),
+        "mover não cria rótulos: {:?}",
+        d.labels()
+    );
+    d.set_page_labels(vec![
+        range(0, PageLabelStyle::LowerRoman, "", 1),
+        range(2, PageLabelStyle::Decimal, "", 1),
+    ])
+    .unwrap();
+    d.apply_pages(pdf_core::PageOp::Delete { pages: vec![0] })
+        .unwrap();
+    assert_eq!(
+        d.labels(),
+        ["i", "ii", "1", "2"],
+        "as faixas ficam nos índices"
+    );
+}

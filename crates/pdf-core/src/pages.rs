@@ -208,11 +208,14 @@ impl PdfDoc {
             }
         }
         let before = self.snapshot()?;
+        let labels = self.page_labels();
         // as apagadas saem de verdade antes (os índices das páginas vão mudar); o instantâneo
         // as guarda para o desfazer
         let result = self.purge_hidden().and_then(|()| {
             self.history.hidden.clear();
-            self.run_page_op(op)
+            self.run_page_op(op)?;
+            // os rótulos ficam como estavam (por índice), sem os que o MuPDF ajusta ou inventa
+            self.write_page_labels(labels)
         });
         match result {
             Ok(()) => {

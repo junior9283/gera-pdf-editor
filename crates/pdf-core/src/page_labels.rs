@@ -278,34 +278,38 @@ impl PdfDoc {
     /// Grava as faixas (uma etapa do desfazer); lista vazia tira os rótulos.
     pub fn set_page_labels(&mut self, ranges: Vec<PageLabelRange>) -> Result<()> {
         self.require_modifiable("alterar os rótulos de página")?;
+        self.with_snapshot(|d| d.write_page_labels(ranges))
+    }
+
+    /// Grava as faixas sem histórico (as operações de página põem de volta as que havia: o MuPDF
+    /// ajusta e até cria rótulos ao mover, inserir e excluir, e o Acrobat não).
+    pub(crate) fn write_page_labels(&mut self, ranges: Vec<PageLabelRange>) -> Result<()> {
         let ranges = normalized(ranges, self.page_count()?);
-        self.with_snapshot(|d| {
-            let mut catalog = d.inner.catalog()?;
-            if ranges.is_empty() {
-                catalog.dict_delete("PageLabels")?;
-                return Ok(());
+        let mut catalog = self.inner.catalog()?;
+        if ranges.is_empty() {
+            catalog.dict_delete("PageLabels")?;
+            return Ok(());
+        }
+        let mut nums = self.inner.new_array()?;
+        for r in &ranges {
+            let mut dict = self.inner.new_dict()?;
+            if let Some(s) = style_name(r.style) {
+                dict.dict_put("S", PdfObject::new_name(s)?)?;
             }
-            let mut nums = d.inner.new_array()?;
-            for r in &ranges {
-                let mut dict = d.inner.new_dict()?;
-                if let Some(s) = style_name(r.style) {
-                    dict.dict_put("S", PdfObject::new_name(s)?)?;
-                }
-                if !r.prefix.is_empty() {
-                    dict.dict_put("P", PdfObject::new_string(&r.prefix)?)?;
-                }
-                if r.first != 1 {
-                    dict.dict_put("St", PdfObject::new_int(r.first)?)?;
-                }
-                nums.array_push(PdfObject::new_int(r.start_page)?)?;
-                nums.array_push(dict)?;
+            if !r.prefix.is_empty() {
+                dict.dict_put("P", PdfObject::new_string(&r.prefix)?)?;
             }
-            let mut tree = d.inner.new_dict()?;
-            tree.dict_put("Nums", nums)?;
-            let tree = d.inner.add_object(&tree)?;
-            catalog.dict_put("PageLabels", tree)?;
-            Ok(())
-        })
+            if r.first != 1 {
+                dict.dict_put("St", PdfObject::new_int(r.first)?)?;
+            }
+            nums.array_push(PdfObject::new_int(r.start_page)?)?;
+            nums.array_push(dict)?;
+        }
+        let mut tree = self.inner.new_dict()?;
+        tree.dict_put("Nums", nums)?;
+        let tree = self.inner.add_object(&tree)?;
+        catalog.dict_put("PageLabels", tree)?;
+        Ok(())
     }
 }
 
