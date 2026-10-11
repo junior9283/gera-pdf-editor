@@ -2,7 +2,7 @@
 //! comentário (`FileAttachment`). Adicionar, remover e descrever são etapas do desfazer.
 use crate::doc::PdfDoc;
 use crate::error::{refused, Result};
-use crate::pdf_obj::{get, text};
+use crate::pdf_obj::{get, name_of, text};
 use crate::types::{AttachmentInfo, AttachmentOrigin};
 use mupdf::pdf::{EmbeddedFileOptions, PdfAnnotationType, PdfObject, PdfPage};
 use std::path::Path;
@@ -54,6 +54,65 @@ fn unique_name(wanted: &str, taken: &[String]) -> String {
         .map(|n| format!("{stem} ({n}){ext}"))
         .find(|c| !taken.iter().any(|t| t == c))
         .unwrap_or_else(|| wanted.to_owned())
+}
+
+/// Nomes dos filtros do stream (`/Filter` nome ou lista).
+fn filters(stream: &PdfObject) -> Vec<String> {
+    let Some(f) = get(stream, "Filter") else {
+        return Vec::new();
+    };
+    if f.is_array().unwrap_or(false) {
+        let len = f.len().unwrap_or(0).min(16) as i32;
+        (0..len)
+            .filter_map(|k| name_of(&f.get_array(k).ok()??))
+            .collect()
+    } else {
+        name_of(&f).into_iter().collect()
+    }
+}
+
+/// Quantos bytes o zlib `raw` descomprime, contando só até `cap + 1` (memória constante).
+fn inflated_len(raw: &[u8], cap: usize) -> usize {
+    use std::io::Read;
+    let mut z = flate2::read::ZlibDecoder::new(raw).take(cap as u64 + 1);
+    let (mut total, mut buf) = (0, [0u8; 64 * 1024]);
+    // dado corrompido: o MuPDF também para no erro, então o que veio até ali é o tamanho
+    while let Ok(n @ 1..) = z.read(&mut buf) {
+        total += n;
+    }
+    total
+}
+
+/// Conteúdo do stream com teto de `cap` bytes, sem descomprimir uma bomba: o tamanho declarado
+/// vem do arquivo e pode mentir, então o Flate é medido antes (em blocos) e os filtros que
+/// expandem sem medição só valem para streams pequenos.
+fn read_capped(stream: &PdfObject, cap: usize) -> Result<Vec<u8>> {
+    let too_big = || refused("o anexo é grande demais");
+    let filters = filters(stream);
+    // ASCIIHex e ASCII85 só encolhem; os demais podem expandir
+    let expanding = filters
+        .iter()
+        .filter(|f| !matches!(f.as_str(), "ASCIIHexDecode" | "AHx" | "ASCII85Decode" | "A85"))
+        .count();
+    if expanding > 0 {
+        let raw = stream.read_raw_stream()?;
+        let flate = matches!(filters.as_slice(), [f] if f == "FlateDecode" || f == "Fl");
+        if flate {
+            if inflated_len(&raw, cap) > cap {
+                return Err(too_big());
+            }
+        } else if expanding > 1 || raw.len() > cap / 4096 {
+            // LZW e RunLength expandem até ~4096×: só os pequenos são seguros
+            return Err(refused(
+                "o anexo usa uma compressão que o app não abre com segurança",
+            ));
+        }
+    }
+    let bytes = stream.read_stream()?;
+    if bytes.len() > cap {
+        return Err(too_big());
+    }
+    Ok(bytes)
 }
 
 /// Anexos de comentário (`FileAttachment`) da página já carregada, até o teto da lista.
@@ -150,11 +209,7 @@ impl PdfDoc {
         if declared_size(&stream) > MAX_READ_BYTES {
             return Err(refused("o anexo é grande demais"));
         }
-        let bytes = stream.read_stream()?;
-        if bytes.len() > MAX_READ_BYTES {
-            return Err(refused("o anexo é grande demais"));
-        }
-        Ok(bytes)
+        read_capped(&stream, MAX_READ_BYTES)
     }
 
     /// Anexa o arquivo ao documento; devolve o nome (único) que ele recebeu.
@@ -217,6 +272,32 @@ impl PdfDoc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Stream `FlateDecode` com `len` zeros comprimidos (cabem em poucos KB).
+    fn zeros_stream(doc: &mut mupdf::pdf::PdfDocument, len: usize) -> PdfObject {
+        use std::io::Write;
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        z.write_all(&vec![0u8; len]).unwrap();
+        let packed = z.finish().unwrap();
+        let mut dict = doc.new_dict().unwrap();
+        dict.dict_put("Filter", PdfObject::new_name("FlateDecode").unwrap())
+            .unwrap();
+        // o tamanho declarado mente: diz 1 byte
+        let mut params = doc.new_dict().unwrap();
+        params.dict_put("Size", PdfObject::new_int(1).unwrap()).unwrap();
+        dict.dict_put("Params", params).unwrap();
+        let buf = mupdf::Buffer::from_bytes(&packed).unwrap();
+        doc.add_stream(&buf, Some(&dict), true).unwrap()
+    }
+
+    #[test]
+    fn a_decompression_bomb_is_refused_before_inflating() {
+        let mut doc = mupdf::pdf::PdfDocument::new();
+        let bomb = zeros_stream(&mut doc, 4 << 20);
+        assert!(read_capped(&bomb, 1 << 20).is_err(), "expande além do teto");
+        let ok = read_capped(&bomb, 8 << 20).unwrap();
+        assert_eq!(ok.len(), 4 << 20, "dentro do teto, lê tudo");
+    }
 
     #[test]
     fn unique_names() {
