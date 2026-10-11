@@ -1369,7 +1369,7 @@ impl PdfDoc {
         Ok(DocSummary {
             path: self.path.clone(),
             sizes,
-            outline: self.outline().unwrap_or_default(),
+            outline: self.outline_tree().unwrap_or_default(),
             annots,
             links,
             initial_view: self.initial_view(),

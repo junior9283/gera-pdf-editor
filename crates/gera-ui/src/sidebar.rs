@@ -1,7 +1,7 @@
 use crate::view::DocView;
 use app_state::prefs::LeftPanel;
 use app_state::transform;
-use pdf_core::{AnnotInfo, AnnotKind, OutlineItem, PageSize, Rotation, Worker};
+use pdf_core::{AnnotInfo, AnnotKind, OutlineNode, PageSize, Rotation, Worker};
 
 pub enum SidebarAction {
     None,
@@ -70,7 +70,7 @@ pub fn show(
     panel: LeftPanel,
     view: &mut DocView,
     worker: &Worker,
-    outline: &[OutlineItem],
+    outline: &[OutlineNode],
     annots: &[AnnotInfo],
 ) -> SidebarAction {
     ui.strong(panel.label());
@@ -131,7 +131,7 @@ fn thumbnails(ui: &mut egui::Ui, view: &mut DocView, worker: &Worker) -> Sidebar
     action
 }
 
-fn outline_list(ui: &mut egui::Ui, outline: &[OutlineItem]) -> SidebarAction {
+fn outline_list(ui: &mut egui::Ui, outline: &[OutlineNode]) -> SidebarAction {
     if outline.is_empty() {
         ui.label("Este documento não tem índice.");
         return SidebarAction::None;

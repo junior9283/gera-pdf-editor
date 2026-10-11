@@ -14,6 +14,7 @@ mod error;
 mod forms;
 mod links;
 mod ocr;
+mod outline;
 mod owner_password;
 mod page_content;
 mod pages;

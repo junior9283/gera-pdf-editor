@@ -42,6 +42,8 @@ pub enum Request {
     },
     /// Arquivo → Reverter: relê o arquivo salvo (responde `PagesChanged`).
     Revert,
+    /// Edição dos marcadores (responde `OutlineChanged`).
+    Outline(crate::types::OutlineOp),
     /// Propriedades → OK (responde `PagesChanged`: o resumo leva a visualização inicial).
     SetProperties(crate::types::PropertiesEdit),
     /// Ladrilho de `TILE` px da página (zoom acima do teto da página inteira).
@@ -225,6 +227,12 @@ pub enum Response {
     ContentBox {
         page: i32,
         rect: Option<PdfRect>,
+    },
+    /// Marcadores depois de uma edição (`created`: o novo, para selecionar).
+    OutlineChanged {
+        outline: Vec<crate::types::OutlineNode>,
+        created: Option<i32>,
+        history: HistoryState,
     },
     SearchHits {
         id: u64,
@@ -449,6 +457,7 @@ impl State {
                     });
                 }
             }
+            Request::Outline(op) => self.edit(send, |d| Ok(Changed::Outline(d.edit_outline(op)?))),
             Request::SetProperties(e) => self.edit(send, |d| {
                 d.set_properties(&e)?;
                 Ok(Changed::Document)
@@ -712,6 +721,11 @@ impl State {
                     history: d.history_state(),
                 },
                 Err(e) => Response::PagesFailed(e.to_string()),
+            }),
+            Ok(Changed::Outline(created)) => send(Response::OutlineChanged {
+                outline: d.outline_tree().unwrap_or_default(),
+                created,
+                history: d.history_state(),
             }),
             Ok(Changed::Fields) => send(Response::FieldsChanged {
                 fields: d.all_fields().unwrap_or_default(),

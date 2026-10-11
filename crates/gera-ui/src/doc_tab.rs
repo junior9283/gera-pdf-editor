@@ -15,8 +15,7 @@ use app_state::print::{any_oversized, lp_args, PrintOptions};
 use app_state::transform::PageMap;
 use app_state::zoom::{self, Fit};
 use pdf_core::{
-    AnnotInfo, DocProperties, DocSummary, HistoryState, OutlineItem, PdfError, Request, Response,
-    Worker,
+    AnnotInfo, DocProperties, DocSummary, HistoryState, PdfError, Request, Response, Worker,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -137,6 +136,8 @@ pub struct DocTab {
     paste_rx: Option<std::sync::mpsc::Receiver<crate::clipboard::SystemClip>>,
     /// Imagens coladas gravadas na pasta temporária (apagadas ao fechar a aba).
     pasted_files: Vec<std::path::PathBuf>,
+    /// Marcador recém-criado (o painel o seleciona e abre a renomeação).
+    pub(crate) bookmark_created: Option<i32>,
     /// Arquivo → Reverter: a pergunta está aberta.
     pub(crate) revert_ask: bool,
     /// Depois de colar, seleciona o comentário mais novo desta página.
@@ -174,7 +175,7 @@ pub struct DocTab {
     history: HistoryState,
     /// O motor de PDF (thread do worker) parou; já avisado.
     engine_stopped: bool,
-    outline: Vec<OutlineItem>,
+    pub(crate) outline: Vec<pdf_core::OutlineNode>,
     /// Caminho que está sendo aberto (para pedir a senha de um PDF protegido).
     opening: Option<PathBuf>,
     /// Pedido de senha: (caminho, senha digitada).
@@ -299,6 +300,7 @@ impl DocTab {
             pasted_files: Vec::new(),
             select_newest_on: None,
             revert_ask: false,
+            bookmark_created: None,
             marquee: None,
             focus_zoom: false,
             zoom_text: None,
@@ -1253,6 +1255,15 @@ impl DocTab {
                     if let Some(view) = self.view.as_mut() {
                         view.on_tile(ctx, page, scale, invert, rotation, tile, image);
                     }
+                }
+                Response::OutlineChanged {
+                    outline,
+                    created,
+                    history,
+                } => {
+                    self.outline = outline;
+                    self.history = history;
+                    self.bookmark_created = created;
                 }
                 Response::ContentBox { page, rect } => {
                     if let Some(view) = self.view.as_mut().filter(|v| v.fit == Fit::Visible) {

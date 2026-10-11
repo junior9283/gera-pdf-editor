@@ -448,11 +448,70 @@ pub enum InitialZoom {
     Factor(f32),
 }
 
+/// Marcador (painel Marcadores), em ordem de exibição.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutlineNode {
+    /// Número do objeto do marcador.
+    pub id: i32,
+    pub parent: Option<i32>,
+    pub depth: usize,
+    pub title: String,
+    pub page: Option<i32>,
+    /// Ponto do destino (coordenadas do MuPDF), quando o destino diz qual.
+    pub at: Option<(f32, f32)>,
+    /// Filhos à mostra (sinal de `/Count`).
+    pub open: bool,
+    pub color: Option<[f32; 3]>,
+    pub bold: bool,
+    pub italic: bool,
+}
+
+/// Edição dos marcadores. `after: None` põe no começo da lista dos irmãos.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OutlineOp {
+    Add {
+        parent: Option<i32>,
+        after: Option<i32>,
+        title: String,
+        page: i32,
+        at: Option<(f32, f32)>,
+    },
+    Rename {
+        id: i32,
+        title: String,
+    },
+    /// Exclui com os filhos.
+    Delete {
+        id: i32,
+    },
+    Move {
+        id: i32,
+        parent: Option<i32>,
+        after: Option<i32>,
+    },
+    Style {
+        id: i32,
+        color: Option<[f32; 3]>,
+        bold: bool,
+        italic: bool,
+    },
+    SetDest {
+        id: i32,
+        page: i32,
+        at: Option<(f32, f32)>,
+    },
+    /// Expandir ou recolher (não entra no desfazer).
+    SetOpen {
+        id: i32,
+        open: bool,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct DocSummary {
     pub path: PathBuf,
     pub sizes: Vec<PageSize>,
-    pub outline: Vec<OutlineItem>,
+    pub outline: Vec<OutlineNode>,
     pub annots: Vec<AnnotInfo>,
     /// Links de todas as páginas.
     pub links: Vec<LinkInfo>,
@@ -764,4 +823,6 @@ pub enum Changed {
     Document,
     /// Valores de campos de formulário (um campo pode ter widgets em várias páginas).
     Fields,
+    /// Marcadores (com o id do criado, se houver).
+    Outline(Option<i32>),
 }
