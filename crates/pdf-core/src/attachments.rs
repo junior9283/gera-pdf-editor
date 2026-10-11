@@ -71,21 +71,32 @@ fn filters(stream: &PdfObject) -> Vec<String> {
     }
 }
 
-/// Quantos bytes o zlib `raw` descomprime, contando só até `cap + 1` (memória constante).
-fn inflated_len(raw: &[u8], cap: usize) -> usize {
+/// Descomprime o Flate `raw` com teto (memória limitada a `cap`): zlib, ou deflate puro quando
+/// falta o cabeçalho. Dado corrompido para no erro, como no MuPDF. `None` se passar do teto.
+fn inflate_capped(raw: &[u8], cap: usize) -> Option<Vec<u8>> {
     use std::io::Read;
-    let mut z = flate2::read::ZlibDecoder::new(raw).take(cap as u64 + 1);
-    let (mut total, mut buf) = (0, [0u8; 64 * 1024]);
-    // dado corrompido: o MuPDF também para no erro, então o que veio até ali é o tamanho
-    while let Ok(n @ 1..) = z.read(&mut buf) {
-        total += n;
+    fn read(r: impl Read, cap: usize) -> (Vec<u8>, bool) {
+        let (mut out, mut buf) = (Vec::new(), [0u8; 64 * 1024]);
+        let mut r = r.take(cap as u64 + 1);
+        let failed = loop {
+            match r.read(&mut buf) {
+                Ok(0) => break false,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(_) => break true,
+            }
+        };
+        (out, failed)
     }
-    total
+    let (mut out, failed) = read(flate2::read::ZlibDecoder::new(raw), cap);
+    if failed && out.is_empty() {
+        out = read(flate2::read::DeflateDecoder::new(raw), cap).0;
+    }
+    (out.len() <= cap).then_some(out)
 }
 
 /// Conteúdo do stream com teto de `cap` bytes, sem descomprimir uma bomba: o tamanho declarado
-/// vem do arquivo e pode mentir, então o Flate é medido antes (em blocos) e os filtros que
-/// expandem sem medição só valem para streams pequenos.
+/// vem do arquivo e pode mentir. O Flate (o filtro dos anexos) é descomprimido aqui, em blocos e
+/// com teto; os demais filtros que expandem só valem para streams pequenos.
 fn read_capped(stream: &PdfObject, cap: usize) -> Result<Vec<u8>> {
     let too_big = || refused("o anexo é grande demais");
     let filters = filters(stream);
@@ -96,12 +107,12 @@ fn read_capped(stream: &PdfObject, cap: usize) -> Result<Vec<u8>> {
         .count();
     if expanding > 0 {
         let raw = stream.read_raw_stream()?;
-        let flate = matches!(filters.as_slice(), [f] if f == "FlateDecode" || f == "Fl");
-        if flate {
-            if inflated_len(&raw, cap) > cap {
-                return Err(too_big());
-            }
-        } else if expanding > 1 || raw.len() > cap / 4096 {
+        let plain_flate = matches!(filters.as_slice(), [f] if f == "FlateDecode" || f == "Fl")
+            && get(stream, "DecodeParms").is_none();
+        if plain_flate {
+            return inflate_capped(&raw, cap).ok_or_else(too_big);
+        }
+        if expanding > 1 || raw.len() > cap / 4096 {
             // LZW e RunLength expandem até ~4096×: só os pequenos são seguros
             return Err(refused(
                 "o anexo usa uma compressão que o app não abre com segurança",
@@ -297,6 +308,41 @@ mod tests {
         assert!(read_capped(&bomb, 1 << 20).is_err(), "expande além do teto");
         let ok = read_capped(&bomb, 8 << 20).unwrap();
         assert_eq!(ok.len(), 4 << 20, "dentro do teto, lê tudo");
+    }
+
+    /// Stream com `packed` como conteúdo bruto e o dicionário dado.
+    fn raw_stream(doc: &mut mupdf::pdf::PdfDocument, packed: &[u8], parms: bool) -> PdfObject {
+        let mut dict = doc.new_dict().unwrap();
+        dict.dict_put("Filter", PdfObject::new_name("FlateDecode").unwrap())
+            .unwrap();
+        if parms {
+            let mut p = doc.new_dict().unwrap();
+            p.dict_put("Predictor", PdfObject::new_int(12).unwrap())
+                .unwrap();
+            dict.dict_put("DecodeParms", p).unwrap();
+        }
+        let buf = mupdf::Buffer::from_bytes(packed).unwrap();
+        doc.add_stream(&buf, Some(&dict), true).unwrap()
+    }
+
+    #[test]
+    fn deflate_without_zlib_header_is_capped_too() {
+        use std::io::Write;
+        let mut z = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+        z.write_all(&vec![7u8; 4 << 20]).unwrap();
+        let packed = z.finish().unwrap();
+        let mut doc = mupdf::pdf::PdfDocument::new();
+        let s = raw_stream(&mut doc, &packed, false);
+        assert!(read_capped(&s, 1 << 20).is_err(), "sem cabeçalho também tem teto");
+        let all = read_capped(&s, 8 << 20).unwrap();
+        assert_eq!(all, vec![7u8; 4 << 20]);
+    }
+
+    #[test]
+    fn flate_with_parameters_and_a_big_body_is_refused() {
+        let mut doc = mupdf::pdf::PdfDocument::new();
+        let s = raw_stream(&mut doc, &vec![0x78; 1 << 20], true);
+        assert!(read_capped(&s, 64 << 20).is_err(), "o app não mede o preditor");
     }
 
     #[test]
