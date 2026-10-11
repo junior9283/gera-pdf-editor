@@ -74,6 +74,28 @@ pub enum PrepareOp {
         page: i32,
         order: TabOrder,
     },
+    /// Move ou redimensiona vários campos numa etapa: (página, id, retângulo).
+    MoveMany {
+        moves: Vec<(i32, i32, PdfRect)>,
+    },
+    /// Exclui vários campos numa etapa: (página, id).
+    DeleteMany {
+        ids: Vec<(i32, i32)>,
+    },
+    /// Repete o widget nas páginas `pages` (a dele é pulada, salvo com deslocamento: colar), na
+    /// mesma posição mais `offset`. As cópias são widgets do mesmo campo (mesmo valor).
+    Duplicate {
+        page: i32,
+        id: i32,
+        pages: Vec<i32>,
+        offset: (f32, f32),
+    },
+    /// Criar várias cópias: campos novos (`nome_1`, `nome_2`…) nestes retângulos da página.
+    Copies {
+        page: i32,
+        id: i32,
+        rects: Vec<PdfRect>,
+    },
 }
 
 /// Ordem de tabulação, como no menu do Acrobat.
@@ -133,6 +155,56 @@ const RADIO: i32 = 1 << 15;
 const COMBO: i32 = 1 << 17;
 const EDIT: i32 = 1 << 18;
 const PUSHBUTTON: i32 = 1 << 16;
+
+/// Teto de "Criar várias cópias" (20 × 20).
+const MAX_COPIES: usize = 400;
+
+/// Chaves do nó do campo (separadas do widget ao duplicar).
+const FIELD_KEYS: &[&str] = &[
+    "T", "TU", "TM", "FT", "Ff", "V", "DV", "Opt", "TI", "I", "MaxLen", "RV", "DS", "Parent",
+];
+/// Chaves do widget copiadas ao duplicar (a aparência é refeita, salvo a dos estados).
+const WIDGET_KEYS: &[&str] = &[
+    "F", "DA", "Q", "MK", "BS", "Border", "H", "AS", "AP", "A", "AA",
+];
+
+/// Cópia de `obj` com dicionários e arrays diretos novos (as referências continuam as mesmas).
+fn copy_tree(doc: &PdfDocument, obj: &PdfObject, depth: u32) -> Result<PdfObject> {
+    if obj.is_indirect()? || depth > 8 {
+        return Ok(obj.clone());
+    }
+    if obj.is_dict()? {
+        let mut out = doc.new_dict()?;
+        for item in obj.dict_iter()? {
+            let (k, v) = item?;
+            out.dict_put(k, copy_tree(doc, &v, depth + 1)?)?;
+        }
+        return Ok(out);
+    }
+    if obj.is_array()? {
+        let mut out = doc.new_array()?;
+        for v in obj.array_iter()? {
+            out.array_push(copy_tree(doc, &v?, depth + 1)?)?;
+        }
+        return Ok(out);
+    }
+    Ok(obj.clone())
+}
+
+/// Troca, no array, a referência ao objeto `num` por `to`.
+fn replace_ref(array: &mut PdfObject, num: i32, to: &PdfObject) -> Result<()> {
+    for k in 0..array.len()? as i32 {
+        if array.get_array(k)?.and_then(|o| o.as_indirect().ok()) == Some(num) {
+            array.array_put(k, to.clone())?;
+        }
+    }
+    Ok(())
+}
+
+/// Nome completo do campo do widget.
+fn w_name(w: &PdfWidget) -> Result<String> {
+    Ok(w.name()?.unwrap_or_default())
+}
 
 /// Valor de exportação padrão da caixa de seleção nova.
 const CHECK_ON: &str = "Sim";
@@ -597,7 +669,182 @@ impl PdfDoc {
                 self.check_page(page)?;
                 self.with_snapshot(|d| d.write_tab_order(page, &order))
             }
+            PrepareOp::MoveMany { moves } => {
+                for &(page, id, _) in &moves {
+                    self.widget(page, id)?;
+                }
+                self.with_snapshot(|d| {
+                    let mut pages = Vec::new();
+                    for (page, id, rect) in moves {
+                        let mut a = d.widget(page, id)?.into_annotation();
+                        a.set_rect(Rect::from(rect))?;
+                        a.update()?;
+                        if !pages.contains(&page) {
+                            pages.push(page);
+                        }
+                    }
+                    pages
+                        .into_iter()
+                        .try_for_each(|p| d.refresh_widgets(p, None))
+                })
+            }
+            PrepareOp::DeleteMany { ids } => {
+                for &(page, id) in &ids {
+                    self.widget(page, id)?;
+                }
+                self.with_snapshot(|d| ids.iter().try_for_each(|&(p, id)| d.remove_field(p, id)))
+            }
+            PrepareOp::Duplicate {
+                page,
+                id,
+                pages,
+                offset,
+            } => {
+                self.widget(page, id)?;
+                let pasting = offset != (0.0, 0.0);
+                let mut targets: Vec<i32> = Vec::new();
+                for p in pages {
+                    self.check_page(p)?;
+                    if (p != page || pasting) && !targets.contains(&p) {
+                        targets.push(p);
+                    }
+                }
+                self.with_snapshot(|d| {
+                    targets
+                        .into_iter()
+                        .try_for_each(|p| d.duplicate_widget(page, id, p, offset).map(drop))
+                })
+            }
+            PrepareOp::Copies { page, id, rects } => {
+                self.widget(page, id)?;
+                if rects.len() > MAX_COPIES {
+                    return Err(invalid("cópias demais"));
+                }
+                self.with_snapshot(|d| {
+                    rects
+                        .into_iter()
+                        .try_for_each(|r| d.copy_field(page, id, r).map(drop))
+                })
+            }
         }
+    }
+
+    /// Repete o widget `id` na página `to`, deslocado: um widget novo do mesmo campo. Um campo
+    /// "mesclado" (o widget é o próprio campo) é antes separado em campo e widget.
+    fn duplicate_widget(&mut self, page: i32, id: i32, to: i32, offset: (f32, f32)) -> Result<i32> {
+        let src = self.widget(page, id)?;
+        let src_obj = src.annotation().object();
+        let mut head = field_head(&src_obj)?;
+        if head.as_indirect()? == id {
+            head = self.split_field(&src_obj, id)?;
+        }
+        let rect = PdfRect::from(src.annotation().rect()?).translated(offset.0, offset.1);
+        let mut page_ref = self.inner.load_pdf_page(to)?;
+        let mut annot = page_ref.create_annotation(PdfAnnotationType::Widget)?;
+        annot.set_rect(Rect::from(rect))?;
+        let new_id = annot_id(&annot)?;
+        let mut w = annot.object();
+        for key in WIDGET_KEYS {
+            if let Some(v) = src_obj.get_dict(*key)? {
+                w.dict_put(*key, copy_tree(&self.inner, &v, 0)?)?;
+            }
+        }
+        w.dict_put("Parent", head.clone())?;
+        kids_array(&head)?.array_push(self.inner.new_indirect(new_id, 0)?)?;
+        annot.update()?;
+        page_ref.update()?;
+        self.refresh_widgets(to, None)?;
+        Ok(new_id)
+    }
+
+    /// Separa o campo do seu widget (que eram o mesmo objeto): o campo novo leva nome, tipo,
+    /// valor e os scripts de valor; o widget fica com a aparência, como filho dele.
+    fn split_field(&mut self, widget: &PdfObject, id: i32) -> Result<PdfObject> {
+        let mut w = widget.clone();
+        let mut field = self.inner.add_object(&self.inner.new_dict()?)?;
+        for key in FIELD_KEYS {
+            if let Some(v) = w.get_dict(*key)? {
+                field.dict_put(*key, v)?;
+                w.dict_delete(*key)?;
+            }
+        }
+        // os gatilhos de valor (Tecla, Formatar, Validar, Calcular) são do campo
+        if let Some(mut aa) = w.get_dict("AA")? {
+            let mut field_aa = self.inner.new_dict()?;
+            for key in ["K", "F", "V", "C"] {
+                if let Some(v) = aa.get_dict(key)? {
+                    field_aa.dict_put(key, v)?;
+                    aa.dict_delete(key)?;
+                }
+            }
+            if field_aa.dict_len()? > 0 {
+                field.dict_put("AA", field_aa)?;
+            }
+            if aa.dict_len()? == 0 {
+                w.dict_delete("AA")?;
+            }
+        }
+        // quem apontava para o widget (pai ou /Fields, e /CO) passa a apontar para o campo
+        let field_num = field.as_indirect()?;
+        let holder = match field.get_dict("Parent")? {
+            Some(parent) => parent.get_dict("Kids")?,
+            None => acroform(&mut self.inner)?.get_dict("Fields")?,
+        };
+        if let Some(mut list) = holder {
+            replace_ref(&mut list, id, &field)?;
+        }
+        if let Some(mut co) = acroform(&mut self.inner)?.get_dict("CO")? {
+            replace_ref(&mut co, id, &field)?;
+        }
+        let mut kids = self.inner.new_array()?;
+        kids.array_push(self.inner.new_indirect(id, 0)?)?;
+        field.dict_put("Kids", kids)?;
+        w.dict_put("Parent", self.inner.new_indirect(field_num, 0)?)?;
+        Ok(field)
+    }
+
+    /// Criar várias cópias: um campo novo como o `id` (mesmas propriedades e valor), chamado
+    /// `nome_k`, no retângulo `rect` da mesma página.
+    fn copy_field(&mut self, page: i32, id: i32, rect: PdfRect) -> Result<i32> {
+        let src = self.widget(page, id)?;
+        let src_obj = src.annotation().object();
+        let head = field_head(&src_obj)?;
+        if flags_of(&head)? & RADIO != 0 {
+            return Err(invalid(
+                "botões de opção não são copiados assim; use Duplicar",
+            ));
+        }
+        let base = w_name(&src)?;
+        let names = self.field_names()?;
+        let name = (1..)
+            .map(|k| format!("{base}_{k}"))
+            .find(|n| !names.contains(n) && !self.is_node(n).unwrap_or(true))
+            .expect("sequência infinita");
+        let acro = acroform(&mut self.inner)?;
+        let mut page_ref = self.inner.load_pdf_page(page)?;
+        let mut annot = page_ref.create_annotation(PdfAnnotationType::Widget)?;
+        annot.set_rect(Rect::from(rect))?;
+        let new_id = annot_id(&annot)?;
+        let mut w = annot.object();
+        for (from, keys) in [(&src_obj, WIDGET_KEYS), (&head, FIELD_KEYS)] {
+            for key in keys {
+                if *key == "Parent" {
+                    continue;
+                }
+                if let Some(v) = from.get_dict(*key)? {
+                    w.dict_put(*key, copy_tree(&self.inner, &v, 0)?)?;
+                }
+            }
+        }
+        if let Some(aa) = head.get_dict("AA")? {
+            w.dict_put("AA", copy_tree(&self.inner, &aa, 0)?)?;
+        }
+        w.dict_put("T", PdfObject::new_string(&name)?)?;
+        fields_of(&acro)?.array_push(self.inner.new_indirect(new_id, 0)?)?;
+        annot.update()?;
+        page_ref.update()?;
+        self.refresh_widgets(page, None)?;
+        Ok(new_id)
     }
 
     /// A ordem de tabulação da página (pelo /Tabs).
@@ -1056,23 +1303,26 @@ impl PdfDoc {
     /// Exclui o campo `id` (o grupo de opção some junto com o último botão).
     pub fn delete_field(&mut self, page: i32, id: i32) -> Result<()> {
         self.widget(page, id)?;
-        self.with_snapshot(|d| {
-            let w = d.widget(page, id)?;
-            let obj = w.annotation().object();
-            let head = field_head(&obj)?;
-            if head.as_indirect()? == id {
-                d.unlink_field(&head)?;
-            } else {
-                let mut kids = kids_array(&head)?;
-                remove_ref(&mut kids, id)?;
-                if kids.len()? == 0 {
-                    d.unlink_field(&head)?;
-                }
+        self.with_snapshot(|d| d.remove_field(page, id))
+    }
+
+    /// Tira o widget da página e da árvore de campos (o campo some com o último widget).
+    fn remove_field(&mut self, page: i32, id: i32) -> Result<()> {
+        let w = self.widget(page, id)?;
+        let obj = w.annotation().object();
+        let head = field_head(&obj)?;
+        if head.as_indirect()? == id {
+            self.unlink_field(&head)?;
+        } else {
+            let mut kids = kids_array(&head)?;
+            remove_ref(&mut kids, id)?;
+            if kids.len()? == 0 {
+                self.unlink_field(&head)?;
             }
-            let mut page_ref = d.inner.load_pdf_page(page)?;
-            page_ref.delete_annotation(w.into_annotation())?;
-            page_ref.update()?;
-            Ok(())
-        })
+        }
+        let mut page_ref = self.inner.load_pdf_page(page)?;
+        page_ref.delete_annotation(w.into_annotation())?;
+        page_ref.update()?;
+        Ok(())
     }
 }

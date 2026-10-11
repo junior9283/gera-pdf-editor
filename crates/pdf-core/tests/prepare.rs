@@ -645,3 +645,162 @@ fn row_column_and_manual_orders() {
     d.undo().unwrap();
     assert_eq!(names(&d), ["C", "A", "B"], "desfazer volta a ordem");
 }
+
+fn doc_pages(n: usize) -> (tempfile::TempDir, std::path::PathBuf, PdfDoc) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_sample(&dir, "v.pdf", n, 0);
+    let d = PdfDoc::open(&path, None).unwrap();
+    (dir, path, d)
+}
+
+#[test]
+fn move_many_is_one_undo_step() {
+    let (_d, _p, mut d) = doc();
+    let a = d.add_field(0, r(100.0), NewFieldKind::Text, "A").unwrap();
+    let b = d.add_field(0, r(200.0), NewFieldKind::Text, "B").unwrap();
+    d.prepare(pdf_core::PrepareOp::MoveMany {
+        moves: vec![(0, a, r(300.0)), (0, b, r(400.0))],
+    })
+    .unwrap();
+    let f = d.fields(0).unwrap();
+    assert!((by_name(&f, "A").rect.y0 - 300.0).abs() < 0.5);
+    assert!((by_name(&f, "B").rect.y0 - 400.0).abs() < 0.5);
+    d.undo().unwrap();
+    let f = d.fields(0).unwrap();
+    assert!(
+        (by_name(&f, "A").rect.y0 - 100.0).abs() < 0.5,
+        "uma etapa volta os dois"
+    );
+    assert!((by_name(&f, "B").rect.y0 - 200.0).abs() < 0.5);
+}
+
+#[test]
+fn delete_many_is_one_undo_step() {
+    let (_d, _p, mut d) = doc();
+    let a = d.add_field(0, r(100.0), NewFieldKind::Text, "A").unwrap();
+    let b = d
+        .add_field(0, r(200.0), NewFieldKind::Checkbox, "B")
+        .unwrap();
+    d.add_field(0, r(300.0), NewFieldKind::Text, "C").unwrap();
+    d.prepare(pdf_core::PrepareOp::DeleteMany {
+        ids: vec![(0, a), (0, b)],
+    })
+    .unwrap();
+    let names: Vec<String> = d.fields(0).unwrap().into_iter().map(|f| f.name).collect();
+    assert_eq!(names, ["C"]);
+    d.undo().unwrap();
+    assert_eq!(d.fields(0).unwrap().len(), 3);
+}
+
+#[test]
+fn duplicate_across_pages_shares_the_value() {
+    let (_d, path, mut d) = doc_pages(3);
+    let a = d
+        .add_field(0, r(100.0), NewFieldKind::Text, "Nome")
+        .unwrap();
+    d.prepare(pdf_core::PrepareOp::Duplicate {
+        page: 0,
+        id: a,
+        pages: vec![0, 1, 2],
+        offset: (0.0, 0.0),
+    })
+    .unwrap();
+    for p in 1..3 {
+        let f = d.fields(p).unwrap();
+        assert_eq!(f.len(), 1, "página {p}");
+        assert_eq!(f[0].name, "Nome");
+        assert!((f[0].rect.y0 - 100.0).abs() < 0.5, "mesma posição");
+    }
+    assert_eq!(
+        d.fields(0).unwrap().len(),
+        1,
+        "a página do original é pulada"
+    );
+    d.set_field(1, d.fields(1).unwrap()[0].id, "Ana").unwrap();
+    d.save(&path).unwrap();
+    let d = PdfDoc::open(&path, None).unwrap();
+    for p in 0..3 {
+        assert_eq!(
+            d.fields(p).unwrap()[0].value,
+            "Ana",
+            "página {p}: mesmo campo"
+        );
+    }
+    // e a aparência dos outros widgets também mostra o valor
+    let raw = mupdf::pdf::PdfDocument::open(path.to_str().unwrap()).unwrap();
+    for p in [0, 2] {
+        let page = raw.load_pdf_page(p).unwrap();
+        let w = page.widgets().next().unwrap();
+        let ap = w.annotation().object().get_dict("AP").unwrap().unwrap();
+        let n = ap.get_dict("N").unwrap().unwrap().read_stream().unwrap();
+        assert!(String::from_utf8_lossy(&n).contains("(Ana)"), "página {p}");
+    }
+}
+
+#[test]
+fn deleting_one_duplicate_keeps_the_others() {
+    let (_d, path, mut d) = doc_pages(2);
+    let a = d
+        .add_field(0, r(100.0), NewFieldKind::Text, "Nome")
+        .unwrap();
+    d.prepare(pdf_core::PrepareOp::Duplicate {
+        page: 0,
+        id: a,
+        pages: vec![1],
+        offset: (0.0, 0.0),
+    })
+    .unwrap();
+    d.delete_field(0, a).unwrap();
+    d.save(&path).unwrap();
+    let d = PdfDoc::open(&path, None).unwrap();
+    assert_eq!(d.fields(0).unwrap().len(), 0);
+    let f = d.fields(1).unwrap();
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0].name, "Nome");
+}
+
+#[test]
+fn pasting_on_the_same_page_makes_a_linked_widget() {
+    let (_d, _p, mut d) = doc();
+    let a = d
+        .add_field(0, r(100.0), NewFieldKind::Checkbox, "Aceito")
+        .unwrap();
+    d.prepare(pdf_core::PrepareOp::Duplicate {
+        page: 0,
+        id: a,
+        pages: vec![0],
+        offset: (10.0, 30.0),
+    })
+    .unwrap();
+    let f = d.fields(0).unwrap();
+    assert_eq!(f.len(), 2, "colar na mesma página");
+    assert!(f.iter().all(|x| x.name == "Aceito"));
+    assert!(f.iter().any(|x| (x.rect.y0 - 130.0).abs() < 0.5));
+}
+
+#[test]
+fn multiple_copies_make_new_fields() {
+    let (_d, _p, mut d) = doc();
+    let a = d
+        .add_field(0, r(100.0), NewFieldKind::Text, "Item")
+        .unwrap();
+    d.prepare(pdf_core::PrepareOp::Copies {
+        page: 0,
+        id: a,
+        rects: vec![r(130.0), r(160.0)],
+    })
+    .unwrap();
+    let f = d.fields(0).unwrap();
+    let mut names: Vec<&str> = f.iter().map(|x| x.name.as_str()).collect();
+    names.sort();
+    assert_eq!(names, ["Item", "Item_1", "Item_2"]);
+    d.set_field(0, by_name(&f, "Item_1").id, "x").unwrap();
+    assert_eq!(
+        by_name(&d.fields(0).unwrap(), "Item").value,
+        "",
+        "campos independentes"
+    );
+    d.undo().unwrap();
+    d.undo().unwrap();
+    assert_eq!(d.fields(0).unwrap().len(), 1, "as cópias saem numa etapa");
+}
