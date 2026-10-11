@@ -822,7 +822,7 @@ pub(crate) fn annot_info(annot: &PdfAnnotation, page: i32, ctm: &Matrix) -> Resu
             k if k.has_fill() => annot.interior_color()?.map(rgb_of),
             _ => None,
         },
-        vertices: annot_edit::vertices(annot)?,
+        vertices: annot_edit::vertices(annot, ctm)?,
         cloud: (kind == AnnotKind::Cloud)
             .then(|| annot.border_effect_intensity())
             .transpose()?,
@@ -1262,32 +1262,40 @@ impl PdfDoc {
             }
             AnnotOp::Erase {
                 page,
-                id,
+                ids,
                 path,
                 radius,
             } => {
-                let (rect, ink) = annot_edit::geometry_of(&self.inner, page, id)?;
-                let strokes = ink.ok_or_else(|| {
-                    PdfError::InvalidAnnotation("a borracha só apaga desenhos".into())
-                })?;
-                let left = annot_edit::erase_strokes(&strokes, &path, radius.max(0.5));
-                if left == strokes {
-                    return Ok(Vec::new()); // nada sob a borracha
+                let mut edits = Vec::new();
+                for id in ids {
+                    let (rect, ink) = annot_edit::geometry_of(&self.inner, page, id)?;
+                    let strokes = ink.ok_or_else(|| {
+                        PdfError::InvalidAnnotation("a borracha só apaga desenhos".into())
+                    })?;
+                    let left = annot_edit::erase_strokes(&strokes, &path, radius.max(0.5));
+                    if left == strokes {
+                        continue; // nada sob a borracha
+                    }
+                    edits.push(if left.is_empty() {
+                        // o desenho todo sumiu: sai (como Excluir)
+                        Edit::Visibility {
+                            page,
+                            id,
+                            hidden: true,
+                        }
+                    } else {
+                        Edit::Geometry {
+                            page,
+                            id,
+                            rect,
+                            ink: Some(left),
+                        }
+                    });
                 }
-                if left.is_empty() {
-                    // o desenho todo sumiu: sai (como Excluir)
-                    Edit::Visibility {
-                        page,
-                        id,
-                        hidden: true,
-                    }
-                } else {
-                    Edit::Geometry {
-                        page,
-                        id,
-                        rect,
-                        ink: Some(left),
-                    }
+                match edits.len() {
+                    0 => return Ok(Vec::new()),
+                    1 => edits.remove(0),
+                    _ => Edit::Batch(edits),
                 }
             }
             AnnotOp::MoveCallout {
@@ -1395,10 +1403,12 @@ impl PdfDoc {
                 };
                 let annots = self.annotations(page)?;
                 // anotação agrupada (Substituir texto): o grupo inteiro sai, a partir da principal
+                // (um /IRT de outro programa que não aponta para anotação desta página não conta)
                 let root = annots
                     .iter()
                     .find(|a| a.id == id)
                     .and_then(|a| a.group)
+                    .filter(|g| annots.iter().any(|a| a.id == *g))
                     .unwrap_or(id);
                 let members = annots
                     .iter()

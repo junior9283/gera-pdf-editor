@@ -388,3 +388,20 @@ fn resizing_a_callout_box_keeps_the_tip_and_undoes() {
     d.undo().unwrap();
     assert_eq!(d.annotations(0).unwrap()[0].rect, a.rect);
 }
+
+#[test]
+fn a_group_pointing_outside_the_page_annotations_still_deletes() {
+    let dir = tempfile::tempdir().unwrap();
+    let objs = vec![
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[4 0 R]>>".to_string(),
+        "<</Type/Annot/Subtype/StrikeOut/Rect[100 100 200 120]/QuadPoints[100 120 200 120 100 100 200 100]/RT/Group/IRT 3 0 R>>".to_string(),
+    ];
+    let path = dir.path().join("g.pdf");
+    std::fs::write(&path, pdf_core::sample::pdf_from_objects(&objs)).unwrap();
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let id = d.annotations(0).unwrap()[0].id;
+    d.apply(AnnotOp::Delete { page: 0, id }).unwrap();
+    assert!(d.annotations(0).unwrap().is_empty());
+}

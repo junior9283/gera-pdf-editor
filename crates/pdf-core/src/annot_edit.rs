@@ -295,20 +295,51 @@ pub(crate) fn line_of(doc: &PdfDocument, page: i32, id: i32) -> Result<Option<Se
 /// Teto de vértices lidos (polígono de outro programa com milhares de pontos).
 pub const MAX_VERTICES: usize = 1000;
 
-/// Vértices da anotação (vazio se não tiver), com teto e sem coordenadas não finitas.
-pub(crate) fn vertices(a: &PdfAnnotation) -> Result<Vec<(f32, f32)>> {
+/// Vértices da anotação (vazio se não tiver), em coordenadas do MuPDF, sem os não finitos e com
+/// teto: lidos direto do /Vertices, parando no teto (um array gigante não é percorrido inteiro).
+/// O `bool` diz se o teto cortou vértices.
+fn read_vertices(a: &PdfAnnotation, ctm: &mupdf::Matrix) -> Result<(Vec<(f32, f32)>, bool)> {
     if !matches!(
         a.r#type()?,
         PdfAnnotationType::Polygon | PdfAnnotationType::PolyLine
     ) {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     }
-    Ok(a.vertices()?
-        .into_iter()
-        .filter(|p| p.x.is_finite() && p.y.is_finite())
-        .take(MAX_VERTICES)
-        .map(|p| (p.x, p.y))
-        .collect())
+    let Some(raw) = a.object().get_dict("Vertices")? else {
+        return Ok((Vec::new(), false));
+    };
+    let pairs = if raw.is_array()? { raw.len()? / 2 } else { 0 };
+    let num = |k: usize| {
+        raw.get_array(k as i32)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_float().ok())
+            .filter(|v| v.is_finite())
+    };
+    let mut out = Vec::new();
+    for k in 0..pairs.min(MAX_VERTICES) {
+        if let (Some(x), Some(y)) = (num(2 * k), num(2 * k + 1)) {
+            let p = Point::new(x, y).transform(ctm);
+            out.push((p.x, p.y));
+        }
+    }
+    Ok((out, pairs > MAX_VERTICES))
+}
+
+/// Vértices para mostrar (até o teto).
+pub(crate) fn vertices(a: &PdfAnnotation, ctm: &mupdf::Matrix) -> Result<Vec<(f32, f32)>> {
+    Ok(read_vertices(a, ctm)?.0)
+}
+
+/// Vértices para editar: com mais que o teto a edição é recusada (regravar só os primeiros
+/// apagaria o resto, sem volta).
+fn editable_vertices(a: &PdfAnnotation, ctm: &mupdf::Matrix) -> Result<Vec<(f32, f32)>> {
+    match read_vertices(a, ctm)? {
+        (_, true) => Err(crate::error::refused(
+            "polígono com mais de 1000 vértices: só dá para excluir ou mudar o estilo",
+        )),
+        (points, false) => Ok(points),
+    }
 }
 
 /// Anotação agrupada a outra (/IRT com /RT /Group): o id da principal.
@@ -347,7 +378,7 @@ pub(crate) fn shape_of(doc: &PdfDocument, page: i32, id: i32) -> Result<Shape> {
         let (p, q) = a.line()?;
         return Ok(Shape::Line(((p.x, p.y), (q.x, q.y))));
     }
-    let points = vertices(&a)?;
+    let points = editable_vertices(&a, &page_ref.ctm()?)?;
     let (rect, ink) = geometry(&a)?;
     Ok(if points.is_empty() {
         Shape::Box(rect, ink)
@@ -358,9 +389,6 @@ pub(crate) fn shape_of(doc: &PdfDocument, page: i32, id: i32) -> Result<Shape> {
 
 /// Caixa do texto explicativo e a linha de chamada (ponta, joelho, ponto na caixa).
 pub(crate) type CalloutGeometry = (PdfRect, [(f32, f32); 3]);
-
-/// Teto de pontos de um desenho depois da borracha.
-const MAX_INK_POINTS: usize = 10_000;
 
 /// Distância de `p` ao segmento `a`–`b`.
 pub fn dist_to_segment(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
@@ -384,15 +412,14 @@ pub fn erase_strokes(
     let near = |p: (f32, f32)| path.iter().any(|&e| (e.0 - p.0).hypot(e.1 - p.1) < radius);
     let crosses =
         |a: (f32, f32), b: (f32, f32)| path.iter().any(|&e| dist_to_segment(e, a, b) < radius);
+    // apagar só tira pontos: o desenho nunca cresce, e todo traço longe da borracha fica
     let mut out = Vec::new();
-    let mut total = 0;
     for stroke in strokes {
         let mut current: Vec<(f32, f32)> = Vec::new();
         for &p in stroke {
             let gone = near(p);
             if gone || current.last().is_some_and(|&q| crosses(q, p)) {
                 if current.len() >= 2 {
-                    total += current.len();
                     out.push(std::mem::take(&mut current));
                 }
                 current.clear();
@@ -402,11 +429,7 @@ pub fn erase_strokes(
             }
         }
         if current.len() >= 2 {
-            total += current.len();
             out.push(current);
-        }
-        if total > MAX_INK_POINTS {
-            break;
         }
     }
     out
@@ -650,7 +673,7 @@ pub(crate) fn apply_edit(
             }
         }
         Edit::Vertices { points, .. } => {
-            let old = vertices(&a)?;
+            let old = editable_vertices(&a, &page_ref.ctm()?)?;
             a.set_vertices(points.iter().map(|&(x, y)| Point::new(x, y)))?;
             Edit::Vertices {
                 page,

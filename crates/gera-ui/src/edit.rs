@@ -1141,14 +1141,17 @@ impl EditState {
                         PdfRect::new(r.x0 - radius, r.y0 - radius, r.x1 + radius, r.y1 + radius);
                     path.iter().any(|&(x, y)| r.contains(x, y))
                 };
-                for a in annots
+                let ids: Vec<i32> = annots
                     .iter()
                     .filter(|a| a.page == p && a.kind == AnnotKind::Ink && reach(&a.rect))
-                {
+                    .map(|a| a.id)
+                    .collect();
+                if !ids.is_empty() {
+                    // uma passada é uma etapa do desfazer, mesmo sobre vários desenhos
                     self.ops.push(AnnotOp::Erase {
                         page: p,
-                        id: a.id,
-                        path: path.clone(),
+                        ids,
+                        path,
                         radius,
                     });
                 }

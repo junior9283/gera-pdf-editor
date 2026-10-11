@@ -540,3 +540,56 @@ fn cloud_intensity_changes_survives_save_and_undoes() {
         })
         .is_err());
 }
+
+fn many_vertices_pdf(dir: &std::path::Path, n: usize) -> std::path::PathBuf {
+    let many: String = (0..n).map(|k| format!("{} 100 ", k % 500)).collect();
+    let objs = vec![
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[4 0 R]>>".to_string(),
+        format!("<</Type/Annot/Subtype/PolyLine/Rect[0 0 500 200]/Vertices[{many}]>>"),
+    ];
+    let path = dir.join("many.pdf");
+    std::fs::write(&path, pdf_core::sample::pdf_from_objects(&objs)).unwrap();
+    path
+}
+
+#[test]
+fn polygons_past_the_vertex_cap_are_not_edited_and_keep_every_vertex() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut d = PdfDoc::open(&many_vertices_pdf(dir.path(), 5000), None).unwrap();
+    let id = d.annotations(0).unwrap()[0].id;
+    for op in [
+        AnnotOp::Move {
+            page: 0,
+            id,
+            dx: 5.0,
+            dy: 5.0,
+        },
+        AnnotOp::MoveVertex {
+            page: 0,
+            id,
+            index: 0,
+            to: (1.0, 1.0),
+        },
+    ] {
+        assert!(d.apply(op).is_err(), "cortaria os vértices além do teto");
+    }
+    let out = dir.path().join("out.pdf");
+    d.save(&out).unwrap();
+    let raw = std::fs::read(&out).unwrap();
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&raw).unwrap();
+    let page = doc.load_pdf_page(0).unwrap();
+    let a = page.annotations().next().unwrap();
+    assert_eq!(a.vertices().unwrap().len(), 5000);
+}
+
+#[test]
+fn huge_vertex_arrays_are_listed_quickly() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = PdfDoc::open(&many_vertices_pdf(dir.path(), 400_000), None).unwrap();
+    let t = std::time::Instant::now();
+    let a = d.annotations(0).unwrap();
+    assert_eq!(a[0].vertices.len(), 1000);
+    assert!(t.elapsed().as_millis() < 300, "{:?}", t.elapsed());
+}

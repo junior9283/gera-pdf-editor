@@ -748,10 +748,11 @@ pub enum AnnotOp {
         model: StateModel,
         state: String,
     },
-    /// Borracha: apaga do desenho os trechos a menos de `radius` do caminho `path`.
+    /// Borracha: apaga dos desenhos `ids` os trechos a menos de `radius` do caminho `path` (uma
+    /// passada, uma etapa do desfazer).
     Erase {
         page: i32,
-        id: i32,
+        ids: Vec<i32>,
         path: Vec<(f32, f32)>,
         radius: f32,
     },
