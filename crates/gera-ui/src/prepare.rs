@@ -52,6 +52,22 @@ pub struct PrepareState {
     pub props: Option<FieldPropsWindow>,
     /// Propriedades pedidas ao worker para este campo.
     pub props_for: Option<(i32, i32)>,
+    /// Números da ordem de tabulação sobre os campos (`Shift+N`).
+    pub show_order: bool,
+    /// Janela Ordem de cálculo: os nomes em edição (`Some(vazio)` = esperando o worker).
+    pub calc_order: Option<Vec<String>>,
+}
+
+/// A ordem `ids` com `id` uma posição acima (`up`) ou abaixo; `None` se não dá para mover.
+pub fn moved(ids: &[i32], id: i32, up: bool) -> Option<Vec<i32>> {
+    let k = ids.iter().position(|&x| x == id)?;
+    let other = if up { k.checked_sub(1)? } else { k + 1 };
+    if other >= ids.len() {
+        return None;
+    }
+    let mut out = ids.to_vec();
+    out.swap(k, other);
+    Some(out)
 }
 
 /// Cor dos contornos dos campos no modo Preparar.
@@ -231,7 +247,7 @@ fn paint_fields(
     map: &PageMap,
 ) {
     let fill = egui::Color32::from_rgba_unmultiplied(70, 110, 220, 28);
-    for f in fields {
+    for (k, f) in fields.iter().enumerate() {
         let dragging = st.drag.filter(|d| d.page == page && d.id == f.id);
         let rect = dragging.map_or(f.rect, |d| d.preview());
         let r = screen_rect(&rect, map);
@@ -249,6 +265,18 @@ fn paint_fields(
             egui::FontId::proportional(10.0),
             OUTLINE,
         );
+        if st.show_order {
+            // número da ordem de tabulação, como o Acrobat mostra com Shift+N
+            let at = r.right_top() + egui::vec2(-9.0, 9.0);
+            painter.circle_filled(at, 8.0, OUTLINE);
+            painter.text(
+                at,
+                egui::Align2::CENTER_CENTER,
+                (k + 1).to_string(),
+                egui::FontId::proportional(10.0),
+                egui::Color32::WHITE,
+            );
+        }
         if st.selected == Some((page, f.id)) {
             painter.rect_stroke(
                 r.expand(1.0),
@@ -266,6 +294,14 @@ fn paint_fields(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moving_a_field_in_the_tab_order() {
+        assert_eq!(moved(&[1, 2, 3], 3, true), Some(vec![1, 3, 2]));
+        assert_eq!(moved(&[1, 2, 3], 1, false), Some(vec![2, 1, 3]));
+        assert_eq!(moved(&[1, 2, 3], 1, true), None, "o primeiro não sobe");
+        assert_eq!(moved(&[1, 2, 3], 9, true), None);
+    }
 
     #[test]
     fn a_new_field_is_selected_when_the_list_arrives() {

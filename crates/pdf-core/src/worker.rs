@@ -164,6 +164,8 @@ pub enum Request {
         page: i32,
         id: i32,
     },
+    /// Nomes dos campos na ordem de cálculo (responde `CalcOrder`).
+    CalcOrder,
     /// Imagens da página (Editar PDF).
     PageImages {
         page: i32,
@@ -445,6 +447,8 @@ pub enum Response {
         id: i32,
         props: Result<crate::FieldProps, String>,
     },
+    /// Nomes dos campos na ordem de cálculo (/CO).
+    CalcOrder(Vec<String>),
 }
 
 const NO_DOC: &str = "nenhum documento aberto";
@@ -733,6 +737,9 @@ impl State {
                     .with_doc(|d| d.field_props(page, id))
                     .map_err(|e| e.to_string()),
             }),
+            Request::CalcOrder => send(Response::CalcOrder(
+                self.with_doc(|d| d.calc_order_names()).unwrap_or_default(),
+            )),
             Request::Prepare(op) => self.edit(send, |d| d.prepare(op).map(|()| Changed::Fields)),
             Request::PageImages { page } => send(Response::PageImages {
                 page,
