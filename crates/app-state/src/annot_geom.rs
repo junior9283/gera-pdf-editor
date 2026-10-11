@@ -103,17 +103,8 @@ pub fn snap_45(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
     )
 }
 
-/// Distância de `p` ao segmento de `a` a `b`.
-pub fn dist_to_segment(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
-    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-    let len2 = dx * dx + dy * dy;
-    let t = if len2 == 0.0 {
-        0.0
-    } else {
-        (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len2).clamp(0.0, 1.0)
-    };
-    (p.0 - (a.0 + t * dx)).hypot(p.1 - (a.1 + t * dy))
-}
+/// Distância de `p` ao segmento de `a` a `b` (a mesma conta da borracha do pdf-core).
+pub use pdf_core::dist_to_segment;
 
 /// Ponta da linha sob `p` (a mais próxima, se as duas estiverem a menos de `size`).
 pub fn line_handle_at(a: (f32, f32), b: (f32, f32), p: (f32, f32), size: f32) -> Option<LineEnd> {

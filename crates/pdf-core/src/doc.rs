@@ -538,7 +538,7 @@ fn add_one(doc: &mut PdfDocument, page: &mut PdfPage, a: &NewAnnot) -> Result<Pd
             a.set_default_appearance("Helv", *size, Some(rgb(*color)))?;
             a.set_border_width(1.0)?;
             let ctm = page.ctm()?;
-            annot_edit::set_callout(doc, &mut a, &ctm, *rect, [*tip, *knee, *knee])?;
+            annot_edit::set_callout(doc, &mut a, &ctm, *rect, *tip, *knee)?;
             a
         }
         NewAnnot::FileAttachment {
@@ -547,29 +547,23 @@ fn add_one(doc: &mut PdfDocument, page: &mut PdfPage, a: &NewAnnot) -> Result<Pd
             description,
             ..
         } => {
-            let len = std::fs::metadata(path)?.len();
-            if len > crate::attachments::MAX_ATTACHMENT_BYTES {
-                return Err(PdfError::InvalidAnnotation(
-                    "o arquivo passa de 100 MB".into(),
-                ));
-            }
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .filter(|n| !n.is_empty())
-                .ok_or_else(|| PdfError::InvalidAnnotation("arquivo sem nome".into()))?;
-            let bytes = std::fs::read(path)?;
+            let (name, len) = crate::attachments::attachment_file(path)?;
+            // lido direto para o buffer do MuPDF (sem cópia intermediária do arquivo inteiro)
+            let mut buf = mupdf::Buffer::with_capacity(len as usize);
+            std::io::copy(
+                &mut std::io::Read::take(std::fs::File::open(path)?, len),
+                &mut buf,
+            )?;
             // o arquivo vai no comentário (/FS), não na lista de anexos do documento
             let mut params = doc.new_dict()?;
             params.dict_put(
                 "Size",
-                PdfObject::new_int(bytes.len().min(i32::MAX as usize) as i32)?,
+                PdfObject::new_int(buf.len().min(i32::MAX as usize) as i32)?,
             )?;
             let mut ef_dict = doc.new_dict()?;
             ef_dict.dict_put("Type", PdfObject::new_name("EmbeddedFile")?)?;
             ef_dict.dict_put("Params", params)?;
-            let stream =
-                doc.add_stream(&mupdf::Buffer::from_bytes(&bytes)?, Some(&ef_dict), false)?;
+            let stream = doc.add_stream(&buf, Some(&ef_dict), false)?;
             let mut ef = doc.new_dict()?;
             ef.dict_put("F", stream.clone())?;
             ef.dict_put("UF", stream)?;
@@ -584,7 +578,7 @@ fn add_one(doc: &mut PdfDocument, page: &mut PdfPage, a: &NewAnnot) -> Result<Pd
             a.object().dict_put("FS", fs)?;
             a.set_icon_name("Paperclip")?;
             a.set_contents(description)?;
-            a.set_color(rgb([0.0, 0.0, 1.0]))?;
+            a.set_color(rgb(TEXT_EDIT_BLUE))?;
             a
         }
         NewAnnot::ReplaceText { .. } => {
@@ -793,7 +787,10 @@ pub(crate) fn annot_info(annot: &PdfAnnotation, page: i32, ctm: &Matrix) -> Resu
         AnnotKind::TextBox if annot_edit::is_callout(annot)? => AnnotKind::Callout,
         k => k,
     };
-    let callout = annot_edit::callout(annot, ctm)?;
+    let callout = match kind {
+        AnnotKind::Callout => annot_edit::callout(annot, ctm)?,
+        _ => None,
+    };
     let font = matches!(kind, AnnotKind::TextBox | AnnotKind::Callout)
         .then(|| annot.default_appearance())
         .transpose()?
@@ -1078,33 +1075,28 @@ impl PdfDoc {
 
     /// A mudança que leva a anotação `(page, id)` por (`dx`, `dy`).
     fn move_edit(&self, page: i32, id: i32, dx: f32, dy: f32) -> Result<Edit> {
-        if let Some((rect, line)) = annot_edit::callout_of(&self.inner, page, id)? {
-            return Ok(Edit::Callout {
+        use annot_edit::Shape;
+        let shift = |p: (f32, f32)| (p.0 + dx, p.1 + dy);
+        Ok(match annot_edit::shape_of(&self.inner, page, id)? {
+            Shape::Callout { rect, tip, knee } => Edit::Callout {
                 page,
                 id,
                 rect: rect.translated(dx, dy),
-                line: line.map(|(x, y)| (x + dx, y + dy)),
-            });
-        }
-        if let Some(points) = annot_edit::vertices_of(&self.inner, page, id)? {
-            return Ok(Edit::Vertices {
+                tip: shift(tip),
+                knee: shift(knee),
+            },
+            Shape::Vertices { points, .. } => Edit::Vertices {
                 page,
                 id,
-                points: points.into_iter().map(|(x, y)| (x + dx, y + dy)).collect(),
-            });
-        }
-        Ok(match annot_edit::line_of(&self.inner, page, id)? {
-            Some((a, b)) => {
-                let shift = |p: (f32, f32)| (p.0 + dx, p.1 + dy);
-                Edit::LinePoints {
-                    page,
-                    id,
-                    a: shift(a),
-                    b: shift(b),
-                }
-            }
-            None => {
-                let (rect, ink) = annot_edit::geometry_of(&self.inner, page, id)?;
+                points: points.into_iter().map(shift).collect(),
+            },
+            Shape::Line((a, b)) => Edit::LinePoints {
+                page,
+                id,
+                a: shift(a),
+                b: shift(b),
+            },
+            Shape::Box(rect, ink) => {
                 let (rect, ink) = annot_edit::moved(rect, ink, dx, dy);
                 Edit::Geometry {
                     page,
@@ -1268,17 +1260,6 @@ impl PdfDoc {
                     fit,
                 )
             }
-            AnnotOp::Resize { page, id, rect }
-                if annot_edit::vertices_of(&self.inner, page, id)?.is_some() =>
-            {
-                // os vértices acompanham a caixa (como os traços do desenho)
-                let (old, _) = annot_edit::geometry_of(&self.inner, page, id)?;
-                let points = annot_edit::vertices_of(&self.inner, page, id)?.unwrap_or_default();
-                let points = annot_edit::scaled(old, rect, Some(vec![points]))
-                    .and_then(|mut s| s.pop())
-                    .unwrap_or_default();
-                Edit::Vertices { page, id, points }
-            }
             AnnotOp::Erase {
                 page,
                 id,
@@ -1315,27 +1296,19 @@ impl PdfDoc {
                 knee,
                 tip,
             } => {
-                let (rect, [_, _, end]) = annot_edit::callout_of(&self.inner, page, id)?
-                    .ok_or_else(|| {
-                        PdfError::InvalidAnnotation("não é um texto explicativo".into())
-                    })?;
+                let annot_edit::Shape::Callout { rect, .. } =
+                    annot_edit::shape_of(&self.inner, page, id)?
+                else {
+                    return Err(PdfError::InvalidAnnotation(
+                        "não é um texto explicativo".into(),
+                    ));
+                };
                 Edit::Callout {
                     page,
                     id,
                     rect,
-                    line: [tip, knee, end],
-                }
-            }
-            AnnotOp::Resize { page, id, rect }
-                if annot_edit::callout_of(&self.inner, page, id)?.is_some() =>
-            {
-                // texto explicativo: só a caixa muda; a linha continua apontando para o mesmo lugar
-                let (_, line) = annot_edit::callout_of(&self.inner, page, id)?.unwrap_or_default();
-                Edit::Callout {
-                    page,
-                    id,
-                    rect,
-                    line,
+                    tip,
+                    knee,
                 }
             }
             AnnotOp::MoveVertex {
@@ -1344,8 +1317,11 @@ impl PdfDoc {
                 index,
                 to,
             } => {
-                let mut points = annot_edit::vertices_of(&self.inner, page, id)?
-                    .ok_or_else(|| PdfError::InvalidAnnotation("não tem vértices".into()))?;
+                let annot_edit::Shape::Vertices { mut points, .. } =
+                    annot_edit::shape_of(&self.inner, page, id)?
+                else {
+                    return Err(PdfError::InvalidAnnotation("não tem vértices".into()));
+                };
                 let slot = points
                     .get_mut(index)
                     .ok_or_else(|| PdfError::InvalidAnnotation("vértice inexistente".into()))?;
@@ -1353,13 +1329,35 @@ impl PdfDoc {
                 Edit::Vertices { page, id, points }
             }
             AnnotOp::Resize { page, id, rect } => {
-                let (old, ink) = annot_edit::geometry_of(&self.inner, page, id)?;
-                let ink = annot_edit::scaled(old, rect, ink);
-                Edit::Geometry {
-                    page,
-                    id,
-                    rect,
-                    ink,
+                match annot_edit::shape_of(&self.inner, page, id)? {
+                    // texto explicativo: só a caixa muda; a linha continua apontando para o mesmo lugar
+                    annot_edit::Shape::Callout { tip, knee, .. } => Edit::Callout {
+                        page,
+                        id,
+                        rect,
+                        tip,
+                        knee,
+                    },
+                    // os vértices acompanham a caixa (como os traços do desenho)
+                    annot_edit::Shape::Vertices { rect: old, points } => Edit::Vertices {
+                        page,
+                        id,
+                        points: annot_edit::scaled(old, rect, Some(vec![points]))
+                            .and_then(|mut s| s.pop())
+                            .unwrap_or_default(),
+                    },
+                    annot_edit::Shape::Box(old, ink) => Edit::Geometry {
+                        page,
+                        id,
+                        rect,
+                        ink: annot_edit::scaled(old, rect, ink),
+                    },
+                    annot_edit::Shape::Line(_) => Edit::Geometry {
+                        page,
+                        id,
+                        rect,
+                        ink: None,
+                    },
                 }
             }
             AnnotOp::Style {

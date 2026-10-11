@@ -475,12 +475,8 @@ fn sign_menu(ui: &mut egui::Ui, doc: &mut DocTab) {
 pub fn comment_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
     let mut out = None;
     ui.horizontal(|ui| {
-        for tool in [
-            Tool::Select,
-            Tool::Highlight,
-            Tool::Underline,
-            Tool::StrikeOut,
-        ] {
+        let markup = app_state::tools::ToolGroup::Markup.tools();
+        for &tool in std::iter::once(&Tool::Select).chain(markup) {
             ui.selectable_value(&mut doc.edit.tool, tool, tool.label());
         }
         tool_menu(
