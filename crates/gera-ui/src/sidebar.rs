@@ -1,34 +1,14 @@
-use crate::view::DocView;
 use app_state::prefs::LeftPanel;
-use app_state::transform;
-use pdf_core::{AnnotInfo, AnnotKind, PageSize, Rotation, Worker};
+use pdf_core::{AnnotInfo, AnnotKind};
 
 pub enum SidebarAction {
     None,
-    JumpToPage(usize),
     /// Seleciona a anotação e leva até ela.
     SelectAnnot {
         page: i32,
         id: i32,
         at: (f32, f32),
     },
-}
-
-const THUMB_WIDTH: f32 = 110.0;
-
-/// Tamanho da página como aparece na miniatura (com a rotação da vista).
-fn shown(size: &PageSize, rotation: Rotation) -> (f32, f32) {
-    transform::rotated((size.width.max(1.0), size.height.max(1.0)), rotation)
-}
-
-/// Escala para que a miniatura da página tenha `THUMB_WIDTH` pontos de largura.
-fn thumb_scale(size: &PageSize, rotation: Rotation) -> f32 {
-    THUMB_WIDTH / shown(size, rotation).0
-}
-
-fn thumb_height(size: &PageSize, rotation: Rotation) -> f32 {
-    let (w, h) = shown(size, rotation);
-    THUMB_WIDTH * h / w
 }
 
 /// Nome do tipo da anotação, como o Acrobat mostra (a linha com ponta é "Seta").
@@ -65,71 +45,17 @@ fn annot_label(a: &AnnotInfo) -> String {
     label
 }
 
-pub fn show(
-    ui: &mut egui::Ui,
-    panel: LeftPanel,
-    view: &mut DocView,
-    worker: &Worker,
-    annots: &[AnnotInfo],
-) -> SidebarAction {
+pub fn show(ui: &mut egui::Ui, panel: LeftPanel, annots: &[AnnotInfo]) -> SidebarAction {
     ui.strong(panel.label());
     ui.separator();
     match panel {
-        LeftPanel::Thumbnails => thumbnails(ui, view, worker),
-        // os marcadores têm painel próprio (bookmarks.rs)
-        LeftPanel::Outline => SidebarAction::None,
+        // miniaturas e marcadores têm painel próprio (thumbnails.rs, bookmarks.rs)
+        LeftPanel::Thumbnails | LeftPanel::Outline => SidebarAction::None,
         LeftPanel::Annotations => annotation_list(ui, annots),
         // desenhado pela aba (precisa das assinaturas validadas)
         // assinaturas e anexos têm painel próprio
         LeftPanel::Signatures | LeftPanel::Attachments => SidebarAction::None,
     }
-}
-
-/// Miniaturas só das linhas visíveis (`show_rows`); clicar leva à página.
-fn thumbnails(ui: &mut egui::Ui, view: &mut DocView, worker: &Worker) -> SidebarAction {
-    let Some(first) = view.sizes.first().copied() else {
-        return SidebarAction::None;
-    };
-    let rotation = view.rotation;
-    let thumb_h = thumb_height(&first, rotation);
-    let row_h = thumb_h + 22.0;
-    let mut action = SidebarAction::None;
-    egui::ScrollArea::vertical().auto_shrink(false).show_rows(
-        ui,
-        row_h,
-        view.sizes.len(),
-        |ui, rows| {
-            for i in rows {
-                let scale = thumb_scale(&view.sizes[i], rotation);
-                view.request_at(worker, i as i32, scale);
-                let (rect, response) =
-                    ui.allocate_exact_size(egui::vec2(THUMB_WIDTH, row_h), egui::Sense::click());
-                let img = egui::Rect::from_min_size(rect.min, egui::vec2(THUMB_WIDTH, thumb_h));
-                match view.texture_at(i as i32, scale) {
-                    Some(id) => {
-                        let uv =
-                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                        ui.painter().image(id, img, uv, egui::Color32::WHITE);
-                    }
-                    None => {
-                        ui.painter()
-                            .rect_filled(img, 0.0, egui::Color32::from_gray(200));
-                    }
-                }
-                ui.painter().text(
-                    egui::pos2(rect.center().x, img.bottom() + 10.0),
-                    egui::Align2::CENTER_CENTER,
-                    format!("{}", i + 1),
-                    egui::FontId::proportional(12.0),
-                    ui.visuals().text_color(),
-                );
-                if response.clicked() {
-                    action = SidebarAction::JumpToPage(i);
-                }
-            }
-        },
-    );
-    action
 }
 
 fn annotation_list(ui: &mut egui::Ui, annots: &[AnnotInfo]) -> SidebarAction {
@@ -161,28 +87,6 @@ mod tests {
     use pdf_core::PdfRect;
 
     #[test]
-    fn thumbnails_keep_the_page_aspect_ratio() {
-        let size = PageSize {
-            width: 100.0,
-            height: 200.0,
-        };
-        assert_eq!(thumb_height(&size, Rotation::R0), 2.0 * THUMB_WIDTH);
-        assert!((thumb_scale(&size, Rotation::R0) - THUMB_WIDTH / 100.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn degenerate_page_sizes_do_not_produce_non_finite_thumbnails() {
-        let zero = PageSize {
-            width: 0.0,
-            height: 0.0,
-        };
-        assert!(
-            thumb_height(&zero, Rotation::R0).is_finite()
-                && thumb_scale(&zero, Rotation::R0).is_finite()
-        );
-    }
-
-    #[test]
     fn labels_mention_kind_page_and_text() {
         let mut a = AnnotInfo {
             id: 1,
@@ -199,17 +103,5 @@ mod tests {
         a.kind = AnnotKind::Note;
         a.contents = "olá".into();
         assert_eq!(annot_label(&a), "Nota — p. 2: olá");
-    }
-
-    #[test]
-    fn thumbnails_follow_the_view_rotation() {
-        let size = PageSize {
-            width: 100.0,
-            height: 200.0,
-        };
-        // a 90° a página fica deitada: a miniatura também (e a escala usa o lado que vira largura)
-        assert_eq!(thumb_height(&size, Rotation::R90), THUMB_WIDTH / 2.0);
-        assert!((thumb_scale(&size, Rotation::R90) - THUMB_WIDTH / 200.0).abs() < 1e-6);
-        assert_eq!(thumb_height(&size, Rotation::R180), 2.0 * THUMB_WIDTH);
     }
 }

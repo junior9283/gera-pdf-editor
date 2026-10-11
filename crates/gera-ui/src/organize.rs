@@ -129,7 +129,12 @@ impl OrganizeState {
 }
 
 /// Menu das ações sobre a seleção (botão direito numa miniatura).
-fn page_menu(ui: &mut egui::Ui, st: &mut OrganizeState, total: usize, out: &mut Vec<OrgAction>) {
+pub(crate) fn page_menu(
+    ui: &mut egui::Ui,
+    st: &mut OrganizeState,
+    total: usize,
+    out: &mut Vec<OrgAction>,
+) {
     if ui.button("Girar à esquerda").clicked() {
         out.extend(st.rotate(-1));
     }
@@ -419,7 +424,12 @@ pub fn show(
 }
 
 /// Diálogos do modo Organizar.
-fn dialogs(ui: &mut egui::Ui, st: &mut OrganizeState, view: &DocView, out: &mut Vec<OrgAction>) {
+pub(crate) fn dialogs(
+    ui: &mut egui::Ui,
+    st: &mut OrganizeState,
+    view: &DocView,
+    out: &mut Vec<OrgAction>,
+) {
     let total = view.sizes.len();
     let Some(dialog) = st.dialog.as_mut() else {
         return;

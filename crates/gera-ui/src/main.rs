@@ -24,6 +24,7 @@ mod redact_tool;
 mod search;
 mod shell;
 mod sidebar;
+mod thumbnails;
 mod view;
 
 use std::path::PathBuf;

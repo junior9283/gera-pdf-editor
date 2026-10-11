@@ -181,6 +181,7 @@ impl GeraApp {
         self.switch_tab(|tabs| created = tabs.open(path.clone()).1);
         if created {
             let mut doc = DocTab::new(ctx, path.clone(), self.prefs.dark);
+            doc.thumbs.width = self.prefs.thumb_width;
             doc.set_author(self.prefs.author.clone());
             let key = path.to_string_lossy();
             doc.open_view = crate::doc_tab::OpenView {
@@ -359,6 +360,13 @@ impl GeraApp {
                         full_screen = Some(tab)
                     }
                     DocEvent::FullScreen => {}
+                    DocEvent::ThumbWidth(width) => {
+                        self.prefs.thumb_width = width;
+                        self.prefs_dirty = true;
+                        for doc in &mut self.docs {
+                            doc.thumbs.width = width;
+                        }
+                    }
                     DocEvent::Run(cmd) => to_run.push(cmd),
                     DocEvent::OpenAttachment(path) => attachments.push(path),
                     DocEvent::OpenLink(target) => {

@@ -97,6 +97,8 @@ pub struct Prefs {
     pub max_recents: usize,
     /// Última vista de cada arquivo (o mais recente no fim).
     pub last_views: Vec<(String, ViewEntry)>,
+    /// Largura das miniaturas de página (Ampliar/Reduzir miniaturas).
+    pub thumb_width: f32,
 }
 
 impl Default for Prefs {
@@ -115,6 +117,7 @@ impl Default for Prefs {
             restore_views: true,
             max_recents: 20,
             last_views: Vec::new(),
+            thumb_width: 110.0,
         }
     }
 }
@@ -168,6 +171,11 @@ impl Prefs {
             .take(MAX_SITES)
             .collect();
         self.max_recents = self.max_recents.clamp(1, MAX_RECENT_SETTING);
+        self.thumb_width = if self.thumb_width.is_finite() {
+            self.thumb_width.clamp(80.0, 320.0)
+        } else {
+            defaults.thumb_width
+        };
         if let DefaultZoom::Level(z) = self.default_zoom {
             if !(z.is_finite() && z > 0.0) {
                 self.default_zoom = DefaultZoom::Auto;

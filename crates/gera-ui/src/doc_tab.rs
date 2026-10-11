@@ -103,6 +103,8 @@ pub enum DocEvent {
     FullScreen,
     /// Anexo PDF gravado na pasta privada: abrir numa aba, sem lugar escolhido (Salvar pergunta).
     OpenAttachment(PathBuf),
+    /// Nova largura das miniaturas (preferências e todas as abas).
+    ThumbWidth(f32),
     /// Um comando da casca escolhido na página (menu de contexto: Imprimir, Propriedades).
     Run(Command),
 }
@@ -150,6 +152,8 @@ pub struct DocTab {
     pub(crate) labels: Vec<String>,
     /// Painel Marcadores (seleção, renomeação, arraste, foco do teclado).
     pub(crate) bookmarks: crate::bookmarks::BookmarksPanel,
+    /// Painel Miniaturas (seleção, arraste, menu e diálogos de páginas).
+    pub(crate) thumbs: crate::thumbnails::ThumbnailsPanel,
     /// Painel Anexos (seleção e descrição em edição).
     attachments_panel: crate::attachments_panel::AttachmentsPanel,
     /// Aviso antes de abrir um anexo (o anexo e quando o aviso apareceu).
@@ -331,6 +335,7 @@ impl DocTab {
             attach_warning: None,
             attachments: Vec::new(),
             destinations: Vec::new(),
+            thumbs: Default::default(),
             layers: Vec::new(),
             labels: Vec::new(),
             display_title: None,
@@ -470,6 +475,10 @@ impl DocTab {
             if cmd == DocCommand::Cut {
                 self.edit.delete_selected();
             }
+            return;
+        }
+        // Excluir com um painel focado age sobre o painel (a tecla Delete chega como comando)
+        if cmd == DocCommand::Delete && self.organize.is_none() && self.panel_delete() {
             return;
         }
         let page = self.last.current_page;
@@ -1171,8 +1180,11 @@ impl DocTab {
         let page = self.last.current_page.min(sizes.len().saturating_sub(1));
         // com páginas a mais ou a menos, a seleção antiga marcaria outras páginas
         let same_count = self.view.as_ref().map(|v| v.sizes.len()) == Some(sizes.len());
-        if let Some(org) = self.organize.as_mut().filter(|_| !same_count) {
-            org.sel = Default::default();
+        if !same_count {
+            if let Some(org) = self.organize.as_mut() {
+                org.sel = Default::default();
+            }
+            self.thumbs.org.sel = Default::default();
         }
         if let Some(view) = self.view.as_mut() {
             view.set_pages(sizes);
@@ -1584,6 +1596,12 @@ impl DocTab {
             } else if !self.form.escape() {
                 self.edit.escape();
             }
+        }
+        if !typing && self.thumbs.focused {
+            // painel Miniaturas focado: setas, Início/Fim e Delete são dele
+            let total = self.view.as_ref().map_or(0, |v| v.sizes.len() as i32);
+            let actions = self.thumbs.keys(ctx, total);
+            self.thumb_actions(ctx, actions);
         }
         if !typing && self.bookmarks.focused {
             // painel Marcadores focado: setas, Enter, Delete e F2 são dele
@@ -2362,24 +2380,71 @@ impl DocTab {
             }
             return;
         }
-        let Some(view) = self.view.as_mut() else {
+        if panel == LeftPanel::Thumbnails {
+            let Some(view) = self.view.as_mut() else {
+                return;
+            };
+            let can_edit = self.security.permissions.modify;
+            let actions = ui
+                .push_id(self.id, |ui| {
+                    ui.strong(panel.label());
+                    self.thumbs
+                        .show(ui, view, &self.worker, &self.labels, can_edit)
+                })
+                .inner;
+            self.thumb_actions(ui.ctx(), actions);
             return;
-        };
+        }
         // cada aba com seu id: as listas guardam a própria rolagem
         let action = ui
-            .push_id(self.id, |ui| {
-                sidebar::show(ui, panel, view, &self.worker, &self.annots)
-            })
+            .push_id(self.id, |ui| sidebar::show(ui, panel, &self.annots))
             .inner;
         let target = match action {
             SidebarAction::None => return,
-            SidebarAction::JumpToPage(page) => (page as i32, None),
             SidebarAction::SelectAnnot { page, id, at } => {
                 self.edit.selected = Some((page, id));
                 (page, Some(at))
             }
         };
         self.jump(target.0, target.1);
+    }
+
+    /// Excluir no painel focado (Miniaturas ou Marcadores); devolve se algum estava focado.
+    fn panel_delete(&mut self) -> bool {
+        if self.thumbs.focused {
+            if !self.security.permissions.modify {
+                self.deny("excluir páginas");
+            } else {
+                let total = self.view.as_ref().map_or(0, |v| v.sizes.len() as i32);
+                self.thumbs.ask_delete(total);
+            }
+            return true;
+        }
+        if self.bookmarks.focused {
+            if let Some(id) = self.bookmarks.selected {
+                self.outline_op(pdf_core::OutlineOp::Delete { id });
+            }
+            return true;
+        }
+        false
+    }
+
+    fn thumb_actions(&mut self, ctx: &egui::Context, actions: Vec<crate::thumbnails::ThumbAction>) {
+        use crate::thumbnails::ThumbAction;
+        for action in actions {
+            match action {
+                ThumbAction::Go(page) => self.jump(page, None),
+                ThumbAction::Org(a) => self.org_action(ctx, a),
+                ThumbAction::Print(pages) => {
+                    self.open_print_dialog(ctx);
+                    if let Some(d) = self.print_dialog.as_mut() {
+                        d.options.pages = app_state::print::Pages::Ranges;
+                        d.options.ranges = crate::thumbnails::ranges_text(&pages);
+                    }
+                }
+                ThumbAction::Zoom(width) => self.events.push(DocEvent::ThumbWidth(width)),
+            }
+        }
     }
 
     fn attachment_action(
@@ -2791,7 +2856,7 @@ impl DocTab {
 
     /// A grade do Organizar páginas e as ações dela.
     fn organize_view(&mut self, ui: &mut egui::Ui) {
-        use crate::organize::{show, OrgAction};
+        use crate::organize::show;
         let (Some(view), Some(org)) = (self.view.as_mut(), self.organize.as_mut()) else {
             return;
         };
@@ -2799,39 +2864,57 @@ impl DocTab {
         let history = (self.history.can_undo, self.history.can_redo);
         let actions = show(ui, org, view, &self.worker, history);
         for action in actions {
-            match action {
-                OrgAction::Op(op) => self.worker.send(Request::Pages(op)),
-                OrgAction::Undo => self.worker.send(Request::Undo),
-                OrgAction::Redo => self.worker.send(Request::Redo),
-                OrgAction::Close => self.organize = None,
-                OrgAction::Split => self.open_split(),
-                OrgAction::PickFile(purpose) if !self.files.busy() => {
-                    self.picking = Some(PickFor::File(purpose));
-                    self.files.open(ui.ctx());
-                }
-                OrgAction::PickFile(_) => {}
-                OrgAction::Extract { .. } if !self.security.permissions.copy => {
-                    self.deny("extrair páginas")
-                }
-                OrgAction::Extract {
+            self.org_action(ui.ctx(), action);
+        }
+    }
+
+    /// Executa uma ação do Organizar páginas (da grade ou do menu das miniaturas).
+    fn org_action(&mut self, ctx: &egui::Context, action: crate::organize::OrgAction) {
+        use crate::organize::OrgAction;
+        match action {
+            OrgAction::Op(_) if !self.security.permissions.modify => {
+                self.deny("alterar as páginas")
+            }
+            OrgAction::Op(op) => self.worker.send(Request::Pages(op)),
+            OrgAction::Undo => self.worker.send(Request::Undo),
+            OrgAction::Redo => self.worker.send(Request::Redo),
+            OrgAction::Close => self.organize = None,
+            OrgAction::Split => self.open_split(),
+            OrgAction::PickFile(purpose) if !self.files.busy() => {
+                self.picking = Some(PickFor::File(purpose));
+                self.files.open(ctx);
+            }
+            OrgAction::PickFile(_) => {}
+            OrgAction::Extract { .. } if !self.security.permissions.copy => {
+                self.deny("extrair páginas")
+            }
+            OrgAction::Extract {
+                pages,
+                separate,
+                delete_after,
+            } => {
+                let stem = self
+                    .path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let suggested = self.path.with_file_name(format!("{stem} (páginas).pdf"));
+                self.picking = Some(PickFor::Extract {
                     pages,
                     separate,
                     delete_after,
-                } => {
-                    let stem = self
-                        .path
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let suggested = self.path.with_file_name(format!("{stem} (páginas).pdf"));
-                    self.picking = Some(PickFor::Extract {
-                        pages,
-                        separate,
-                        delete_after,
-                    });
-                    self.files.save_as(ui.ctx(), suggested.clone(), suggested);
-                }
+                });
+                self.files.save_as(ctx, suggested.clone(), suggested);
             }
+        }
+    }
+
+    /// Seleção e diálogos de páginas em uso: os da grade do Organizar, se aberta, ou os das
+    /// miniaturas.
+    fn pages_state(&mut self) -> &mut crate::organize::OrganizeState {
+        match self.organize.as_mut() {
+            Some(org) => org,
+            None => &mut self.thumbs.org,
         }
     }
 
@@ -2862,9 +2945,7 @@ impl DocTab {
                         password: String::new(),
                     },
                 };
-                if let Some(org) = self.organize.as_mut() {
-                    org.dialog = Some(dialog);
-                }
+                self.pages_state().dialog = Some(dialog);
             }
             (
                 Some(PickFor::Extract {
@@ -3198,6 +3279,7 @@ impl DocTab {
         // clique nas páginas: o teclado volta para o documento
         if ui.input(|i| i.pointer.any_pressed()) && ui.rect_contains_pointer(ui.max_rect()) {
             self.bookmarks.focused = false;
+            self.thumbs.focused = false;
         }
         if let Some(action) = screen_action {
             self.screen_action(action);
@@ -3673,6 +3755,17 @@ mod tests {
         tab.outline_op(pdf_core::OutlineOp::SetOpen { id: 4, open: true });
         assert_eq!(tab.bookmarks_open.get(&4), Some(&true), "só na tela");
         assert!(!tab.bookmarks_editable(), "assinado: o painel não edita");
+    }
+
+    #[test]
+    fn delete_with_the_thumbnails_focused_asks_about_the_pages() {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_pages(3);
+        tab.security.permissions.modify = true;
+        tab.thumbs.focused = true;
+        tab.thumbs.org.sel.click(1);
+        tab.run(&ctx, DocCommand::Delete);
+        assert_eq!(tab.thumbs.confirming(), Some(&[1][..]));
     }
 
     #[test]
