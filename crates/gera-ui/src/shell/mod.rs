@@ -12,6 +12,7 @@ pub mod home;
 pub mod identity;
 pub mod menus;
 pub mod panels;
+pub mod preferences;
 pub mod print_dialog;
 pub mod properties;
 pub mod protect_dialog;

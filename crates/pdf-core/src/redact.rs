@@ -474,8 +474,8 @@ impl PdfDoc {
             RedactQuery::Phrase(phrase) if phrase.trim().is_empty() => {}
             RedactQuery::Phrase(phrase) => {
                 // pelo mesmo caminho dos padrões: sem o limite de achados por página da busca
-                let re = Regex::new(&format!("(?i){}", regex::escape(phrase.trim())))
-                    .map_err(|e| crate::error::refused(e.to_string()))?;
+                let re = crate::search::regex_for(phrase, &crate::SearchOptions::default())
+                    .ok_or_else(|| crate::error::refused("frase inválida".to_string()))?;
                 for page in 0..self.page_count()? {
                     hits.extend(self.find_patterns(page, &[(None, re.clone())])?);
                 }
@@ -495,7 +495,7 @@ impl PdfDoc {
     }
 
     /// Padrões numa página: cada linha do texto estruturado, com a caixa de cada letra.
-    fn find_patterns(
+    pub(crate) fn find_patterns(
         &self,
         page: i32,
         regexes: &[(Option<RedactPattern>, Regex)],

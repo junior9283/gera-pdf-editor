@@ -4,7 +4,7 @@ use crate::zoom::{quantize, Fit};
 use std::collections::VecDeque;
 
 /// Uma vista: página, posição dentro dela (pontos, do topo) e ampliação.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ViewEntry {
     pub page: usize,
     pub y: f32,

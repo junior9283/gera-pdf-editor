@@ -13,6 +13,8 @@ pub struct MenuState<'a> {
     pub doc_mode: Option<ViewMode>,
     /// "Mostrar capa sozinha" ligado no documento ativo.
     pub doc_cover: bool,
+    /// O documento ativo tem alterações não salvas (Reverter).
+    pub doc_dirty: bool,
     pub dark: bool,
     /// Painel esquerdo aberto e painel de ferramentas visível.
     pub left: Option<LeftPanel>,
@@ -23,7 +25,7 @@ pub struct MenuState<'a> {
     pub active: usize,
 }
 
-fn item(ui: &mut egui::Ui, out: &mut Option<Command>, cmd: Command, enabled: bool) {
+pub(crate) fn item(ui: &mut egui::Ui, out: &mut Option<Command>, cmd: Command, enabled: bool) {
     let mut button = egui::Button::new(cmd.label());
     if let Some(sc) = shortcut_of(&cmd) {
         button = button.shortcut_text(shortcut_text(&sc));
@@ -33,7 +35,13 @@ fn item(ui: &mut egui::Ui, out: &mut Option<Command>, cmd: Command, enabled: boo
     }
 }
 
-fn check(ui: &mut egui::Ui, out: &mut Option<Command>, cmd: Command, checked: bool, enabled: bool) {
+pub(crate) fn check(
+    ui: &mut egui::Ui,
+    out: &mut Option<Command>,
+    cmd: Command,
+    checked: bool,
+    enabled: bool,
+) {
     if ui
         .add_enabled(enabled, egui::Button::selectable(checked, cmd.label()))
         .clicked()
@@ -66,7 +74,11 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
             ui.separator();
             item(ui, &mut out, doc(DocCommand::Save), has_doc);
             item(ui, &mut out, Command::SaveAs, has_doc);
+            item(ui, &mut out, doc(DocCommand::Revert), s.doc_dirty);
+            ui.separator();
+            item(ui, &mut out, Command::Tool(tools_catalog::CREATE), true);
             item(ui, &mut out, Command::Tool(tools_catalog::EXPORT), has_doc);
+            item(ui, &mut out, Command::Tool(tools_catalog::PROTECT), has_doc);
             ui.separator();
             item(ui, &mut out, Command::Properties, has_doc);
             item(ui, &mut out, Command::Print, has_doc);
@@ -78,16 +90,16 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
             item(ui, &mut out, doc(DocCommand::Undo), has_doc);
             item(ui, &mut out, doc(DocCommand::Redo), has_doc);
             ui.separator();
+            item(ui, &mut out, doc(DocCommand::Cut), has_doc);
             item(ui, &mut out, doc(DocCommand::Copy), has_doc);
+            item(ui, &mut out, Command::Paste(None), has_doc);
             item(ui, &mut out, doc(DocCommand::SelectAll), has_doc);
+            item(ui, &mut out, doc(DocCommand::DeselectAll), has_doc);
             item(ui, &mut out, doc(DocCommand::Delete), has_doc);
             ui.separator();
             item(ui, &mut out, doc(DocCommand::Find), has_doc);
             ui.separator();
-            ui.menu_button("Preferências", |ui| {
-                check(ui, &mut out, Command::ToggleDark, s.dark, true);
-                item(ui, &mut out, Command::Identity, true);
-            });
+            item(ui, &mut out, Command::Preferences, true);
         });
         ui.menu_button("Exibir", |ui| {
             ui.menu_button("Zoom", |ui| {
@@ -194,6 +206,7 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
             item(ui, &mut out, Command::CloseAll, s.tabs.len() > FIXED);
         });
         ui.menu_button("Ajuda", |ui| {
+            item(ui, &mut out, Command::Help, true);
             item(ui, &mut out, Command::Shortcuts, true);
             item(ui, &mut out, Command::About, true);
         });

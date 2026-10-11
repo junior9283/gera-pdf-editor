@@ -80,7 +80,7 @@ fn private_dir(base: &Path, name: &str) -> std::io::Result<PathBuf> {
 
 /// Pasta das cópias de impressão (saem sem senha): `$XDG_RUNTIME_DIR/gera-pdf-editor`, ou uma
 /// pasta com o uid no nome dentro do temporário do sistema, que é compartilhado entre usuários.
-fn spool_dir() -> std::io::Result<PathBuf> {
+pub(crate) fn spool_dir() -> std::io::Result<PathBuf> {
     match std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
         Some(runtime) => private_dir(Path::new(&runtime), "gera-pdf-editor"),
         None => {
@@ -106,7 +106,11 @@ fn sweep_stale(dir: &Path) {
         let name = entry.file_name();
         let pid = name
             .to_str()
-            .and_then(|n| n.strip_prefix("imprimir-"))
+            // cópias de impressão e imagens coladas (clipboard.rs)
+            .and_then(|n| {
+                n.strip_prefix("imprimir-")
+                    .or_else(|| n.strip_prefix("gera-colar-"))
+            })
             .and_then(|n| n.split('-').next())
             .and_then(|p| p.parse::<u32>().ok());
         if let Some(pid) = pid {

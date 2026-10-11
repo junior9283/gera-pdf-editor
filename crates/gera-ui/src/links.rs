@@ -29,7 +29,7 @@ fn shortened(text: &str, max: usize) -> String {
 
 /// Texto vindo do PDF pronto para a tela: controles, quebras e marcas de direção (que invertem ou
 /// escondem partes do endereço) viram "�".
-fn safe_display(text: &str) -> String {
+pub(crate) fn safe_display(text: &str) -> String {
     text.chars()
         .map(|c| {
             let bidi = matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}');

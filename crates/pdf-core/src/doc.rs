@@ -873,6 +873,15 @@ impl PdfDoc {
         self.after_protection_saved()
     }
 
+    /// Arquivo → Reverter: também a proteção pedida e as fontes embutidas desde o último Salvar
+    /// deixam de valer (o Salvar seguinte grava o arquivo como ele está no disco).
+    pub fn revert(&mut self) -> Result<()> {
+        self.discard_changes()?;
+        self.pending_protection = None;
+        self.added_fonts.clear();
+        Ok(())
+    }
+
     /// Volta ao arquivo do disco (com a mesma senha), sem as edições em memória.
     pub(crate) fn discard_changes(&mut self) -> Result<()> {
         self.inner = open_authenticated(&self.path, self.password.as_deref())?;
@@ -926,6 +935,100 @@ impl PdfDoc {
         Ok(Some((rect, new)))
     }
 
+    /// A mudança que leva a anotação `(page, id)` por (`dx`, `dy`).
+    fn move_edit(&self, page: i32, id: i32, dx: f32, dy: f32) -> Result<Edit> {
+        Ok(match annot_edit::line_of(&self.inner, page, id)? {
+            Some((a, b)) => {
+                let shift = |p: (f32, f32)| (p.0 + dx, p.1 + dy);
+                Edit::LinePoints {
+                    page,
+                    id,
+                    a: shift(a),
+                    b: shift(b),
+                }
+            }
+            None => {
+                let (rect, ink) = annot_edit::geometry_of(&self.inner, page, id)?;
+                let (rect, ink) = annot_edit::moved(rect, ink, dx, dy);
+                Edit::Geometry {
+                    page,
+                    id,
+                    rect,
+                    ink,
+                }
+            }
+        })
+    }
+
+    /// Colar: cópia da anotação `(page, id)` em `to_page`, deslocada (`dx`, `dy`, coordenadas do
+    /// MuPDF). A aparência é copiada (mexer numa não muda a outra). Uma etapa do desfazer; devolve
+    /// o id da cópia.
+    pub fn duplicate_annot(
+        &mut self,
+        page: i32,
+        id: i32,
+        to_page: i32,
+        dx: f32,
+        dy: f32,
+    ) -> Result<i32> {
+        self.check_page(to_page)?;
+        // o original só é lido aqui: a página dele fecha antes de a de destino ser relida (o MuPDF
+        // guarda a lista de anotações de uma página aberta)
+        let mut copy = {
+            let (_page, src) = annot_edit::find(&self.inner, page, id)?;
+            let dict = src
+                .object()
+                .resolve()?
+                .ok_or_else(|| PdfError::InvalidAnnotation("anotação sem dicionário".into()))?;
+            let mut budget = MAX_COPIED_OBJECTS;
+            deep_copy(&self.inner, &dict, 0, &mut budget)?
+        };
+        // ligações com o original e a página de origem saem; o MuPDF dá um nome novo. A chave da
+        // estrutura (PDF marcado) também: duas anotações não podem ter a mesma.
+        for key in ["P", "Popup", "IRT", "NM", "Parent", "StructParent"] {
+            copy.dict_delete(key)?;
+        }
+        // a cópia é sempre visível: o original pode estar escondido (recortado, apagado até salvar)
+        // ou ser uma resposta (invisível na página), e a cópia deixa de ser resposta
+        if let Some(flags) = copy.get_dict("F")?.and_then(|f| f.as_int().ok()) {
+            const HIDDEN: i32 = 2;
+            const NO_VIEW: i32 = 32;
+            copy.dict_put("F", PdfObject::new_int(flags & !(HIDDEN | NO_VIEW))?)?;
+        }
+        if let Some(ap) = copy.get_dict("AP")? {
+            let own = own_appearance(&mut self.inner, &ap)?;
+            copy.dict_put("AP", own)?;
+        }
+        let target = self.inner.load_pdf_page(to_page)?;
+        let mut page_obj = target.object();
+        copy.dict_put("P", page_obj.clone())?;
+        let new_ref = self.inner.add_object(&copy)?;
+        let new_id = new_ref.as_indirect()?;
+        match page_obj.get_dict("Annots")? {
+            Some(mut annots) if annots.is_array()? => annots.array_push(new_ref)?,
+            _ => {
+                let mut annots = self.inner.new_array()?;
+                annots.array_push(new_ref)?;
+                page_obj.dict_put("Annots", annots)?;
+            }
+        }
+        drop(target); // a página relida vê a anotação nova
+        let mut undo = vec![Edit::Visibility {
+            page: to_page,
+            id: new_id,
+            hidden: true,
+        }];
+        if dx != 0.0 || dy != 0.0 {
+            let shift = self.move_edit(to_page, new_id, dx, dy)?;
+            undo.insert(
+                0,
+                annot_edit::apply_edit(&self.inner, &mut self.history.hidden, shift)?,
+            );
+        }
+        self.history.record(Edit::Batch(undo));
+        Ok(new_id)
+    }
+
     /// Aplica uma operação do usuário no documento em memória; devolve as páginas mudadas.
     pub fn apply(&mut self, op: AnnotOp) -> Result<Vec<i32>> {
         let edit = match op {
@@ -948,25 +1051,16 @@ impl PdfDoc {
                 });
                 return Ok(vec![page]);
             }
-            AnnotOp::Move { page, id, dx, dy } => {
-                if let Some((a, b)) = annot_edit::line_of(&self.inner, page, id)? {
-                    let shift = |p: (f32, f32)| (p.0 + dx, p.1 + dy);
-                    Edit::LinePoints {
-                        page,
-                        id,
-                        a: shift(a),
-                        b: shift(b),
-                    }
-                } else {
-                    let (rect, ink) = annot_edit::geometry_of(&self.inner, page, id)?;
-                    let (rect, ink) = annot_edit::moved(rect, ink, dx, dy);
-                    Edit::Geometry {
-                        page,
-                        id,
-                        rect,
-                        ink,
-                    }
-                }
+            AnnotOp::Move { page, id, dx, dy } => self.move_edit(page, id, dx, dy)?,
+            AnnotOp::Duplicate {
+                page,
+                id,
+                to_page,
+                dx,
+                dy,
+            } => {
+                self.duplicate_annot(page, id, to_page, dx, dy)?;
+                return Ok(vec![to_page]);
             }
             AnnotOp::MoveLinePoint { page, id, end, to } => {
                 let (a, b) = annot_edit::line_of(&self.inner, page, id)?
@@ -1291,6 +1385,104 @@ impl PdfDoc {
             .and_then(|v| v.as_bool().ok())
             .unwrap_or(false)
     }
+}
+
+/// Teto de objetos copiados ao colar um comentário (um comum usa algumas dezenas).
+const MAX_COPIED_OBJECTS: usize = 2000;
+
+/// Chaves cujo valor fica compartilhado na cópia: apontam para outras partes do documento
+/// (página, árvore, ação, destino), que a edição da anotação nunca altera.
+const SHARED_KEYS: [&str; 7] = ["P", "Parent", "Popup", "IRT", "A", "AA", "Dest"];
+
+/// Cópia de um objeto com os dicionários e arrays (diretos ou indiretos) também copiados: uma
+/// cópia rasa compartilharia, por exemplo, a borda `/BS`, e mudar a cópia mudaria o original.
+/// Streams continuam compartilhados (a aparência é trocada à parte, em `own_appearance`).
+fn deep_copy(
+    doc: &PdfDocument,
+    obj: &PdfObject,
+    depth: u32,
+    budget: &mut usize,
+) -> Result<PdfObject> {
+    if depth > 16 {
+        return Ok(obj.clone());
+    }
+    // objetos compartilhados em vários níveis multiplicariam a cópia (PDF malicioso)
+    *budget = budget
+        .checked_sub(1)
+        .ok_or_else(|| crate::error::refused("comentário complexo demais para copiar"))?;
+    if obj.is_indirect()? {
+        return match obj.resolve()? {
+            Some(r) if !r.is_stream()? && (r.is_dict()? || r.is_array()?) => {
+                deep_copy(doc, &r, depth + 1, budget)
+            }
+            _ => Ok(obj.clone()),
+        };
+    }
+    if obj.is_dict()? {
+        let mut out = doc.new_dict()?;
+        for i in 0..obj.dict_len()? as i32 {
+            if let (Some(k), Some(v)) = (obj.get_dict_key(i)?, obj.get_dict_val(i)?) {
+                let shared = k
+                    .as_name()
+                    .is_ok_and(|n| SHARED_KEYS.iter().any(|s| s.as_bytes() == n.as_slice()));
+                let v = if shared {
+                    v
+                } else {
+                    deep_copy(doc, &v, depth + 1, budget)?
+                };
+                out.dict_put(k, v)?;
+            }
+        }
+        return Ok(out);
+    }
+    if obj.is_array()? {
+        let mut out = doc.new_array()?;
+        for i in 0..obj.len()? as i32 {
+            if let Some(v) = obj.get_array(i)? {
+                out.array_push(deep_copy(doc, &v, depth + 1, budget)?)?;
+            }
+        }
+        return Ok(out);
+    }
+    Ok(obj.clone())
+}
+
+/// `/AP` com streams próprios em todos os níveis (`/N`, `/R`, `/D` e os estados dentro deles):
+/// ao mexer na cópia, o MuPDF regrava a aparência dela, nunca a do original.
+fn own_appearance(doc: &mut PdfDocument, ap: &PdfObject) -> Result<PdfObject> {
+    let mut out = doc.new_dict()?;
+    for i in 0..ap.dict_len()? as i32 {
+        let (Some(k), Some(v)) = (ap.get_dict_key(i)?, ap.get_dict_val(i)?) else {
+            continue;
+        };
+        let v = if v.is_stream()? {
+            own_stream(doc, &v)?
+        } else if v.is_dict()? {
+            // estados (ex.: /On e /Off)
+            let mut states = doc.new_dict()?;
+            for j in 0..v.dict_len()? as i32 {
+                if let (Some(sk), Some(sv)) = (v.get_dict_key(j)?, v.get_dict_val(j)?) {
+                    let sv = if sv.is_stream()? {
+                        own_stream(doc, &sv)?
+                    } else {
+                        sv
+                    };
+                    states.dict_put(sk, sv)?;
+                }
+            }
+            states
+        } else {
+            v
+        };
+        out.dict_put(k, v)?;
+    }
+    Ok(out)
+}
+
+fn own_stream(doc: &mut PdfDocument, stream: &PdfObject) -> Result<PdfObject> {
+    let raw = mupdf::Buffer::from_bytes(&stream.read_raw_stream()?)?;
+    let dict = stream.copy_dict()?;
+    Ok(doc.add_stream(&raw, Some(&dict), true)?)
 }
 
 /// Escala máxima de um ladrilho: 6400 % numa tela 4× (o ladrilho tem tamanho fixo).

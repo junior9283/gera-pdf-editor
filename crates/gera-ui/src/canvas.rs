@@ -9,9 +9,11 @@ const FULL_UV: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui:
 #[derive(Default)]
 pub struct CanvasFrame {
     pub scroll_y: f32,
+    pub scroll_x: f32,
     pub current_page: usize,
     /// Altura visível da área de rolagem (para PageUp/PageDown).
     pub viewport_h: f32,
+    pub viewport_w: f32,
     /// Modos página a página: a roda pediu a tela seguinte (`+1`) ou a anterior (`-1`).
     pub turn: i32,
 }
@@ -85,6 +87,8 @@ pub fn show_pages(
     };
     CanvasFrame {
         scroll_y: out.state.offset.y,
+        scroll_x: out.state.offset.x,
+        viewport_w: out.inner_rect.width(),
         current_page: out.inner,
         viewport_h: out.inner_rect.height(),
         turn,

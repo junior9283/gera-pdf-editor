@@ -1,5 +1,6 @@
 use crate::bench::Bench;
 use crate::canvas::{self, CanvasFrame};
+use crate::clipboard::Paste;
 use crate::edit::{screen_rect, EditState};
 use crate::print_job::{self, PrintJobs};
 use crate::search::SearchState;
@@ -63,6 +64,19 @@ pub enum DocCommand {
     GoToPage,
     /// Zoom para…: leva o foco ao campo de zoom.
     ZoomTo,
+    /// Escolhe a ferramenta (Selecionar, Mão, Zoom com marca; teclas únicas).
+    Tool(app_state::tools::Tool),
+    /// Shift+U: alterna entre Destacar e Sublinhar.
+    CycleMarkup,
+    /// Recortar o comentário selecionado (Ctrl+X).
+    Cut,
+    /// Desmarcar tudo (Ctrl+Shift+A): seleção de texto e de comentário.
+    DeselectAll,
+    /// Próximo e anterior resultado da busca (F3 / Shift+F3, Ctrl+G / Ctrl+Shift+G).
+    FindNext,
+    FindPrev,
+    /// Arquivo → Reverter (pergunta antes).
+    Revert,
     /// Histórico de vistas (Alt+← / Alt+→).
     ViewBack,
     ViewForward,
@@ -88,6 +102,8 @@ pub enum DocEvent {
     OpenLink(pdf_core::LinkTarget),
     /// O arquivo pede para abrir em tela cheia (`/PageMode /FullScreen`).
     FullScreen,
+    /// Um comando da casca escolhido na página (menu de contexto: Imprimir, Propriedades).
+    Run(Command),
 }
 
 /// Impressão esperando a cópia temporária: opções, página atual no clique e o arquivo pedido.
@@ -115,6 +131,22 @@ pub struct DocTab {
     /// Último quadro do canvas (rolagem e página atual).
     pub(crate) last: CanvasFrame,
     pub(crate) jump_to: Option<f32>,
+    /// Comentário copiado ou recortado no app.
+    clip: crate::clipboard::AnnotClipboard,
+    /// Leitura da área de transferência do sistema em andamento.
+    paste_rx: Option<std::sync::mpsc::Receiver<crate::clipboard::SystemClip>>,
+    /// Imagens coladas gravadas na pasta temporária (apagadas ao fechar a aba).
+    pasted_files: Vec<std::path::PathBuf>,
+    /// Arquivo → Reverter: a pergunta está aberta.
+    pub(crate) revert_ask: bool,
+    /// Depois de colar, seleciona o comentário mais novo desta página.
+    select_newest_on: Option<i32>,
+    /// Como abrir: padrão das Preferências e a última vista do arquivo (dados pela casca).
+    pub(crate) open_view: OpenView,
+    /// Mão temporária enquanto o Espaço está segurado.
+    temp_tool: app_state::tools::TempTool,
+    /// Zoom com marca: a página e o ponto (tela) onde o arraste começou.
+    marquee: Option<(usize, egui::Pos2)>,
     /// Página e ponto do último salto ainda não mostrado (refeito se o zoom mudar antes).
     pending_target: Option<(i32, Option<(f32, f32)>)>,
     /// Rolagem horizontal pedida (Ajustar ao conteúdo visível).
@@ -260,6 +292,14 @@ impl DocTab {
             jump_to: None,
             jump_x: None,
             pending_target: None,
+            temp_tool: Default::default(),
+            open_view: OpenView::default(),
+            clip: Default::default(),
+            paste_rx: None,
+            pasted_files: Vec::new(),
+            select_newest_on: None,
+            revert_ask: false,
+            marquee: None,
             focus_zoom: false,
             zoom_text: None,
             history_views: Default::default(),
@@ -358,7 +398,41 @@ impl DocTab {
             }
             return;
         }
+        // comandos que não dependem da vista
+        match cmd {
+            DocCommand::FindNext | DocCommand::FindPrev => {
+                return self.search_step(cmd == DocCommand::FindNext)
+            }
+            DocCommand::Revert => {
+                self.revert_ask = self.can_revert();
+                return;
+            }
+            _ => {}
+        }
         if self.navigate(cmd) {
+            return;
+        }
+        // com um comentário selecionado (e sem texto), Copiar e Recortar são dele, dentro das
+        // permissões do documento
+        let comment_selected = self.edit.selected.is_some()
+            && !self
+                .edit
+                .selection
+                .as_ref()
+                .is_some_and(|s| !s.text.is_empty());
+        if matches!(cmd, DocCommand::Copy | DocCommand::Cut) && comment_selected {
+            let p = self.security.permissions;
+            if !p.copy {
+                return self.deny("copiar");
+            }
+            if cmd == DocCommand::Cut && !p.annotate {
+                return self.deny("alterar comentários");
+            }
+        }
+        if matches!(cmd, DocCommand::Copy | DocCommand::Cut) && self.copy_comment(ctx) {
+            if cmd == DocCommand::Cut {
+                self.edit.delete_selected();
+            }
             return;
         }
         let page = self.last.current_page;
@@ -390,8 +464,13 @@ impl DocTab {
             DocCommand::Redo if self.history.can_redo => self.worker.send(Request::Redo),
             DocCommand::Undo | DocCommand::Redo => {}
             DocCommand::Find => self.focus_search = true,
+            DocCommand::Cut => {} // tratado no começo
             DocCommand::Copy if !self.security.permissions.copy => self.deny("copiar"),
             DocCommand::Copy => self.edit.copy(ctx),
+            DocCommand::DeselectAll => {
+                self.edit.selection = None;
+                self.edit.selected = None;
+            }
             DocCommand::SelectAll => self.edit.select_all(&self.worker),
             DocCommand::Delete if self.prepare_tools => {
                 if let Some((page, id)) = self.prepare.selected.take() {
@@ -420,6 +499,16 @@ impl DocTab {
             }
             DocCommand::Fit(fit) => view.fit = fit,
             DocCommand::ZoomTo => self.focus_zoom = true,
+            DocCommand::Tool(tool) => self.pick_tool(tool),
+            DocCommand::CycleMarkup => {
+                use app_state::tools::Tool;
+                let next = if self.edit.tool == Tool::Highlight {
+                    Tool::Underline
+                } else {
+                    Tool::Highlight
+                };
+                self.pick_tool(next);
+            }
             DocCommand::NextChange
             | DocCommand::PrevChange
             | DocCommand::FirstPage
@@ -428,7 +517,10 @@ impl DocTab {
             | DocCommand::LastPage
             | DocCommand::GoToPage
             | DocCommand::ViewBack
-            | DocCommand::ViewForward => {} // já tratados no começo
+            | DocCommand::ViewForward
+            | DocCommand::FindNext
+            | DocCommand::FindPrev
+            | DocCommand::Revert => {} // já tratados no começo
             DocCommand::Mode(mode) => {
                 view.set_mode(mode, page);
                 self.jump_to = view.go_to(page as i32, None);
@@ -467,6 +559,7 @@ impl DocTab {
             DocCommand::FirstPage => self.jump(0, None),
             DocCommand::LastPage => self.jump(last as i32, None),
             DocCommand::GoToPage => self.focus_page = true,
+
             DocCommand::ViewBack | DocCommand::ViewForward => {
                 let current = view.view_entry(self.last.scroll_y, page);
                 let to = if cmd == DocCommand::ViewBack {
@@ -481,6 +574,207 @@ impl DocTab {
             _ => return false,
         }
         true
+    }
+
+    /// Copiar/Recortar com um comentário selecionado e sem texto selecionado: o comentário vai
+    /// para a área interna (e o texto dele para a do sistema). Devolve se copiou.
+    fn copy_comment(&mut self, ctx: &egui::Context) -> bool {
+        let has_text = self
+            .edit
+            .selection
+            .as_ref()
+            .is_some_and(|s| !s.text.is_empty());
+        let Some((page, id)) = self.edit.selected.filter(|_| !has_text) else {
+            return false;
+        };
+        let contents = self
+            .annots
+            .iter()
+            .find(|a| a.page == page && a.id == id)
+            .map_or("", |a| a.contents.as_str());
+        ctx.copy_text(self.clip.copy(page, id, contents));
+        true
+    }
+
+    /// Colar (Ctrl+V com o texto da área do sistema, ou Editar → Colar, que a lê aqui): o
+    /// comentário copiado no app, uma caixa de texto ou, com imagem, um carimbo.
+    pub(crate) fn paste(&mut self, system_text: Option<String>) {
+        if !self.security.permissions.annotate {
+            self.deny("colar comentários");
+            return;
+        }
+        let page = self.last.current_page as i32;
+        match self.clip.paste(system_text.as_deref(), page) {
+            Paste::Annot {
+                page,
+                id,
+                to_page,
+                dx,
+                dy,
+            } => {
+                self.select_newest_on = Some(to_page);
+                self.edit.push_op(pdf_core::AnnotOp::Duplicate {
+                    page,
+                    id,
+                    to_page,
+                    dx,
+                    dy,
+                });
+            }
+            Paste::Text(text) => self.paste_text_box(page, text),
+            Paste::FromSystem if self.paste_rx.is_some() => {
+                self.status = "Ainda lendo a área de transferência…".into();
+            }
+            Paste::FromSystem => self.read_system_clipboard(),
+        }
+    }
+
+    fn paste_text_box(&mut self, page: i32, text: String) {
+        let lines = text.lines().count().clamp(1, 40) as f32;
+        let longest = text.lines().map(|l| l.chars().count()).max().unwrap_or(1) as f32;
+        self.paste_centered(
+            page,
+            |pw, _| {
+                (
+                    (longest * 6.5 + 12.0).clamp(80.0, pw * 0.8),
+                    lines * 14.5 + 10.0,
+                )
+            },
+            |rect| pdf_core::NewAnnot::TextBox {
+                page,
+                rect,
+                text,
+                size: crate::create::TEXT_SIZE,
+                color: [0.0, 0.0, 0.0],
+            },
+        );
+    }
+
+    /// Cria o que foi colado no meio da página `page`: `size` dá o tamanho pela página
+    /// (largura, altura) e `make`, a anotação no retângulo. Fica selecionado ao chegar.
+    fn paste_centered(
+        &mut self,
+        page: i32,
+        size: impl FnOnce(f32, f32) -> (f32, f32),
+        make: impl FnOnce(pdf_core::PdfRect) -> pdf_core::NewAnnot,
+    ) {
+        let Some(p) = self
+            .view
+            .as_ref()
+            .and_then(|v| v.sizes.get(page as usize).copied())
+        else {
+            return;
+        };
+        let center = (p.width / 2.0, p.height / 2.0);
+        let rect = crate::clipboard::centered(center, size(p.width, p.height), (p.width, p.height));
+        self.select_newest_on = Some(page);
+        self.edit.add(make(rect));
+    }
+
+    /// Lê a área de transferência do sistema numa thread: imagem (vira carimbo) ou texto.
+    fn read_system_clipboard(&mut self) {
+        let dir = match crate::print_job::spool_dir() {
+            Ok(dir) => dir,
+            Err(e) => {
+                self.status = format!("Não foi possível colar: {e}");
+                return;
+            }
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.paste_rx = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::clipboard::read_system(&dir));
+        });
+    }
+
+    /// Resposta da leitura da área de transferência.
+    fn poll_paste(&mut self) {
+        let Some(rx) = self.paste_rx.as_ref() else {
+            return;
+        };
+        let Ok(found) = rx.try_recv() else {
+            return;
+        };
+        self.paste_rx = None;
+        use crate::clipboard::SystemClip;
+        match found {
+            SystemClip::Text(t) => self.paste(Some(t)),
+            SystemClip::Image {
+                path,
+                width,
+                height,
+            } => {
+                self.pasted_files.push(path.clone());
+                self.paste_image(path, (width, height));
+            }
+            SystemClip::Refused(msg) => self.status = msg,
+            SystemClip::Empty => self.status = "A área de transferência está vazia.".into(),
+        }
+    }
+
+    /// Imagem colada: um carimbo no meio da página atual, do tamanho natural (até 80 % da página).
+    fn paste_image(&mut self, path: std::path::PathBuf, px: (u32, u32)) {
+        let page = self.last.current_page as i32;
+        // 96 ppp da tela: 1 px = 0,75 pt
+        let (w, h) = (px.0 as f32 * 0.75, px.1 as f32 * 0.75);
+        self.paste_centered(
+            page,
+            |pw, ph| {
+                let k = (pw * 0.8 / w).min(ph * 0.8 / h).min(1.0);
+                (w * k, h * k)
+            },
+            |rect| pdf_core::NewAnnot::Signature {
+                page,
+                rect,
+                art: pdf_core::SignatureArt::Image { path },
+                initials: false,
+            },
+        );
+    }
+
+    /// Escolhe a ferramenta; as de comentário abrem a linha Comentar (como no Acrobat).
+    fn pick_tool(&mut self, tool: app_state::tools::Tool) {
+        if !tool.is_screen_tool() && !self.comment_tools {
+            self.show_row(app_state::tools_catalog::COMMENT);
+            if !self.comment_tools {
+                return; // sem permissão de comentar (o aviso já saiu)
+            }
+        }
+        self.edit.tool = tool;
+    }
+
+    /// Vista de abertura: o padrão das Preferências, depois a visualização inicial do arquivo, e
+    /// por cima a última vista lembrada do arquivo.
+    pub(crate) fn apply_open_view(&mut self, initial: pdf_core::InitialView) {
+        use app_state::prefs::DefaultZoom;
+        let open = self.open_view;
+        if let Some(view) = self.view.as_mut() {
+            if let Some(mode) = open.mode {
+                view.set_mode(mode, 0);
+            }
+            match open.zoom {
+                DefaultZoom::Auto => {}
+                DefaultZoom::FitPage => view.fit = Fit::Page,
+                DefaultZoom::FitWidth => view.fit = Fit::Width,
+                DefaultZoom::FitHeight => view.fit = Fit::Height,
+                DefaultZoom::Level(z) => {
+                    view.set_manual_zoom(z);
+                }
+            }
+        }
+        self.apply_initial_view(initial);
+        if let Some(last) = open.last {
+            if let Some(y) = self.view.as_mut().and_then(|v| v.restore(&last)) {
+                self.pending_target = None;
+                self.jump_to = Some(y);
+            }
+        }
+    }
+
+    /// A vista atual (para lembrar ao fechar).
+    pub(crate) fn current_view(&self) -> Option<app_state::view_history::ViewEntry> {
+        let view = self.view.as_ref()?;
+        Some(view.view_entry(self.last.scroll_y, self.last.current_page))
     }
 
     /// Visualização inicial pedida pelo arquivo: modo, zoom, página, painel e tela cheia.
@@ -544,6 +838,49 @@ impl DocTab {
         view.fit = fit;
         view.set_zoom(zoom);
         self.jump_to = view.go_to(page as i32, None);
+    }
+
+    /// Campo da página (número começando em 1): digitar é um salto; arrastar o número só entra no
+    /// histórico uma vez, de onde o arraste começou.
+    pub(crate) fn page_field(&mut self, page: usize, how: PageField) {
+        let target = page as i32 - 1;
+        match how {
+            PageField::DragStart => {
+                if let Some(view) = self.view.as_ref() {
+                    let here = view.view_entry(self.last.scroll_y, self.last.current_page);
+                    self.history_views.push(here);
+                }
+            }
+            PageField::Dragging => self.go(target, None, false),
+            PageField::Typed => self.jump(target, None),
+        }
+    }
+
+    /// Pedidos de foco (Ir para página, Zoom para) que nenhum campo atendeu neste quadro (barra
+    /// escondida na tela cheia ou no modo leitura) não ficam esperando.
+    pub(crate) fn drop_unused_focus(&mut self) {
+        self.focus_page = false;
+        self.focus_zoom = false;
+    }
+
+    /// Reverter só faz sentido com alterações num arquivo que existe no disco.
+    pub(crate) fn can_revert(&self) -> bool {
+        self.history.dirty && !self.created
+    }
+
+    /// Esc com uma janela da aba aberta: fecha (como Cancelar). Devolve se fechou alguma.
+    pub(crate) fn escape_window(&mut self) -> bool {
+        std::mem::take(&mut self.revert_ask)
+    }
+
+    /// O Espaço segurado vira Mão (fora de um campo de formulário com o foco).
+    pub(crate) fn space_is_hand(&self) -> bool {
+        !self.form.has_focus()
+    }
+
+    /// Alguma janela da aba que usa o Esc está aberta.
+    pub(crate) fn has_modal(&self) -> bool {
+        self.revert_ask || self.edit.fill.dialog.is_some() || self.prepare.props.is_some()
     }
 
     /// Vai à página `page` agora, ou assim que o documento abrir.
@@ -712,7 +1049,7 @@ impl DocTab {
         self.last = CanvasFrame::default();
         self.jump_to = Some(0.0);
         self.events.push(DocEvent::Opened);
-        self.apply_initial_view(initial);
+        self.apply_open_view(initial);
         if let Some(page) = self.pending_page.take() {
             self.jump(page, None);
         }
@@ -782,6 +1119,7 @@ impl DocTab {
         if let Some(msg) = self.print_jobs.poll().pop() {
             self.status = msg;
         }
+        self.poll_paste();
         let mut renders = 0;
         loop {
             let response = match self.worker.rx.try_recv() {
@@ -1011,6 +1349,15 @@ impl DocTab {
                 } => {
                     replace_pages(&mut self.annots, &pages, annots);
                     self.edit.keep_valid_selection(&self.annots);
+                    // o que acabou de ser colado fica selecionado (o mais novo da página)
+                    if let Some(page) = self.select_newest_on.take_if(|p| pages.contains(p)) {
+                        self.edit.selected = self
+                            .annots
+                            .iter()
+                            .filter(|a| a.page == page && a.reply_to.is_none())
+                            .max_by_key(|a| a.id)
+                            .map(|a| (a.page, a.id));
+                    }
                     self.edit_pdf.invalidate(&pages);
                     self.history = history;
                     if let Some(view) = self.view.as_mut() {
@@ -1114,7 +1461,9 @@ impl DocTab {
             && self.edit.text_draft.is_none()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
-            if self.organize.is_some() {
+            if self.escape_window() {
+                // janela Reverter: Esc é Cancelar
+            } else if self.organize.is_some() {
                 self.organize = None; // Esc fecha o Organizar páginas
             } else if self.prepare_tools && self.prepare.escape() {
                 // Preparar formulário: solta a ferramenta, depois a seleção
@@ -1158,14 +1507,23 @@ impl DocTab {
                 }
                 None => {}
             }
-            // ←/→ mudam de página em qualquer modo; o espaço, só nos modos página a página. Com a
-            // janela de assinatura ou de propriedades do campo aberta, as setas são dela.
-            let paged = self.view.as_ref().is_some_and(|v| v.mode.is_paged());
-            let arrows = self.edit.fill.dialog.is_none() && self.prepare.props.is_none();
+            // Espaço segurado: Mão temporária (como no Acrobat), em qualquer modo
+            let space = self.space_is_hand()
+                && ctx.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Space);
+                    i.key_down(egui::Key::Space)
+                });
+            if space {
+                self.edit.tool = self.temp_tool.press(self.edit.tool);
+            } else if let Some(tool) = self.temp_tool.release() {
+                self.edit.tool = tool;
+            }
+            // ←/→ mudam de página em qualquer modo. Com a janela de assinatura ou de propriedades
+            // do campo aberta, as setas são dela.
+            let arrows = !self.has_modal();
             let step = ctx.input_mut(|i| {
                 [
                     (egui::Key::ArrowRight, arrows, DocCommand::NextPage),
-                    (egui::Key::Space, paged, DocCommand::NextPage),
                     (egui::Key::ArrowLeft, arrows, DocCommand::PrevPage),
                 ]
                 .into_iter()
@@ -1827,6 +2185,7 @@ impl DocTab {
             self.status = msg;
         }
         self.field_props_window(ui.ctx());
+        self.revert_window(ui.ctx());
         self.protect_windows(ui.ctx());
         self.pagination_windows(ui.ctx());
         self.redact_windows(ui.ctx());
@@ -1912,8 +2271,15 @@ impl DocTab {
             } else {
                 DocCommand::PrevPage
             });
+        } else if go.drag_started() {
+            self.page_field(page, PageField::DragStart);
         } else if go.changed() {
-            self.jump(page as i32 - 1, None);
+            let how = if go.dragged() {
+                PageField::Dragging
+            } else {
+                PageField::Typed
+            };
+            self.page_field(page, how);
         }
     }
 
@@ -1928,17 +2294,64 @@ impl DocTab {
             edit.request_focus();
         }
         if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            self.search.start(&self.worker);
+            let back = ui.input(|i| i.modifiers.shift);
+            match self.search.enter_action(!back) {
+                crate::search::EnterAction::Search => self.search.start(&self.worker),
+                crate::search::EnterAction::Step(forward) => self.search_step(forward),
+            }
             edit.request_focus();
         }
         ui.label(self.search.summary());
         let prev = ui.button("⏶").clicked();
         let next = ui.button("⏷").clicked();
         if prev || next {
-            if let Some((page, rect)) = self.search.step(next) {
-                self.jump(page, Some((rect.x0, rect.y0)));
-            }
+            self.search_step(next);
         }
+        // opções do Localizar, como no Acrobat
+        let before = self.search.options;
+        ui.menu_button("⚙", |ui| {
+            let o = &mut self.search.options;
+            ui.checkbox(&mut o.whole_words, "Somente palavras inteiras");
+            ui.checkbox(&mut o.match_case, "Diferenciar maiúsculas e minúsculas");
+            ui.checkbox(&mut o.bookmarks, "Incluir marcadores");
+            ui.checkbox(&mut o.comments, "Incluir comentários");
+        })
+        .response
+        .on_hover_text("Opções de busca");
+        if self.search.options != before && !self.search.text.trim().is_empty() {
+            self.search.start(&self.worker);
+        }
+    }
+
+    /// Vai ao resultado seguinte (ou anterior) da busca; o salto entra no histórico.
+    fn search_step(&mut self, forward: bool) {
+        if let Some((page, rect)) = self.search.step(forward) {
+            self.jump(page, Some((rect.x0, rect.y0)));
+        }
+    }
+
+    /// Arquivo → Reverter: pergunta antes de descartar as alterações.
+    fn revert_window(&mut self, ctx: &egui::Context) {
+        if !self.revert_ask {
+            return;
+        }
+        egui::Window::new("Reverter")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label("Reverter para a versão salva? As alterações serão perdidas.");
+                ui.horizontal(|ui| {
+                    if ui.button("Reverter").clicked() {
+                        self.revert_ask = false;
+                        self.worker.send(Request::Revert);
+                        self.status = "Revertido para a versão salva.".into();
+                    }
+                    if ui.button("Cancelar").clicked() {
+                        self.revert_ask = false;
+                    }
+                });
+            });
     }
 
     /// Campo de zoom editável ("150" e Enter) e a lista ⏷ com os níveis e os ajustes, como no
@@ -2329,6 +2742,9 @@ impl DocTab {
         let mut open_props = None;
         let links = &self.links;
         let mut link_clicked = None;
+        let mut screen_action = None;
+        let mut page_cmd = None;
+        let marquee = &mut self.marquee;
         let presenting = self.presentation.is_some();
         let mut turn = None;
         let jump_to = self.jump_to.take();
@@ -2384,7 +2800,24 @@ impl DocTab {
                             return;
                         }
                         let response = edit.on_page(ui, worker, annots, page as i32, rect, map);
-                        if edit.tool == app_state::tools::Tool::Select {
+                        use app_state::tools::Tool;
+                        if let Some(a) =
+                            screen_gesture(ui, &response, edit.tool, marquee, page, map)
+                        {
+                            screen_action = Some(a);
+                        }
+                        // na tela cheia o botão direito volta a página (sem menu)
+                        if edit.tool.is_screen_tool()
+                            && !presenting
+                            && edit.page_menu_allowed(page as i32)
+                        {
+                            response.context_menu(|ui| {
+                                if let Some(c) = page_menu(ui, edit.tool) {
+                                    page_cmd = Some(c);
+                                }
+                            });
+                        }
+                        if matches!(edit.tool, Tool::Select | Tool::Hand) {
                             let hit = link_gesture(ui, &response, links, annots, page as i32, map);
                             // tela cheia: clicar fora de link avança, o botão direito volta
                             if presenting && hit.is_none() {
@@ -2472,6 +2905,198 @@ impl DocTab {
         if let Some(cmd) = turn {
             self.run(ui.ctx(), cmd);
         }
+        if let Some(action) = screen_action {
+            self.screen_action(action);
+        }
+        match page_cmd {
+            Some(Command::Doc(c)) => self.run(ui.ctx(), c),
+            Some(c) => self.events.push(DocEvent::Run(c)),
+            None => {}
+        }
+    }
+
+    /// Mão (rola pelo arraste) e Zoom com marca (amplia até o retângulo, ou um nível no clique).
+    fn screen_action(&mut self, action: ScreenAction) {
+        let avail = (self.last.viewport_w, self.last.viewport_h);
+        let target = match action {
+            ScreenAction::Pan(d) => Some((
+                (self.last.scroll_x - d.x).max(0.0),
+                (self.last.scroll_y - d.y).max(0.0),
+            )),
+            ScreenAction::ZoomRect { page, a, b } => self
+                .view
+                .as_mut()
+                .and_then(|v| v.zoom_to_rect(page, pdf_core::PdfRect::from_corners(a, b), avail)),
+            ScreenAction::ZoomAt { page, pt, out } => self.view.as_mut().and_then(|v| {
+                let z = if out {
+                    zoom::zoom_out(v.zoom)
+                } else {
+                    zoom::zoom_in(v.zoom)
+                };
+                v.set_manual_zoom(z);
+                v.center_on(page, pt, avail)
+            }),
+        };
+        if let Some((x, y)) = target {
+            self.jump_x = Some(x);
+            self.jump_to = Some(y);
+        }
+    }
+}
+
+/// Itens do menu de contexto da página (`None`: separador), com a ferramenta atual marcada.
+fn page_menu_items(tool: app_state::tools::Tool) -> Vec<(Option<Command>, bool)> {
+    use app_state::tools::Tool;
+    let doc = |c| Some(Command::Doc(c));
+    let mut items: Vec<(Option<Command>, bool)> = Tool::SCREEN
+        .into_iter()
+        .map(|t| (doc(DocCommand::Tool(t)), t == tool))
+        .collect();
+    items.extend(
+        [
+            None,
+            doc(DocCommand::PrevPage),
+            doc(DocCommand::NextPage),
+            doc(DocCommand::ViewBack),
+            None,
+            doc(DocCommand::Rotate { clockwise: true }),
+            None,
+            Some(Command::Print),
+            doc(DocCommand::Find),
+            Some(Command::Properties),
+        ]
+        .into_iter()
+        .map(|c| (c, false)),
+    );
+    items
+}
+
+/// Menu de contexto da página (fora de comentário e de seleção); devolve o item escolhido.
+fn page_menu(ui: &mut egui::Ui, tool: app_state::tools::Tool) -> Option<Command> {
+    let mut picked = None;
+    for (cmd, checked) in page_menu_items(tool) {
+        match cmd {
+            None => {
+                ui.separator();
+            }
+            Some(c @ Command::Doc(DocCommand::Tool(_))) => {
+                crate::shell::menus::check(ui, &mut picked, c, checked, true)
+            }
+            Some(c) => crate::shell::menus::item(ui, &mut picked, c, true),
+        }
+    }
+    if picked.is_some() {
+        ui.close();
+    }
+    picked
+}
+
+/// Como o campo da página mudou.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PageField {
+    DragStart,
+    Dragging,
+    Typed,
+}
+
+/// Vista de abertura vinda das Preferências.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OpenView {
+    pub mode: Option<ViewMode>,
+    pub zoom: app_state::prefs::DefaultZoom,
+    pub last: Option<app_state::view_history::ViewEntry>,
+}
+
+/// O que a Mão ou o Zoom com marca pedem neste quadro.
+enum ScreenAction {
+    /// Arraste da Mão (tela).
+    Pan(egui::Vec2),
+    /// Retângulo do Zoom com marca, em pontos da página.
+    ZoomRect {
+        page: usize,
+        a: (f32, f32),
+        b: (f32, f32),
+    },
+    /// Clique do Zoom com marca: um nível a mais (ou a menos, com Ctrl) em torno do ponto.
+    ZoomAt {
+        page: usize,
+        pt: (f32, f32),
+        out: bool,
+    },
+}
+
+/// Gestos da Mão e do Zoom com marca na página (cursor, retângulo tracejado e a ação).
+fn screen_gesture(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    tool: app_state::tools::Tool,
+    marquee: &mut Option<(usize, egui::Pos2)>,
+    page: usize,
+    map: &PageMap,
+) -> Option<ScreenAction> {
+    use app_state::tools::Tool;
+    match tool {
+        Tool::Hand => {
+            if response.hovered() || response.dragged() {
+                let grab = if response.dragged() {
+                    egui::CursorIcon::Grabbing
+                } else {
+                    egui::CursorIcon::Grab
+                };
+                ui.ctx().set_cursor_icon(grab);
+            }
+            let d = response.drag_delta();
+            (response.dragged() && d != egui::Vec2::ZERO).then_some(ScreenAction::Pan(d))
+        }
+        Tool::Zoom => {
+            let ctrl = ui.input(|i| i.modifiers.command);
+            if response.hovered() {
+                let icon = if ctrl {
+                    egui::CursorIcon::ZoomOut
+                } else {
+                    egui::CursorIcon::ZoomIn
+                };
+                ui.ctx().set_cursor_icon(icon);
+            }
+            let pointer = response.interact_pointer_pos().or(response.hover_pos());
+            if response.drag_started() {
+                *marquee = pointer.map(|p| (page, p));
+            }
+            let start = marquee.filter(|(p, _)| *p == page).map(|(_, s)| s);
+            if let (Some(start), Some(now)) = (start, pointer) {
+                if response.dragged() {
+                    let r = egui::Rect::from_two_pos(start, now);
+                    let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 110, 220));
+                    ui.painter()
+                        .rect_stroke(r, 0.0, stroke, egui::StrokeKind::Middle);
+                }
+                if response.drag_stopped() {
+                    *marquee = None;
+                    // arraste curto conta como clique
+                    if start.distance(now) >= 4.0 {
+                        return Some(ScreenAction::ZoomRect {
+                            page,
+                            a: map.to_page(start.into()),
+                            b: map.to_page(now.into()),
+                        });
+                    }
+                    return Some(ScreenAction::ZoomAt {
+                        page,
+                        pt: map.to_page(now.into()),
+                        out: ctrl,
+                    });
+                }
+            }
+            match (response.clicked(), pointer) {
+                (true, Some(p)) => Some(ScreenAction::ZoomAt {
+                    page,
+                    pt: map.to_page(p.into()),
+                    out: ctrl,
+                }),
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
@@ -2538,6 +3163,9 @@ impl Drop for DocTab {
     fn drop(&mut self) {
         if let Some(p) = self.print_pending.take() {
             let _ = std::fs::remove_file(p.file);
+        }
+        for f in &self.pasted_files {
+            let _ = std::fs::remove_file(f);
         }
         // OCR em andamento: para (libera a CPU e a vez das outras abas)
         if let Some(c) = self.ocr.as_ref().and_then(|w| w.cancel.as_ref()) {
@@ -2628,6 +3256,235 @@ mod tests {
         tab.last.scroll_y = 300.0;
         tab.after_zoom_change(0.5);
         assert_eq!(tab.jump_to, Some(150.0));
+    }
+
+    #[test]
+    fn opening_view_uses_defaults_then_the_file_then_the_last_view() {
+        use app_state::prefs::DefaultZoom;
+        use app_state::view_history::ViewEntry;
+        // padrão das Preferências
+        let mut tab = tab_with_pages(6);
+        tab.open_view = OpenView {
+            mode: Some(ViewMode::TwoUp),
+            zoom: DefaultZoom::FitPage,
+            last: None,
+        };
+        tab.apply_open_view(pdf_core::InitialView::default());
+        let v = tab.view.as_ref().unwrap();
+        assert_eq!((v.mode, v.fit), (ViewMode::TwoUp, Fit::Page));
+        // o arquivo prevalece sobre o padrão
+        let mut tab = tab_with_pages(6);
+        tab.open_view.mode = Some(ViewMode::TwoUp);
+        tab.apply_open_view(pdf_core::InitialView {
+            layout: Some(pdf_core::InitialLayout::Single),
+            ..Default::default()
+        });
+        assert_eq!(tab.view.as_ref().unwrap().mode, ViewMode::Single);
+        // a última vista prevalece sobre tudo e vai à página dela
+        let mut tab = tab_with_pages(6);
+        tab.open_view.last = Some(ViewEntry {
+            page: 4,
+            y: 10.0,
+            zoom: 2.0,
+            fit: Fit::None,
+        });
+        tab.apply_open_view(pdf_core::InitialView {
+            page: Some(1),
+            ..Default::default()
+        });
+        let v = tab.view.as_ref().unwrap();
+        assert!((v.zoom - 2.0).abs() < 1e-6);
+        let expected = v.layout.page_top(4) - v.window().0 + 10.0 * 2.0;
+        assert_eq!(tab.jump_to, Some(expected));
+    }
+
+    #[test]
+    fn comment_keys_open_the_comment_row_and_shift_u_cycles() {
+        use app_state::tools::Tool;
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_pages(1);
+        tab.run(&ctx, DocCommand::Tool(Tool::Note));
+        assert!(tab.comment_tools);
+        assert_eq!(tab.edit.tool, Tool::Note);
+        tab.run(&ctx, DocCommand::CycleMarkup);
+        assert_eq!(tab.edit.tool, Tool::Highlight);
+        tab.run(&ctx, DocCommand::CycleMarkup);
+        assert_eq!(tab.edit.tool, Tool::Underline);
+        tab.run(&ctx, DocCommand::Tool(Tool::Hand));
+        assert_eq!(tab.edit.tool, Tool::Hand);
+    }
+
+    #[test]
+    fn dragging_the_page_number_records_one_view() {
+        let mut tab = tab_with_pages(60);
+        tab.page_field(1, PageField::DragStart);
+        for p in 2..50 {
+            tab.page_field(p, PageField::Dragging);
+        }
+        tab.page_field(50, PageField::Dragging);
+        // uma vista para trás (de onde o arraste começou), não 50
+        let e = tab.view.as_ref().unwrap().view_entry(0.0, 0);
+        assert!(tab.history_views.back(e).is_some());
+        assert!(
+            tab.history_views.back(e).is_none(),
+            "só uma vista no histórico"
+        );
+    }
+
+    #[test]
+    fn copying_a_comment_respects_the_permissions() {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_pages(1);
+        tab.annots.push(pdf_core::AnnotInfo {
+            page: 0,
+            id: 5,
+            contents: "segredo".into(),
+            ..Default::default()
+        });
+        tab.edit.selected = Some((0, 5));
+        tab.security.permissions.copy = false;
+        tab.security.permissions.annotate = true;
+        tab.run(&ctx, DocCommand::Copy);
+        assert!(tab.status.contains("não permite copiar"), "{}", tab.status);
+        tab.security.permissions.copy = true;
+        tab.security.permissions.annotate = false;
+        tab.status.clear();
+        tab.run(&ctx, DocCommand::Cut);
+        assert!(
+            tab.edit.ops.is_empty(),
+            "sem permissão de comentar, Recortar não apaga"
+        );
+        assert!(tab.status.contains("não permite"), "{}", tab.status);
+    }
+
+    #[test]
+    fn revert_is_for_saved_files_and_escape_cancels_it() {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_pages(1);
+        tab.created = true; // criado pelo app, nunca salvo: não há versão salva
+        tab.run(&ctx, DocCommand::Revert);
+        tab.history.dirty = true;
+        tab.run(&ctx, DocCommand::Revert);
+        assert!(!tab.revert_ask, "criado e nunca salvo: nada a reverter");
+        tab.created = false;
+        tab.run(&ctx, DocCommand::Revert);
+        assert!(tab.revert_ask);
+        tab.escape_window();
+        assert!(!tab.revert_ask, "Esc é Cancelar");
+    }
+
+    #[test]
+    fn a_second_paste_waits_for_the_first_read() {
+        let mut tab = tab_with_pages(1);
+        tab.security.permissions.annotate = true;
+        let (_tx, rx) = std::sync::mpsc::channel();
+        tab.paste_rx = Some(rx);
+        tab.paste(None);
+        assert!(
+            tab.paste_rx.is_some() && tab.status.contains("lendo"),
+            "{}",
+            tab.status
+        );
+    }
+
+    #[test]
+    fn space_is_left_to_a_focused_form_field() {
+        let mut tab = tab_with_pages(1);
+        assert!(tab.space_is_hand());
+        tab.form.focus_for_test(Some((0, 3)));
+        assert!(!tab.space_is_hand(), "o Espaço marca a caixa com o foco");
+    }
+
+    #[test]
+    fn unused_focus_requests_do_not_linger() {
+        let mut tab = tab_with_pages(1);
+        tab.focus_zoom = true;
+        tab.focus_page = true;
+        tab.drop_unused_focus();
+        assert!(!tab.focus_zoom && !tab.focus_page);
+    }
+
+    #[test]
+    fn page_menu_has_the_acrobat_items() {
+        use app_state::tools::Tool;
+        let items = page_menu_items(Tool::Hand);
+        let has = |c: Command| items.iter().any(|(x, _)| *x == Some(c.clone()));
+        for c in [
+            Command::Doc(DocCommand::Tool(Tool::Select)),
+            Command::Doc(DocCommand::Tool(Tool::Hand)),
+            Command::Doc(DocCommand::Tool(Tool::Zoom)),
+            Command::Doc(DocCommand::PrevPage),
+            Command::Doc(DocCommand::NextPage),
+            Command::Doc(DocCommand::ViewBack),
+            Command::Doc(DocCommand::Rotate { clockwise: true }),
+            Command::Print,
+            Command::Doc(DocCommand::Find),
+            Command::Properties,
+        ] {
+            assert!(has(c.clone()), "{c:?}");
+        }
+        // a ferramenta atual vem marcada
+        let checked: Vec<_> = items.iter().filter(|(_, on)| *on).collect();
+        assert_eq!(checked.len(), 1);
+        assert_eq!(
+            checked[0].0,
+            Some(Command::Doc(DocCommand::Tool(Tool::Hand)))
+        );
+    }
+
+    #[test]
+    fn revert_only_with_unsaved_changes() {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_pages(1);
+        tab.run(&ctx, DocCommand::Revert);
+        assert!(!tab.revert_ask, "sem alterações, nada a reverter");
+        tab.history.dirty = true;
+        tab.run(&ctx, DocCommand::Revert);
+        assert!(tab.revert_ask, "pergunta antes");
+    }
+
+    #[test]
+    fn paste_is_denied_without_comment_permission() {
+        let mut tab = tab_with_pages(1);
+        tab.security.permissions.annotate = false;
+        tab.paste(Some("texto".into()));
+        assert!(tab.edit.ops.is_empty(), "nada criado");
+        assert!(tab.status.contains("não permite colar"), "{}", tab.status);
+    }
+
+    #[test]
+    fn cut_copies_the_selected_comment_and_deletes_it() {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_pages(2);
+        tab.security.permissions.annotate = true;
+        tab.annots.push(pdf_core::AnnotInfo {
+            page: 0,
+            id: 5,
+            contents: "nota".into(),
+            ..Default::default()
+        });
+        tab.edit.selected = Some((0, 5));
+        tab.run(&ctx, DocCommand::Cut);
+        assert_eq!(
+            tab.edit.ops,
+            vec![pdf_core::AnnotOp::Delete { page: 0, id: 5 }]
+        );
+        // colar com a marca ainda na área de transferência: duplica o recortado
+        tab.edit.ops.clear();
+        tab.paste(Some("nota".into()));
+        assert!(matches!(
+            tab.edit.ops.as_slice(),
+            [pdf_core::AnnotOp::Duplicate { page: 0, id: 5, .. }]
+        ));
+        // texto de fora: caixa de texto
+        tab.edit.ops.clear();
+        tab.paste(Some("outro".into()));
+        assert!(matches!(
+            tab.edit.ops.as_slice(),
+            [pdf_core::AnnotOp::Create(
+                pdf_core::NewAnnot::TextBox { .. }
+            )]
+        ));
     }
 
     #[test]

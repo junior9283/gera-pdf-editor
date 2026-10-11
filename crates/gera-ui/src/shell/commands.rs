@@ -26,10 +26,15 @@ pub enum Command {
     About,
     Properties,
     Print,
-    /// Editar → Preferências → Identidade: o nome do usuário.
-    Identity,
     /// Ferramentas → Comparar arquivos.
     Compare,
+    /// Editar → Preferências… (Ctrl+K).
+    Preferences,
+    /// Ajuda → Ajuda do Gera PDF Editor (F1).
+    Help,
+    /// Colar (Ctrl+V): o texto da área de transferência que veio no evento, ou `None` (menu),
+    /// e então a aba lê a área do sistema (também imagens).
+    Paste(Option<String>),
     /// Abre uma ferramenta do catálogo pelo menu (o mesmo que clicar nela em Ferramentas).
     Tool(&'static str),
 }
@@ -55,8 +60,10 @@ impl Command {
             Command::About => "Sobre o Gera PDF Editor",
             Command::Properties => "Propriedades…",
             Command::Print => "Imprimir…",
-            Command::Identity => "Identidade…",
             Command::Compare => "Comparar arquivos…",
+            Command::Preferences => "Preferências…",
+            Command::Help => "Ajuda do Gera PDF Editor",
+            Command::Paste(_) => "Colar",
             Command::Tool(id) => {
                 return app_state::tools_catalog::find(id)
                     .map_or(*id, |t| t.name)
@@ -90,6 +97,13 @@ impl Command {
                 DocCommand::LastPage => "Última página",
                 DocCommand::GoToPage => "Ir para página…",
                 DocCommand::ZoomTo => "Zoom para…",
+                DocCommand::Tool(t) => return t.label().into(),
+                DocCommand::CycleMarkup => "Alternar destacar e sublinhar",
+                DocCommand::Cut => "Recortar",
+                DocCommand::FindNext => "Próximo resultado",
+                DocCommand::FindPrev => "Resultado anterior",
+                DocCommand::Revert => "Reverter",
+                DocCommand::DeselectAll => "Desmarcar tudo",
                 DocCommand::ViewBack => "Vista anterior",
                 DocCommand::ViewForward => "Vista seguinte",
             },
@@ -97,6 +111,9 @@ impl Command {
         s.into()
     }
 }
+
+/// Ajuda do app: o README do projeto (endereço fixo, não vem de PDF).
+pub const HELP_URL: &str = "https://github.com/junior9283/gera-pdf-editor#readme";
 
 /// Atalhos de teclado. Os com Shift vêm antes dos sem: o egui aceita Shift a mais num atalho
 /// que não o pede, e testar `Ctrl+Z` antes consumiria `Ctrl+Shift+Z`.
@@ -107,6 +124,21 @@ pub fn shortcuts() -> Vec<(KeyboardShortcut, Command)> {
     let doc = Command::Doc;
     vec![
         (cmd_shift(Key::S), Command::SaveAs),
+        (cmd_shift(Key::A), doc(DocCommand::DeselectAll)),
+        (
+            KeyboardShortcut::new(Modifiers::SHIFT, Key::F3),
+            doc(DocCommand::FindPrev),
+        ),
+        (cmd_shift(Key::G), doc(DocCommand::FindPrev)),
+        (
+            KeyboardShortcut::new(Modifiers::NONE, Key::F3),
+            doc(DocCommand::FindNext),
+        ),
+        (cmd(Key::G), doc(DocCommand::FindNext)),
+        (
+            KeyboardShortcut::new(Modifiers::NONE, Key::F1),
+            Command::Help,
+        ),
         // navegação de páginas: os do Acrobat
         (cmd_shift(Key::N), doc(DocCommand::GoToPage)),
         (cmd_shift(Key::PageUp), doc(DocCommand::FirstPage)),
@@ -136,6 +168,9 @@ pub fn shortcuts() -> Vec<(KeyboardShortcut, Command)> {
         (cmd(Key::F), doc(DocCommand::Find)),
         (cmd(Key::C), doc(DocCommand::Copy)),
         (cmd(Key::A), doc(DocCommand::SelectAll)),
+        // mostrados nos menus; o egui entrega Ctrl+X e Ctrl+V como eventos (ver `from_keyboard`)
+        (cmd(Key::X), doc(DocCommand::Cut)),
+        (cmd(Key::V), Command::Paste(None)),
         (cmd(Key::Tab), Command::NextTab),
         // resultado da comparação: como no Acrobat
         (cmd(Key::Period), doc(DocCommand::NextChange)),
@@ -155,6 +190,7 @@ pub fn shortcuts() -> Vec<(KeyboardShortcut, Command)> {
         (cmd(Key::Num3), doc(DocCommand::Fit(Fit::Visible))),
         (cmd(Key::Y), doc(DocCommand::ZoomTo)),
         (cmd(Key::L), Command::FullScreen),
+        (cmd(Key::K), Command::Preferences),
         (cmd(Key::H), Command::ReadMode),
         (
             KeyboardShortcut::new(Modifiers::NONE, Key::F11),
@@ -163,12 +199,52 @@ pub fn shortcuts() -> Vec<(KeyboardShortcut, Command)> {
     ]
 }
 
+/// Aceleradores de tecla única do Acrobat (Preferências → Geral; desligados de fábrica).
+fn single_keys() -> Vec<(KeyboardShortcut, Command)> {
+    use app_state::tools::Tool;
+    let key = |k| KeyboardShortcut::new(Modifiers::NONE, k);
+    let tool = |t| Command::Doc(DocCommand::Tool(t));
+    vec![
+        // Shift+U antes do U (o egui aceita Shift a mais num atalho sem Shift)
+        (
+            KeyboardShortcut::new(Modifiers::SHIFT, Key::U),
+            Command::Doc(DocCommand::CycleMarkup),
+        ),
+        (key(Key::V), tool(Tool::Select)),
+        (key(Key::H), tool(Tool::Hand)),
+        (key(Key::Z), tool(Tool::Zoom)),
+        (key(Key::S), tool(Tool::Note)),
+        (key(Key::U), tool(Tool::Highlight)),
+        (key(Key::D), tool(Tool::Ink)),
+        (key(Key::X), tool(Tool::TextBox)),
+        (key(Key::K), tool(Tool::Stamp)),
+    ]
+}
+
+/// A tabela de atalhos, com as teclas únicas quando a preferência está ligada.
+/// Montada uma vez (o teclado a percorre a cada quadro, e cada item de menu busca nela).
+pub fn shortcuts_for(single_key: bool) -> &'static [(KeyboardShortcut, Command)] {
+    static PLAIN: std::sync::LazyLock<Vec<(KeyboardShortcut, Command)>> =
+        std::sync::LazyLock::new(shortcuts);
+    static WITH_KEYS: std::sync::LazyLock<Vec<(KeyboardShortcut, Command)>> =
+        std::sync::LazyLock::new(|| {
+            let mut all = shortcuts();
+            all.extend(single_keys());
+            all
+        });
+    if single_key {
+        &WITH_KEYS
+    } else {
+        &PLAIN
+    }
+}
+
 /// Primeiro atalho do comando (para mostrar no menu).
 pub fn shortcut_of(cmd: &Command) -> Option<KeyboardShortcut> {
-    shortcuts()
-        .into_iter()
+    shortcuts_for(false)
+        .iter()
         .find(|(_, c)| c == cmd)
-        .map(|(s, _)| s)
+        .map(|(s, _)| *s)
 }
 
 /// Atalho escrito como no Acrobat, com símbolos ("Ctrl+Shift++", "Ctrl+="), não nomes de tecla.
@@ -217,22 +293,35 @@ fn belongs_to_text_fields(cmd: &Command) -> bool {
     )
 }
 
+/// Digitando, o atalho é do campo de texto: os de edição (desfazer, copiar…) e as teclas que
+/// escrevem (letras das teclas únicas). As de função (F1, F3, F11) continuam valendo.
+fn blocked_while_typing(s: &KeyboardShortcut, c: &Command) -> bool {
+    let plain = !s.modifiers.command && !s.modifiers.alt && !s.modifiers.ctrl;
+    let writes = s.logical_key.symbol_or_name().chars().count() == 1;
+    belongs_to_text_fields(c) || (plain && writes)
+}
+
 /// Comandos pedidos pelo teclado neste quadro (as teclas são consumidas).
-pub fn from_keyboard(ctx: &egui::Context) -> Vec<Command> {
+pub fn from_keyboard(ctx: &egui::Context, single_key: bool) -> Vec<Command> {
     let typing = ctx.egui_wants_keyboard_input();
     ctx.input_mut(|i| {
-        let mut out: Vec<Command> = shortcuts()
-            .into_iter()
-            .filter(|(_, c)| !(typing && belongs_to_text_fields(c)))
+        let mut out: Vec<Command> = shortcuts_for(single_key)
+            .iter()
+            .filter(|(s, c)| !(typing && blocked_while_typing(s, c)))
             .filter(|(s, _)| i.consume_shortcut(s))
-            .map(|(_, c)| c)
+            .map(|(_, c)| c.clone())
             .collect();
-        // o egui entrega Ctrl+C como evento "copiar", não como tecla: passa pelo mesmo filtro
-        let copy = Command::Doc(DocCommand::Copy);
-        if i.events.iter().any(|e| matches!(e, egui::Event::Copy))
-            && !(typing && belongs_to_text_fields(&copy))
-        {
-            out.push(copy);
+        // o egui entrega Ctrl+C, Ctrl+X e Ctrl+V como eventos, não como teclas; num campo de
+        // texto são dele
+        if !typing {
+            for e in &i.events {
+                match e {
+                    egui::Event::Copy => out.push(Command::Doc(DocCommand::Copy)),
+                    egui::Event::Cut => out.push(Command::Doc(DocCommand::Cut)),
+                    egui::Event::Paste(t) => out.push(Command::Paste(Some(t.clone()))),
+                    _ => {}
+                }
+            }
         }
         out
     })
@@ -317,6 +406,83 @@ mod tests {
         let cs = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
         assert!(has(cs, Key::ArrowUp, DocCommand::FirstPage));
         assert!(has(cs, Key::ArrowDown, DocCommand::LastPage));
+    }
+
+    #[test]
+    fn single_key_shortcuts_only_with_the_preference() {
+        use app_state::tools::Tool;
+        let plain = |all: &[(KeyboardShortcut, Command)], k: Key| {
+            all.iter()
+                .find(|(s, _)| s.modifiers == Modifiers::NONE && s.logical_key == k)
+                .map(|(_, c)| c.clone())
+        };
+        let off = shortcuts_for(false);
+        for k in [
+            Key::V,
+            Key::H,
+            Key::Z,
+            Key::S,
+            Key::U,
+            Key::D,
+            Key::X,
+            Key::K,
+        ] {
+            assert_eq!(plain(off, k), None, "{k:?} sem a preferência");
+        }
+        let on = shortcuts_for(true);
+        let tool = |t| Some(Command::Doc(DocCommand::Tool(t)));
+        assert_eq!(plain(on, Key::V), tool(Tool::Select));
+        assert_eq!(plain(on, Key::H), tool(Tool::Hand));
+        assert_eq!(plain(on, Key::Z), tool(Tool::Zoom));
+        assert_eq!(plain(on, Key::S), tool(Tool::Note));
+        assert_eq!(plain(on, Key::U), tool(Tool::Highlight));
+        assert_eq!(plain(on, Key::D), tool(Tool::Ink));
+        assert_eq!(plain(on, Key::X), tool(Tool::TextBox));
+        assert_eq!(plain(on, Key::K), tool(Tool::Stamp));
+        assert!(on.iter().any(|(s, c)| s.modifiers == Modifiers::SHIFT
+            && s.logical_key == Key::U
+            && *c == Command::Doc(DocCommand::CycleMarkup)));
+        let k = shortcut_of(&Command::Preferences).unwrap();
+        assert_eq!(shortcut_text(&k), "Ctrl+K");
+    }
+
+    #[test]
+    fn search_and_help_keys_match_acrobat() {
+        let text = |c: Command| shortcut_text(&shortcut_of(&c).unwrap());
+        assert_eq!(text(Command::Doc(DocCommand::FindNext)), "F3");
+        assert_eq!(text(Command::Doc(DocCommand::FindPrev)), "Shift+F3");
+        let all = shortcuts();
+        let has = |m: Modifiers, k: Key, c: DocCommand| {
+            all.iter()
+                .any(|(s, x)| s.modifiers == m && s.logical_key == k && *x == Command::Doc(c))
+        };
+        assert!(has(Modifiers::COMMAND, Key::G, DocCommand::FindNext));
+        assert!(has(
+            Modifiers::COMMAND | Modifiers::SHIFT,
+            Key::G,
+            DocCommand::FindPrev
+        ));
+        assert_eq!(text(Command::Help), "F1");
+        assert!(HELP_URL.starts_with("https://github.com/junior9283/gera-pdf-editor"));
+    }
+
+    #[test]
+    fn function_keys_work_while_typing_but_letters_do_not() {
+        let key = |k| KeyboardShortcut::new(Modifiers::NONE, k);
+        let doc = Command::Doc;
+        assert!(!blocked_while_typing(
+            &key(Key::F3),
+            &doc(DocCommand::FindNext)
+        ));
+        assert!(!blocked_while_typing(&key(Key::F11), &Command::FullScreen));
+        assert!(!blocked_while_typing(&key(Key::F1), &Command::Help));
+        let tool = doc(DocCommand::Tool(app_state::tools::Tool::Hand));
+        assert!(
+            blocked_while_typing(&key(Key::H), &tool),
+            "letra é do campo"
+        );
+        let undo = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
+        assert!(blocked_while_typing(&undo, &doc(DocCommand::Undo)));
     }
 
     #[test]

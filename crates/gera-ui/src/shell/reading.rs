@@ -46,13 +46,47 @@ pub fn bar(ctx: &egui::Context, doc: &mut DocTab, full_screen: bool) -> Option<C
     out
 }
 
+/// A quem vai o Esc: às janelas abertas antes de sair da tela cheia e, depois, do modo leitura.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Escape {
+    CloseWindow,
+    LeaveFullScreen,
+    LeaveReading,
+    Pass,
+}
+
+pub fn escape_target(window_open: bool, full_screen: bool, reading: bool) -> Escape {
+    if window_open {
+        Escape::CloseWindow
+    } else if full_screen {
+        Escape::LeaveFullScreen
+    } else if reading {
+        Escape::LeaveReading
+    } else {
+        Escape::Pass
+    }
+}
+
 /// O arquivo pediu tela cheia (`/PageMode /FullScreen`): pergunta antes, como o Acrobat.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FullScreenRequest {
     opened_at: Option<f64>,
+    /// A aba cujo arquivo pediu: se outra vier para a frente, a pergunta some.
+    tab: usize,
 }
 
 impl FullScreenRequest {
+    pub fn for_tab(tab: usize) -> Self {
+        Self {
+            opened_at: None,
+            tab,
+        }
+    }
+
+    pub fn belongs_to(&self, active: usize) -> bool {
+        self.tab == active
+    }
+
     /// Resposta efetiva para um clique (`Some(sim?)`) no instante `now`: cliques antes do atraso
     /// não contam.
     fn answer(&mut self, now: f64, clicked: Option<bool>) -> Option<bool> {
@@ -98,10 +132,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn full_screen_question_belongs_to_its_tab() {
+        let r = FullScreenRequest::for_tab(4);
+        assert!(r.belongs_to(4));
+        assert!(!r.belongs_to(5), "outra aba na frente: a pergunta some");
+    }
+
+    #[test]
+    fn escape_goes_to_open_windows_first() {
+        assert_eq!(escape_target(true, true, false), Escape::CloseWindow);
+        assert_eq!(escape_target(false, true, true), Escape::LeaveFullScreen);
+        assert_eq!(escape_target(false, false, true), Escape::LeaveReading);
+        assert_eq!(escape_target(false, false, false), Escape::Pass);
+    }
+
+    #[test]
     fn full_screen_asked_by_the_file_waits_for_a_deliberate_answer() {
         // o PDF não entra sozinho em tela cheia (poderia imitar outra tela): pergunta antes, e os
         // botões só valem depois do atraso, como no aviso dos links
-        let mut r = FullScreenRequest::default();
+        let mut r = FullScreenRequest::for_tab(3);
         assert_eq!(
             r.answer(10.0, Some(true)),
             None,
@@ -110,7 +159,7 @@ mod tests {
         assert_eq!(r.answer(10.3, Some(true)), None);
         assert_eq!(r.answer(10.7, None), None, "sem clique, segue perguntando");
         assert_eq!(r.answer(10.8, Some(true)), Some(true));
-        let mut r = FullScreenRequest::default();
+        let mut r = FullScreenRequest::for_tab(3);
         r.answer(0.0, None);
         assert_eq!(r.answer(1.0, Some(false)), Some(false));
     }

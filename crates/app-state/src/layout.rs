@@ -4,7 +4,7 @@ use std::ops::Range;
 pub const PAGE_GAP: f32 = 12.0;
 
 /// Como as páginas são dispostas na tela.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ViewMode {
     /// Uma página por vez.
     Single,

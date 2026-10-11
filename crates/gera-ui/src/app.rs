@@ -42,6 +42,8 @@ pub struct GeraApp {
     reading: bool,
     /// Último movimento do mouse (a barra da tela cheia some 2 s depois).
     last_motion: f64,
+    /// Janela Preferências aberta (as mudanças só valem com OK).
+    preferences: Option<crate::shell::preferences::PrefsDraft>,
     /// O arquivo pediu tela cheia: a pergunta está aberta.
     full_screen_request: Option<crate::shell::reading::FullScreenRequest>,
     /// Linha de ferramentas (Comentar ou Preencher e assinar) a abrir no próximo documento
@@ -55,8 +57,6 @@ pub struct GeraApp {
     last_doc: Option<PathBuf>,
     show_shortcuts: bool,
     show_about: bool,
-    /// Diálogo Identidade aberto pelo menu: nome sendo digitado.
-    identity: Option<String>,
     /// Janela Combinar arquivos.
     combine: crate::shell::combine::CombineWindow,
     compare: crate::shell::compare::CompareWindow,
@@ -94,13 +94,13 @@ impl GeraApp {
             reading: false,
             last_motion: 0.0,
             full_screen_request: None,
+            preferences: None,
             row_after_open: None,
             create_after_pick: false,
             creating: None,
             last_doc: None,
             show_shortcuts: false,
             show_about: false,
-            identity: None,
             combine: Default::default(),
             compare: Default::default(),
             link_warning: None,
@@ -182,6 +182,16 @@ impl GeraApp {
         if created {
             let mut doc = DocTab::new(ctx, path.clone(), self.prefs.dark);
             doc.set_author(self.prefs.author.clone());
+            let key = path.to_string_lossy();
+            doc.open_view = crate::doc_tab::OpenView {
+                mode: self.prefs.default_mode,
+                zoom: self.prefs.default_zoom,
+                last: self
+                    .prefs
+                    .restore_views
+                    .then(|| self.prefs.last_view(&key))
+                    .flatten(),
+            };
             doc.open(path);
             self.docs.push(doc);
         }
@@ -199,6 +209,12 @@ impl GeraApp {
         self.status.clear(); // a mensagem era sobre a aba anterior
         if let Some(doc) = self.doc_at(old) {
             doc.suspend();
+        }
+        // na tela cheia, a aba que vem para a frente também fica em apresentação
+        if self.fullscreen {
+            if let Some(doc) = self.doc_at(new) {
+                doc.enter_presentation();
+            }
         }
         if let Some(p) = self.tabs.doc_path(new) {
             self.last_doc = Some(p.to_path_buf());
@@ -237,7 +253,16 @@ impl GeraApp {
 
     fn close_tab(&mut self, tab: usize) {
         if let Some(i) = self.tabs.close(tab) {
-            self.docs.remove(i); // o Worker cai junto e a thread termina
+            let doc = self.docs.remove(i); // o Worker cai junto e a thread termina
+            self.remember_view_of(&doc);
+        }
+    }
+
+    /// Restaurar a última vista ao reabrir (Preferências → Documentos): guarda a do documento.
+    fn remember_view_of(&mut self, doc: &DocTab) {
+        if let (true, Some(view)) = (self.prefs.restore_views, doc.current_view()) {
+            self.prefs.remember_view(&doc.path.to_string_lossy(), view);
+            self.prefs_dirty = true;
         }
     }
 
@@ -269,6 +294,7 @@ impl GeraApp {
 
     fn remember(&mut self, path: PathBuf) {
         self.recents.add(path, now_secs());
+        self.recents.limit(self.prefs.max_recents);
         self.recents_changed();
     }
 
@@ -287,7 +313,8 @@ impl GeraApp {
         let active = self.tabs.active();
         // arquivos a abrir em abas novas (depois do laço: abrir mexe na lista de abas)
         let mut to_open = Vec::new();
-        let mut full_screen = false;
+        let mut full_screen = None;
+        let mut to_run = Vec::new();
         for tab in (FIXED..self.tabs.len()).rev() {
             let Some(i) = self.tabs.doc_index(tab) else {
                 continue;
@@ -308,7 +335,7 @@ impl GeraApp {
                         self.docs[i].path = dest.clone();
                         self.remember(dest);
                     }
-                    DocEvent::Author(name) => self.set_author(name),
+                    DocEvent::Author(name) => self.set_author(Some(name)),
                     DocEvent::ShowPanel(p) => {
                         if self.prefs.left_panel != Some(p) {
                             self.prefs.toggle_left(p);
@@ -322,7 +349,11 @@ impl GeraApp {
                     }
                     DocEvent::OpenFile(path) => to_open.push(path),
                     DocEvent::NeedSaveAs => self.dialogs.save_as(ctx, self.docs[i].path.clone()),
-                    DocEvent::FullScreen => full_screen |= tab == active && !self.fullscreen,
+                    DocEvent::FullScreen if tab == active && !self.fullscreen => {
+                        full_screen = Some(tab)
+                    }
+                    DocEvent::FullScreen => {}
+                    DocEvent::Run(cmd) => to_run.push(cmd),
                     DocEvent::OpenLink(target) => {
                         use crate::links::Outcome;
                         match crate::links::outcome(&target, &self.prefs.link_sites) {
@@ -340,9 +371,12 @@ impl GeraApp {
         for path in to_open {
             self.open_path(ctx, path);
         }
-        if full_screen {
+        for cmd in to_run {
+            self.run(ctx, cmd);
+        }
+        if let Some(tab) = full_screen {
             // o arquivo pediu (/PageMode /FullScreen): pergunta antes, como o Acrobat
-            self.full_screen_request = Some(Default::default());
+            self.full_screen_request = Some(crate::shell::reading::FullScreenRequest::for_tab(tab));
         }
         self.poll_creating(ctx);
         if let Some(picked) = self.dialogs.poll() {
@@ -433,6 +467,15 @@ impl GeraApp {
                 self.prefs_dirty = true;
             }
             Command::Tool(id) => self.run_tool(ctx, id),
+            Command::Paste(text) => {
+                if let Some(doc) = self.active_doc() {
+                    doc.paste(text);
+                }
+            }
+            Command::Help => ctx.open_url(egui::OpenUrl::new_tab(commands::HELP_URL)),
+            Command::Preferences => {
+                self.preferences = Some(crate::shell::preferences::PrefsDraft::new(&self.prefs))
+            }
             Command::FullScreen => {
                 self.fullscreen = !self.fullscreen;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
@@ -452,9 +495,6 @@ impl GeraApp {
             Command::Shortcuts => self.show_shortcuts = true,
             Command::About => self.show_about = true,
             Command::Compare => self.run_tool(ctx, tools_catalog::COMPARE),
-            Command::Identity => {
-                self.identity = Some(self.prefs.author.clone().unwrap_or_default());
-            }
             Command::Print => {
                 if let Some(doc) = self.active_doc() {
                     doc.open_print_dialog(ctx);
@@ -468,28 +508,12 @@ impl GeraApp {
         }
     }
 
-    /// Editar → Preferências → Identidade: muda o nome dos carimbos e autor das anotações.
-    fn identity_window(&mut self, ui: &mut egui::Ui) {
-        let Some(name) = self.identity.as_mut() else {
-            return;
-        };
-        match crate::shell::identity::window(ui, name) {
-            Some(true) => {
-                let name = name.trim().to_owned();
-                self.identity = None;
-                self.set_author(name);
-            }
-            Some(false) => self.identity = None,
-            None => {}
-        }
-    }
-
     /// Guarda o nome nas preferências e o passa a todas as abas.
-    fn set_author(&mut self, name: String) {
-        self.prefs.author = Some(name.clone());
+    fn set_author(&mut self, name: Option<String>) {
+        self.prefs.author = name.clone();
         self.prefs_dirty = true;
         for doc in &mut self.docs {
-            doc.set_author(Some(name.clone()));
+            doc.set_author(name.clone());
         }
     }
 
@@ -669,6 +693,10 @@ impl GeraApp {
         MenuState {
             doc_mode: view.map(|v| v.mode),
             doc_cover: view.is_some_and(|v| v.cover),
+            doc_dirty: self
+                .tabs
+                .doc_index(self.tabs.active())
+                .is_some_and(|i| self.docs[i].can_revert()),
             dark: self.prefs.dark,
             left: self.prefs.left_panel,
             tools_panel: self.prefs.tools_panel,
@@ -851,6 +879,11 @@ impl GeraApp {
 impl Drop for GeraApp {
     /// O app fechando: grava o que ainda estava pendente (o `saver` espera terminar).
     fn drop(&mut self) {
+        // saída sem perguntas (nada a salvar): as abas abertas não passaram por `close_tab`
+        let docs = std::mem::take(&mut self.docs);
+        for doc in &docs {
+            self.remember_view_of(doc);
+        }
         self.persist();
     }
 }
@@ -880,20 +913,36 @@ impl eframe::App for GeraApp {
         }
         self.persist_when_idle(ctx);
         if self.closing.is_none() {
-            for cmd in commands::from_keyboard(ctx) {
+            for cmd in commands::from_keyboard(ctx, self.prefs.single_key) {
                 self.run(ctx, cmd);
             }
-            // Esc sai da tela cheia, depois do modo leitura
-            if (self.fullscreen || self.reading)
+            // Esc: primeiro as janelas abertas, depois sair da tela cheia e do modo leitura
+            use crate::shell::reading::{escape_target, Escape};
+            let app_window = self.link_warning.is_some()
+                || self.full_screen_request.is_some()
+                || self.preferences.is_some();
+            let doc_window = self.active_doc().is_some_and(|d| d.has_modal());
+            // as janelas da aba tratam o próprio Esc
+            let target = if doc_window && !app_window {
+                Escape::Pass
+            } else {
+                escape_target(app_window, self.fullscreen, self.reading)
+            };
+            if target != Escape::Pass
                 && !ctx.egui_wants_keyboard_input()
                 && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
             {
-                let exit = if self.fullscreen {
-                    Command::FullScreen
-                } else {
-                    Command::ReadMode
-                };
-                self.run(ctx, exit);
+                match target {
+                    Escape::CloseWindow => {
+                        // como Bloquear, Não e Cancelar
+                        self.link_warning = None;
+                        self.full_screen_request = None;
+                        self.preferences = None;
+                    }
+                    Escape::LeaveFullScreen => self.run(ctx, Command::FullScreen),
+                    Escape::LeaveReading => self.run(ctx, Command::ReadMode),
+                    Escape::Pass => {}
+                }
             }
             if let Some(doc) = self.active_doc() {
                 doc.handle_input(ctx);
@@ -987,8 +1036,19 @@ impl eframe::App for GeraApp {
             // a aba do resultado abre com a linha Comparação (o PDF diz que é uma comparação)
             self.open_path(ui.ctx(), result);
         }
-        self.identity_window(ui);
         self.link_warning_window(ui.ctx());
+        self.preferences_window(ui.ctx());
+        // fim do quadro: barras (também a flutuante) já desenhadas; pedido de foco sem campo
+        // visível não fica esperando
+        if let Some(doc) = self.active_doc() {
+            doc.drop_unused_focus();
+        }
+        // a pergunta é da aba que pediu: se outra veio para a frente, some
+        let active = self.tabs.active();
+        self.full_screen_request = self
+            .full_screen_request
+            .take()
+            .filter(|r| r.belongs_to(active));
         let full = self
             .full_screen_request
             .as_mut()
@@ -998,6 +1058,44 @@ impl eframe::App for GeraApp {
             if yes && !self.fullscreen {
                 self.run(ui.ctx(), Command::FullScreen);
             }
+        }
+    }
+}
+
+impl GeraApp {
+    /// Preferências: OK aplica (tema e nome passam às abas), Cancelar descarta.
+    fn preferences_window(&mut self, ctx: &egui::Context) {
+        let Some(ok) = self.preferences.as_mut().and_then(|d| d.show(ctx)) else {
+            return;
+        };
+        let Some(draft) = self.preferences.take() else {
+            return;
+        };
+        let forget = draft.forget_recents;
+        let Some(new) = draft.finish(ok) else {
+            return; // Cancelar
+        };
+        if new == self.prefs && !forget {
+            return;
+        }
+        let fewer = new.max_recents < self.prefs.max_recents;
+        let (dark, author) = (new.dark, new.author.clone());
+        let (theme_changed, author_changed) =
+            (dark != self.prefs.dark, author != self.prefs.author);
+        self.prefs = new;
+        self.prefs_dirty = true;
+        if forget || fewer {
+            if forget {
+                self.recents.clear();
+            }
+            self.recents.limit(self.prefs.max_recents);
+            self.recents_changed();
+        }
+        if theme_changed {
+            self.set_dark(ctx, dark);
+        }
+        if author_changed {
+            self.set_author(author);
         }
     }
 }

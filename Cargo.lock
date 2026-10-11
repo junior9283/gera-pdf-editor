@@ -1423,10 +1423,12 @@ name = "gera-ui"
 version = "0.13.0"
 dependencies = [
  "app-state",
+ "arboard",
  "chrono",
  "eframe",
  "egui",
  "pdf-core",
+ "png",
  "rfd",
  "tempfile",
 ]

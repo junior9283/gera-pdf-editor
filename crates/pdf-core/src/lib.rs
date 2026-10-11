@@ -20,6 +20,7 @@ mod pages;
 mod pagination;
 mod prepare;
 mod redact;
+mod search;
 mod security;
 mod sign;
 pub mod signature;

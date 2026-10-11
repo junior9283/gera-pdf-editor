@@ -176,6 +176,46 @@ impl DocView {
         (right - left > 1.0).then_some((left, right - left))
     }
 
+    /// Zoom com marca: amplia até o retângulo `r` (pontos do MuPDF) da página caber em `avail`, e
+    /// devolve a rolagem (x, y) que o centraliza. `None` se a página não existe.
+    pub fn zoom_to_rect(
+        &mut self,
+        page: usize,
+        r: pdf_core::PdfRect,
+        avail: (f32, f32),
+    ) -> Option<(f32, f32)> {
+        (page < self.sizes.len()).then_some(())?;
+        let unit = PageMap {
+            zoom: 1.0,
+            ..self.page_map(page, (0.0, 0.0))
+        };
+        let (a, b) = (unit.to_screen((r.x0, r.y0)), unit.to_screen((r.x1, r.y1)));
+        let size = ((a.0 - b.0).abs().max(0.01), (a.1 - b.1).abs().max(0.01));
+        self.set_manual_zoom(zoom::fit_page(size, avail));
+        let center = ((r.x0 + r.x1) / 2.0, (r.y0 + r.y1) / 2.0);
+        self.center_on(page, center, avail)
+    }
+
+    /// Rolagem (x, y) que põe o ponto `pt` da página no centro de `avail`, no zoom atual. Nos modos
+    /// página a página também troca a tela.
+    pub fn center_on(
+        &mut self,
+        page: usize,
+        pt: (f32, f32),
+        avail: (f32, f32),
+    ) -> Option<(f32, f32)> {
+        (page < self.sizes.len()).then_some(())?;
+        if self.mode.is_paged() {
+            self.spread = self.layout.row_of(page);
+        }
+        let origin = (
+            self.layout.page_x(page),
+            self.layout.page_top(page) - self.window().0,
+        );
+        let (x, y) = self.page_map(page, origin).to_screen(pt);
+        Some(((x - avail.0 / 2.0).max(0.0), (y - avail.1 / 2.0).max(0.0)))
+    }
+
     /// Rolagem horizontal que põe a borda esquerda do conteúdo visível na margem da janela.
     pub fn visible_left(&self, avail_w: f32) -> Option<f32> {
         let page = self.visible_box?.0;
@@ -613,6 +653,36 @@ mod tests {
         // a 90°, o y do PDF vira x na tela: o ponto (30, 50) fica 30pt abaixo do topo
         let m = v.page_map(0, (0.0, 0.0));
         assert_eq!(m.to_screen((30.0, 50.0)), (150.0, 30.0));
+    }
+
+    #[test]
+    fn marquee_zoom_fits_and_centers_the_rectangle() {
+        let mut v = view(); // páginas de 100 × 200 pt
+                            // retângulo de 20 × 10 pt no meio da página 1, numa janela de 400 × 300
+        let r = pdf_core::PdfRect::new(40.0, 95.0, 60.0, 105.0);
+        let (x, y) = v.zoom_to_rect(1, r, (400.0, 300.0)).unwrap();
+        assert!(
+            (v.zoom - 20.0).abs() < 1e-3,
+            "400/20 = 20, 300/10 = 30: {}",
+            v.zoom
+        );
+        assert_eq!(v.fit, Fit::None);
+        // o centro do retângulo fica no centro da janela
+        let cx = v.layout.page_x(1) + 50.0 * v.zoom;
+        let cy = v.layout.page_top(1) - v.window().0 + 100.0 * v.zoom;
+        assert!(
+            (x - (cx - 200.0)).abs() < 1e-2 && (y - (cy - 150.0)).abs() < 1e-2,
+            "{x} {y}"
+        );
+        // retângulo minúsculo: no máximo 6400 %
+        let tiny = pdf_core::PdfRect::new(10.0, 10.0, 10.1, 10.1);
+        v.zoom_to_rect(0, tiny, (400.0, 300.0));
+        assert_eq!(v.zoom, app_state::zoom::MAX_ZOOM);
+        assert_eq!(
+            v.zoom_to_rect(9, r, (400.0, 300.0)),
+            None,
+            "página inexistente"
+        );
     }
 
     #[test]
