@@ -2293,7 +2293,7 @@ impl DocTab {
         };
         let avail_w = ui.available_width() - 24.0;
         if let Some(ratio) = view.apply_fit(avail_w, ui.available_height() - 24.0) {
-            self.jump_to = Some(self.last.scroll_y * ratio);
+            self.jump_to = Some(rescaled_scroll(self.jump_to, self.last.scroll_y, ratio));
             if view.fit == Fit::Visible {
                 self.jump_x = view.visible_left(avail_w);
             }
@@ -2573,6 +2573,14 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_jump_survives_the_zoom_change() {
+        // o salto pedido antes do primeiro ajuste (link para outro PDF, página inicial do arquivo)
+        // não pode virar "topo" quando o zoom se ajusta à janela
+        assert_eq!(rescaled_scroll(Some(500.0), 0.0, 2.0), 1000.0);
+        assert_eq!(rescaled_scroll(None, 300.0, 0.5), 150.0);
+    }
+
+    #[test]
     fn presentation_restores_mode_and_fit() {
         let mut tab = tab_with_pages(4);
         let v = tab.view.as_mut().unwrap();
@@ -2725,6 +2733,12 @@ mod tests {
         let ids: Vec<_> = all.iter().map(|x| x.id).collect();
         assert_eq!(ids, [1, 3, 5, 4]);
     }
+}
+
+/// Rolagem depois de o zoom mudar pela razão `ratio`: a de um salto ainda pendente (pedido no zoom
+/// antigo), ou a atual.
+fn rescaled_scroll(pending: Option<f32>, scroll_y: f32, ratio: f32) -> f32 {
+    pending.unwrap_or(scroll_y) * ratio
 }
 
 /// Com Selecionar, sobre um link sem comentário por cima: cursor de mão e dica com o destino.
