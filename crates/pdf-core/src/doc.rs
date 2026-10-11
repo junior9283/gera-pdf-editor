@@ -190,26 +190,86 @@ impl PdfDoc {
         let mut ctm = Matrix::new_rotate(f32::from(rotation.degrees()));
         ctm.scale(scale, scale); // escala uniforme: comuta com a rotação
         let pix = page.to_pixmap(&ctm, &Colorspace::device_rgb(), false, true)?;
+        Ok(packed_rgb(&pix, invert))
+    }
+
+    /// Ladrilho `tile` (coluna, linha) de lado `size` px da página renderizada em `scale`, com a
+    /// vista girada. Serve para zooms acima do teto da página inteira: só o recorte é alocado. Os da
+    /// borda saem cortados no tamanho da página.
+    pub fn render_tile(
+        &self,
+        page: i32,
+        scale: f32,
+        invert: bool,
+        rotation: Rotation,
+        tile: (u32, u32),
+        size: u32,
+    ) -> Result<RenderedPage> {
+        let page = self.load(page)?;
+        if !scale.is_finite()
+            || scale <= 0.0
+            || scale > MAX_TILE_SCALE
+            || !(1..=4096).contains(&size)
+        {
+            return Err(PdfError::InvalidScale(scale));
+        }
+        let mut ctm = Matrix::new_rotate(f32::from(rotation.degrees()));
+        ctm.scale(scale, scale);
+        let full = page.bounds()?.transform(&ctm).round();
+        let x0 = i64::from(full.x0) + i64::from(tile.0) * i64::from(size);
+        let y0 = i64::from(full.y0) + i64::from(tile.1) * i64::from(size);
+        let x1 = (x0 + i64::from(size)).min(i64::from(full.x1));
+        let y1 = (y0 + i64::from(size)).min(i64::from(full.y1));
+        if x0 >= x1 || y0 >= y1 {
+            return Err(PdfError::InvalidScale(scale)); // fora da página
+        }
+        let rect = mupdf::IRect::new(x0 as i32, y0 as i32, x1 as i32, y1 as i32);
+        let mut pix = mupdf::Pixmap::new_with_rect(&Colorspace::device_rgb(), rect, false)?;
+        pix.clear_with(255)?;
+        {
+            let device = mupdf::Device::from_pixmap(&pix)?;
+            page.run(&device, &ctm)?;
+        }
+        Ok(packed_rgb(&pix, invert))
+    }
+
+    /// Caixa da tinta da página (sem anotações), em coordenadas do MuPDF, para "Ajustar ao
+    /// conteúdo visível". `None` numa página em branco.
+    pub fn content_box(&self, page: i32) -> Result<Option<PdfRect>> {
+        let page = self.load(page)?;
+        let bounds = page.bounds()?;
+        // 0,25, mas o lado maior nunca passa de 2048 px (página gigante, /UserUnit)
+        let side = (bounds.x1 - bounds.x0).max(bounds.y1 - bounds.y0).max(1.0);
+        let scale = 0.25f32.min(2048.0 / side);
+        if !scale.is_finite() || scale <= 0.0 {
+            return Ok(None);
+        }
+        let ctm = Matrix::new_scale(scale, scale);
+        let pix = page.to_pixmap(&ctm, &Colorspace::device_rgb(), false, false)?;
         let (w, h, stride) = (
             pix.width() as usize,
             pix.height() as usize,
             pix.stride() as usize,
         );
-        debug_assert_eq!(pix.n(), 3, "device_rgb sem alfa tem 3 canais");
-        let mut rgb = Vec::with_capacity(w * h * 3);
-        for row in pix.samples().chunks(stride).take(h) {
-            let row = &row[..w * 3];
-            if invert {
-                rgb.extend(row.iter().map(|b| !b));
-            } else {
-                rgb.extend_from_slice(row);
+        // direto nas amostras (sem copiar o pixmap): limites da tinta
+        let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+        for (y, row) in pix.samples().chunks(stride).take(h).enumerate() {
+            for (x, px) in row[..w * 3].chunks(3).enumerate() {
+                if px.iter().any(|&c| c < 250) {
+                    (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+                }
             }
         }
-        Ok(RenderedPage {
-            width: w as u32,
-            height: h as u32,
-            rgb,
-        })
+        if x0 >= x1 {
+            return Ok(None);
+        }
+        let to_pt = |v: usize, origin: f32| v as f32 / scale + origin;
+        Ok(Some(PdfRect::new(
+            to_pt(x0, bounds.x0),
+            to_pt(y0, bounds.y0),
+            to_pt(x1, bounds.x0).min(bounds.x1),
+            to_pt(y1, bounds.y0).min(bounds.y1),
+        )))
     }
 
     pub fn search(&self, page: i32, needle: &str) -> Result<Vec<PdfRect>> {
@@ -735,7 +795,11 @@ fn temp_path(dest: &Path) -> Result<PathBuf> {
 impl PdfDoc {
     pub fn annotations(&self, page: i32) -> Result<Vec<AnnotInfo>> {
         self.check_page(page)?;
-        let page_ref = self.inner.load_pdf_page(page)?;
+        self.annotations_in(&mut self.inner.load_pdf_page(page)?, page)
+    }
+
+    /// Anotações da página já carregada (a abertura carrega cada página uma vez só).
+    fn annotations_in(&self, page_ref: &mut PdfPage, page: i32) -> Result<Vec<AnnotInfo>> {
         let mut out = Vec::new();
         for mut annot in page_ref.annotations() {
             // campos de formulário não são comentários (ficam em `fields`)
@@ -758,6 +822,22 @@ impl PdfDoc {
             out.push(annot_info(&annot, page)?);
         }
         Ok(out)
+    }
+
+    /// Anotações e links de todas as páginas, numa passada (cada página é carregada uma vez).
+    /// Uma página ilegível perde só as próprias anotações e links.
+    fn annotations_and_links(&self) -> Result<(Vec<AnnotInfo>, Vec<crate::LinkInfo>)> {
+        let (mut annots, mut links) = (Vec::new(), Vec::new());
+        let count = self.page_count()?;
+        for p in 0..count {
+            // página ilegível: perde só o que é dela
+            let Ok(mut page_ref) = self.inner.load_pdf_page(p) else {
+                continue;
+            };
+            annots.extend(self.annotations_in(&mut page_ref, p).unwrap_or_default());
+            links.extend(self.links_in(&page_ref, p, count).unwrap_or_default());
+        }
+        Ok((annots, links))
     }
 
     pub fn all_annotations(&self) -> Result<Vec<AnnotInfo>> {
@@ -1185,11 +1265,14 @@ impl PdfDoc {
         let sizes = (0..self.page_count()?)
             .map(|p| self.page_size(p))
             .collect::<Result<Vec<_>>>()?;
+        let (annots, links) = self.annotations_and_links().unwrap_or_default();
         Ok(DocSummary {
             path: self.path.clone(),
             sizes,
             outline: self.outline().unwrap_or_default(),
-            annots: self.all_annotations().unwrap_or_default(),
+            annots,
+            links,
+            initial_view: self.initial_view(),
             fields: self.all_fields().unwrap_or_default(),
             form_notes: self.form_notes().unwrap_or_default(),
             security: self.security()?,
@@ -1207,6 +1290,33 @@ impl PdfDoc {
         info.and_then(|i| i.get_dict("GeraCompare").ok().flatten())
             .and_then(|v| v.as_bool().ok())
             .unwrap_or(false)
+    }
+}
+
+/// Escala máxima de um ladrilho: 6400 % numa tela 4× (o ladrilho tem tamanho fixo).
+const MAX_TILE_SCALE: f32 = 256.0;
+
+/// Pixels RGB compactos (sem o preenchimento de cada linha) de um pixmap `device_rgb` sem alfa.
+fn packed_rgb(pix: &mupdf::Pixmap, invert: bool) -> RenderedPage {
+    let (w, h, stride) = (
+        pix.width() as usize,
+        pix.height() as usize,
+        pix.stride() as usize,
+    );
+    debug_assert_eq!(pix.n(), 3, "device_rgb sem alfa tem 3 canais");
+    let mut rgb = Vec::with_capacity(w * h * 3);
+    for row in pix.samples().chunks(stride).take(h) {
+        let row = &row[..w * 3];
+        if invert {
+            rgb.extend(row.iter().map(|b| !b));
+        } else {
+            rgb.extend_from_slice(row);
+        }
+    }
+    RenderedPage {
+        width: w as u32,
+        height: h as u32,
+        rgb,
     }
 }
 

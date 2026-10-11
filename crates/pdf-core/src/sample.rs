@@ -62,7 +62,12 @@ pub fn sample_pdf_sized(pages: usize, rotate: i32, size: (u32, u32)) -> Vec<u8> 
             ));
         }
     }
-    let mut out = b"%PDF-1.4\n".to_vec();
+    pdf_from_objects(&objs)
+}
+
+/// PDF com os objetos dados (o objeto `i` é `objs[i - 1]`; o 1 é o catálogo), com xref e trailer.
+pub fn pdf_from_objects(objs: &[String]) -> Vec<u8> {
+    let mut out = b"%PDF-1.7\n".to_vec();
     let mut offsets = Vec::with_capacity(objs.len());
     for (i, body) in objs.iter().enumerate() {
         offsets.push(out.len());
@@ -125,23 +130,5 @@ pub fn form_pdf() -> Vec<u8> {
         "<< /Type /XObject /Subtype /Form /BBox [0 0 15 15] /Resources << /Font << /ZaDb 12 0 R >> >> /Length 34 >>\nstream\nBT /ZaDb 12 Tf 2 3 Td (4) Tj ET\nendstream".to_owned(),
         "<< /Type /XObject /Subtype /Form /BBox [0 0 15 15] /Length 0 >>\nstream\n\nendstream".to_owned(),
     ];
-    let mut out = b"%PDF-1.7\n".to_vec();
-    let mut offsets = Vec::new();
-    for (i, o) in objs.iter().enumerate() {
-        offsets.push(out.len());
-        out.extend(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
-    }
-    let xref = out.len();
-    out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
-    for off in offsets {
-        out.extend(format!("{off:010} 00000 n \n").as_bytes());
-    }
-    out.extend(
-        format!(
-            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
-            objs.len() + 1
-        )
-        .as_bytes(),
-    );
-    out
+    pdf_from_objects(&objs)
 }

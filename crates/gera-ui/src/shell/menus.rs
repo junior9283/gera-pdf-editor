@@ -42,16 +42,6 @@ fn check(ui: &mut egui::Ui, out: &mut Option<Command>, cmd: Command, checked: bo
     }
 }
 
-/// Ferramenta do catálogo ainda não pronta: o texto "em breve" vem do próprio catálogo.
-fn soon_tool(ui: &mut egui::Ui, id: &str) {
-    if let Some(t) = tools_catalog::find(id) {
-        ui.add_enabled(
-            false,
-            egui::Button::new(format!("{}  · {}", t.name, tools_catalog::badge(t))),
-        );
-    }
-}
-
 pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
     let mut out = None;
     let has_doc = s.doc_mode.is_some();
@@ -76,7 +66,7 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
             ui.separator();
             item(ui, &mut out, doc(DocCommand::Save), has_doc);
             item(ui, &mut out, Command::SaveAs, has_doc);
-            soon_tool(ui, "exportar");
+            item(ui, &mut out, Command::Tool(tools_catalog::EXPORT), has_doc);
             ui.separator();
             item(ui, &mut out, Command::Properties, has_doc);
             item(ui, &mut out, Command::Print, has_doc);
@@ -105,8 +95,11 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
                     DocCommand::ZoomIn,
                     DocCommand::ZoomOut,
                     DocCommand::ZoomReset,
-                    DocCommand::Fit(Fit::Width),
                     DocCommand::Fit(Fit::Page),
+                    DocCommand::Fit(Fit::Width),
+                    DocCommand::Fit(Fit::Height),
+                    DocCommand::Fit(Fit::Visible),
+                    DocCommand::ZoomTo,
                 ] {
                     item(ui, &mut out, doc(c), has_doc);
                 }
@@ -140,6 +133,22 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
                     has_doc,
                 );
             });
+            ui.menu_button("Navegação de páginas", |ui| {
+                for c in [
+                    DocCommand::FirstPage,
+                    DocCommand::PrevPage,
+                    DocCommand::NextPage,
+                    DocCommand::LastPage,
+                ] {
+                    item(ui, &mut out, doc(c), has_doc);
+                }
+                ui.separator();
+                item(ui, &mut out, doc(DocCommand::GoToPage), has_doc);
+                ui.separator();
+                item(ui, &mut out, doc(DocCommand::ViewBack), has_doc);
+                item(ui, &mut out, doc(DocCommand::ViewForward), has_doc);
+            });
+            item(ui, &mut out, Command::ReadMode, has_doc);
             item(ui, &mut out, Command::FullScreen, true);
             ui.menu_button("Painéis", |ui| {
                 for p in LeftPanel::ALL {
@@ -157,8 +166,18 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
             check(ui, &mut out, Command::ToggleDark, s.dark, true);
         });
         ui.menu_button("Assinar", |ui| {
-            soon_tool(ui, "assinar");
-            soon_tool(ui, "certificados");
+            item(
+                ui,
+                &mut out,
+                Command::Tool(tools_catalog::FILL_SIGN),
+                has_doc,
+            );
+            item(
+                ui,
+                &mut out,
+                Command::Tool(tools_catalog::CERTIFICATES),
+                has_doc,
+            );
         });
         ui.menu_button("Janela", |ui| {
             for (tab, title) in &s.tabs {

@@ -38,6 +38,12 @@ pub struct GeraApp {
     /// Recentes mudaram e ainda não foram gravados.
     recents_dirty: bool,
     fullscreen: bool,
+    /// Modo leitura: só o menu, as abas e as páginas.
+    reading: bool,
+    /// Último movimento do mouse (a barra da tela cheia some 2 s depois).
+    last_motion: f64,
+    /// O arquivo pediu tela cheia: a pergunta está aberta.
+    full_screen_request: Option<crate::shell::reading::FullScreenRequest>,
     /// Linha de ferramentas (Comentar ou Preencher e assinar) a abrir no próximo documento
     /// aberto pelo seletor.
     row_after_open: Option<&'static str>,
@@ -54,6 +60,8 @@ pub struct GeraApp {
     /// Janela Combinar arquivos.
     combine: crate::shell::combine::CombineWindow,
     compare: crate::shell::compare::CompareWindow,
+    /// Aviso de segurança de um link (endereço ou outro arquivo) esperando resposta.
+    link_warning: Option<crate::links::LinkWarning>,
     bench: Option<Bench>,
 }
 
@@ -83,6 +91,9 @@ impl GeraApp {
             prefs_dirty: false,
             recents_dirty: false,
             fullscreen: false,
+            reading: false,
+            last_motion: 0.0,
+            full_screen_request: None,
             row_after_open: None,
             create_after_pick: false,
             creating: None,
@@ -92,6 +103,7 @@ impl GeraApp {
             identity: None,
             combine: Default::default(),
             compare: Default::default(),
+            link_warning: None,
             bench,
         };
         app.refresh_recent_exists();
@@ -275,6 +287,7 @@ impl GeraApp {
         let active = self.tabs.active();
         // arquivos a abrir em abas novas (depois do laço: abrir mexe na lista de abas)
         let mut to_open = Vec::new();
+        let mut full_screen = false;
         for tab in (FIXED..self.tabs.len()).rev() {
             let Some(i) = self.tabs.doc_index(tab) else {
                 continue;
@@ -309,11 +322,27 @@ impl GeraApp {
                     }
                     DocEvent::OpenFile(path) => to_open.push(path),
                     DocEvent::NeedSaveAs => self.dialogs.save_as(ctx, self.docs[i].path.clone()),
+                    DocEvent::FullScreen => full_screen |= tab == active && !self.fullscreen,
+                    DocEvent::OpenLink(target) => {
+                        use crate::links::Outcome;
+                        match crate::links::outcome(&target, &self.prefs.link_sites) {
+                            Some(Outcome::OpenUrl(url)) => {
+                                ctx.open_url(egui::OpenUrl::new_tab(url))
+                            }
+                            Some(Outcome::Ask(warning)) => self.link_warning = Some(warning),
+                            Some(Outcome::Refuse(msg)) => self.docs[i].status = msg,
+                            None => {}
+                        }
+                    }
                 }
             }
         }
         for path in to_open {
             self.open_path(ctx, path);
+        }
+        if full_screen {
+            // o arquivo pediu (/PageMode /FullScreen): pergunta antes, como o Acrobat
+            self.full_screen_request = Some(Default::default());
         }
         self.poll_creating(ctx);
         if let Some(picked) = self.dialogs.poll() {
@@ -403,10 +432,20 @@ impl GeraApp {
                 self.prefs.tools_panel = !self.prefs.tools_panel;
                 self.prefs_dirty = true;
             }
+            Command::Tool(id) => self.run_tool(ctx, id),
             Command::FullScreen => {
                 self.fullscreen = !self.fullscreen;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+                if self.fullscreen {
+                    if let Some(doc) = self.active_doc() {
+                        doc.enter_presentation();
+                    }
+                } else {
+                    // a aba que entrou, mesmo que outra esteja na frente agora (as outras ignoram)
+                    self.docs.iter_mut().for_each(DocTab::exit_presentation);
+                }
             }
+            Command::ReadMode => self.reading = !self.reading,
             Command::NextTab => self.switch_tab(TabList::next),
             Command::PrevTab => self.switch_tab(TabList::prev),
             Command::ActivateTab(t) => self.activate(t),
@@ -493,9 +532,16 @@ impl GeraApp {
         let Some(i) = self.tabs.doc_index(self.tabs.active()) else {
             return;
         };
-        let mut prefs = self.prefs.clone();
         let doc = &mut self.docs[i];
         doc.begin();
+        if self.reading {
+            // modo leitura: só as páginas e a barra flutuante
+            doc.show_canvas(ui);
+            if let Some(cmd) = crate::shell::reading::bar(ui.ctx(), doc, false) {
+                self.run(ui.ctx(), cmd);
+            }
+            return;
+        }
         let mut cmd = egui::Panel::top("ferramentas-doc")
             .show(ui, |ui| toolbar::show(ui, doc))
             .inner;
@@ -554,49 +600,57 @@ impl GeraApp {
                 .or(cmd);
         }
         doc.show_status(ui, &self.status);
+        // só os campos dos painéis (copiar as preferências inteiras a cada quadro custaria caro)
+        let (mut left_panel, mut left_width, mut tools_width) = (
+            self.prefs.left_panel,
+            self.prefs.left_width,
+            self.prefs.tools_width,
+        );
         let clicked = egui::Panel::left("trilho")
             .exact_size(40.0)
             .resizable(false)
-            .show(ui, |ui| panels::rail(ui, prefs.left_panel))
+            .show(ui, |ui| panels::rail(ui, left_panel))
             .inner;
         if let Some(p) = clicked {
-            prefs.toggle_left(p);
+            left_panel = app_state::prefs::toggled(left_panel, p);
         }
-        if let Some(p) = prefs.left_panel {
+        if let Some(p) = left_panel {
             let r = egui::Panel::left("painel-esquerdo")
                 .resizable(true)
-                .default_size(prefs.left_width)
+                .default_size(left_width)
                 .size_range(MIN_PANEL..=MAX_PANEL)
                 .show(ui, |ui| doc.side_panel(ui, p));
-            prefs.left_width = r.response.rect.width();
+            left_width = r.response.rect.width();
         }
         let comments = doc.comment_tools;
         if comments {
             // com Comentar ligado, a direita mostra o painel Comentários (como no Acrobat)
             let r = egui::Panel::right("painel-comentarios")
                 .resizable(true)
-                .default_size(prefs.tools_width.max(280.0))
+                .default_size(tools_width.max(280.0))
                 .size_range(MIN_PANEL..=MAX_PANEL)
                 .show(ui, |ui| doc.comments_panel(ui));
-            prefs.tools_width = r.response.rect.width();
+            tools_width = r.response.rect.width();
         }
         // o Organizar páginas usa a largura toda (como no Acrobat)
-        let tool_id = (prefs.tools_panel && !comments && doc.organize.is_none()).then(|| {
+        let tool_id = (self.prefs.tools_panel && !comments && doc.organize.is_none()).then(|| {
             let r = egui::Panel::right("painel-ferramentas")
                 .resizable(true)
-                .default_size(prefs.tools_width)
+                .default_size(tools_width)
                 .size_range(MIN_PANEL..=MAX_PANEL)
                 .show(ui, tools_hub::side_list);
-            prefs.tools_width = r.response.rect.width();
+            tools_width = r.response.rect.width();
             r.inner
         });
         doc.show_canvas(ui);
         let width_changed = |a: f32, b: f32| (a - b).abs() > 0.5;
-        if prefs.left_panel != self.prefs.left_panel
-            || width_changed(prefs.left_width, self.prefs.left_width)
-            || width_changed(prefs.tools_width, self.prefs.tools_width)
+        if left_panel != self.prefs.left_panel
+            || width_changed(left_width, self.prefs.left_width)
+            || width_changed(tools_width, self.prefs.tools_width)
         {
-            self.prefs = prefs;
+            self.prefs.left_panel = left_panel;
+            self.prefs.left_width = left_width;
+            self.prefs.tools_width = tools_width;
             self.prefs_dirty = true;
         }
         if let Some(id) = tool_id.flatten() {
@@ -829,11 +883,17 @@ impl eframe::App for GeraApp {
             for cmd in commands::from_keyboard(ctx) {
                 self.run(ctx, cmd);
             }
-            if self.fullscreen
+            // Esc sai da tela cheia, depois do modo leitura
+            if (self.fullscreen || self.reading)
                 && !ctx.egui_wants_keyboard_input()
                 && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
             {
-                self.run(ctx, Command::FullScreen);
+                let exit = if self.fullscreen {
+                    Command::FullScreen
+                } else {
+                    Command::ReadMode
+                };
+                self.run(ctx, exit);
             }
             if let Some(doc) = self.active_doc() {
                 doc.handle_input(ctx);
@@ -887,9 +947,23 @@ impl eframe::App for GeraApp {
             }
             _ if !self.fullscreen => self.document_view(ui),
             _ => {
+                let now = ui.input(|i| i.time);
+                if ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
+                    self.last_motion = now;
+                }
+                let moving = now - self.last_motion < 2.0;
+                let mut cmd = None;
                 if let Some(doc) = self.active_doc() {
                     doc.begin(); // tela cheia: só as páginas
                     doc.show_canvas(ui);
+                    if moving {
+                        cmd = crate::shell::reading::bar(ui.ctx(), doc, true);
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_secs(2));
+                    }
+                }
+                if let Some(cmd) = cmd {
+                    self.run(ui.ctx(), cmd);
                 }
             }
         }
@@ -914,6 +988,59 @@ impl eframe::App for GeraApp {
             self.open_path(ui.ctx(), result);
         }
         self.identity_window(ui);
+        self.link_warning_window(ui.ctx());
+        let full = self
+            .full_screen_request
+            .as_mut()
+            .and_then(|r| r.show(ui.ctx()));
+        if let Some(yes) = full {
+            self.full_screen_request = None;
+            if yes && !self.fullscreen {
+                self.run(ui.ctx(), Command::FullScreen);
+            }
+        }
+    }
+}
+
+impl GeraApp {
+    /// Aviso de segurança: Permitir abre o endereço (ou o arquivo); a escolha pode ficar lembrada
+    /// para o site.
+    fn link_warning_window(&mut self, ctx: &egui::Context) {
+        use app_state::link_policy::{remember, LinkDecision};
+        use pdf_core::LinkTarget;
+        let Some(answer) = self.link_warning.as_mut().and_then(|w| w.show(ctx)) else {
+            return;
+        };
+        let Some(warning) = self.link_warning.take() else {
+            return;
+        };
+        let allow = answer == LinkDecision::Allow;
+        match warning.target {
+            LinkTarget::Uri(url) => {
+                if warning.remember {
+                    remember(&mut self.prefs.link_sites, &url, answer);
+                    self.prefs_dirty = true;
+                }
+                if allow {
+                    ctx.open_url(egui::OpenUrl::new_tab(url));
+                }
+            }
+            LinkTarget::File { path, page } if allow => {
+                if !path.is_file() {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    if let Some(doc) = self.active_doc() {
+                        doc.status = format!("Arquivo não encontrado: {name}");
+                    }
+                    return;
+                }
+                self.open_path(ctx, path);
+                // open_path deixa a aba do arquivo na frente
+                if let (Some(page), Some(doc)) = (page, self.active_doc()) {
+                    doc.show_page(page);
+                }
+            }
+            _ => {}
+        }
     }
 }
 

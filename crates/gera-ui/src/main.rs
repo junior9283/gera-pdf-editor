@@ -9,6 +9,7 @@ mod edit;
 mod edit_pdf;
 mod fields;
 mod fill_sign;
+mod links;
 mod open_dialog;
 mod organize;
 mod pagination_tool;

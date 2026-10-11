@@ -3,6 +3,7 @@ use crate::canvas::{self, CanvasFrame};
 use crate::edit::{screen_rect, EditState};
 use crate::print_job::{self, PrintJobs};
 use crate::search::SearchState;
+use crate::shell::commands::{self, Command};
 use crate::shell::print_dialog::{PrintChoice, PrintDialog};
 use crate::sidebar::{self, SidebarAction};
 use crate::view::DocView;
@@ -53,6 +54,18 @@ pub enum DocCommand {
     /// Resultado do Comparar arquivos: próxima / anterior alteração.
     NextChange,
     PrevChange,
+    /// Exibir → Navegação de páginas.
+    FirstPage,
+    PrevPage,
+    NextPage,
+    LastPage,
+    /// Leva o foco ao campo da página.
+    GoToPage,
+    /// Zoom para…: leva o foco ao campo de zoom.
+    ZoomTo,
+    /// Histórico de vistas (Alt+← / Alt+→).
+    ViewBack,
+    ViewForward,
 }
 
 /// O que aconteceu com o documento e interessa à casca (abas e recentes).
@@ -71,6 +84,10 @@ pub enum DocEvent {
     OpenFile(PathBuf),
     /// Documento criado pelo app (sem lugar escolhido): Salvar pede o destino.
     NeedSaveAs,
+    /// Clique num link para fora do documento (endereço, outro arquivo ou bloqueado).
+    OpenLink(pdf_core::LinkTarget),
+    /// O arquivo pede para abrir em tela cheia (`/PageMode /FullScreen`).
+    FullScreen,
 }
 
 /// Impressão esperando a cópia temporária: opções, página atual no clique e o arquivo pedido.
@@ -98,6 +115,23 @@ pub struct DocTab {
     /// Último quadro do canvas (rolagem e página atual).
     pub(crate) last: CanvasFrame,
     pub(crate) jump_to: Option<f32>,
+    /// Página e ponto do último salto ainda não mostrado (refeito se o zoom mudar antes).
+    pending_target: Option<(i32, Option<(f32, f32)>)>,
+    /// Rolagem horizontal pedida (Ajustar ao conteúdo visível).
+    jump_x: Option<f32>,
+    /// Zoom para… (Ctrl+Y): o campo de zoom pede o foco; `zoom_text` é o que está sendo digitado.
+    focus_zoom: bool,
+    zoom_text: Option<String>,
+    /// Vista anterior e seguinte (Alt+← / Alt+→).
+    history_views: app_state::view_history::ViewHistory,
+    /// Ir para página: o campo da página pede o foco no próximo quadro.
+    focus_page: bool,
+    /// Links de todas as páginas.
+    links: Vec<pdf_core::LinkInfo>,
+    /// Página a mostrar assim que o documento abrir (link de outro PDF).
+    pending_page: Option<i32>,
+    /// Tela cheia: modo, capa, ajuste e zoom de antes, para voltar a eles ao sair.
+    presentation: Option<(ViewMode, bool, Fit, f32)>,
     pub(crate) search: SearchState,
     pub(crate) edit: EditState,
     /// Anotações visíveis do documento em memória (o worker manda a lista a cada mudança).
@@ -224,6 +258,15 @@ impl DocTab {
             status: String::new(),
             last: CanvasFrame::default(),
             jump_to: None,
+            jump_x: None,
+            pending_target: None,
+            focus_zoom: false,
+            zoom_text: None,
+            history_views: Default::default(),
+            focus_page: false,
+            links: Vec::new(),
+            pending_page: None,
+            presentation: None,
             search: SearchState::default(),
             edit: EditState::default(),
             annots: Vec::new(),
@@ -315,6 +358,9 @@ impl DocTab {
             }
             return;
         }
+        if self.navigate(cmd) {
+            return;
+        }
         let page = self.last.current_page;
         let Some(view) = self.view.as_mut() else {
             return;
@@ -367,8 +413,22 @@ impl DocTab {
                 };
                 self.zoom_to(z);
             }
+            DocCommand::Fit(Fit::Visible) => {
+                view.fit = Fit::Visible;
+                view.visible_box = None;
+                self.worker.send(Request::ContentBox { page: page as i32 });
+            }
             DocCommand::Fit(fit) => view.fit = fit,
-            DocCommand::NextChange | DocCommand::PrevChange => {} // já tratados no começo
+            DocCommand::ZoomTo => self.focus_zoom = true,
+            DocCommand::NextChange
+            | DocCommand::PrevChange
+            | DocCommand::FirstPage
+            | DocCommand::PrevPage
+            | DocCommand::NextPage
+            | DocCommand::LastPage
+            | DocCommand::GoToPage
+            | DocCommand::ViewBack
+            | DocCommand::ViewForward => {} // já tratados no começo
             DocCommand::Mode(mode) => {
                 view.set_mode(mode, page);
                 self.jump_to = view.go_to(page as i32, None);
@@ -388,6 +448,141 @@ impl DocTab {
                 self.jump_to = view.go_to(page as i32, None);
             }
         }
+    }
+
+    /// Navegação de páginas e histórico de vistas; `false` se `cmd` não é de navegação.
+    fn navigate(&mut self, cmd: DocCommand) -> bool {
+        let page = self.last.current_page;
+        let Some(view) = self.view.as_ref() else {
+            return matches!(cmd, DocCommand::GoToPage);
+        };
+        let last = view.layout.page_count().saturating_sub(1);
+        match cmd {
+            DocCommand::PrevPage | DocCommand::NextPage => {
+                let step = if cmd == DocCommand::NextPage { 1 } else { -1 };
+                if let Some(target) = view.page_step(page, step) {
+                    self.go(target as i32, None, false); // virar página não é salto
+                }
+            }
+            DocCommand::FirstPage => self.jump(0, None),
+            DocCommand::LastPage => self.jump(last as i32, None),
+            DocCommand::GoToPage => self.focus_page = true,
+            DocCommand::ViewBack | DocCommand::ViewForward => {
+                let current = view.view_entry(self.last.scroll_y, page);
+                let to = if cmd == DocCommand::ViewBack {
+                    self.history_views.back(current)
+                } else {
+                    self.history_views.forward(current)
+                };
+                if let Some(y) = to.and_then(|e| self.view.as_mut()?.restore(&e)) {
+                    self.jump_to = Some(y);
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Visualização inicial pedida pelo arquivo: modo, zoom, página, painel e tela cheia.
+    pub(crate) fn apply_initial_view(&mut self, initial: pdf_core::InitialView) {
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        let page = initial
+            .page
+            .and_then(|p| usize::try_from(p).ok())
+            .filter(|&p| p < view.layout.page_count());
+        if let Some((mode, cover)) = initial.layout.map(app_state::layout::initial_layout) {
+            view.cover = cover;
+            view.set_mode(mode, page.unwrap_or(0));
+        }
+        if let Some((fit, factor)) = initial.zoom.map(zoom::initial_zoom) {
+            view.fit = fit;
+            if let Some(z) = factor {
+                view.set_zoom(z);
+            }
+        }
+        if let Some(p) = page {
+            self.go(p as i32, None, false);
+        }
+        match initial.panel {
+            Some(pdf_core::InitialPanel::Bookmarks) => {
+                self.events.push(DocEvent::ShowPanel(LeftPanel::Outline))
+            }
+            Some(pdf_core::InitialPanel::Thumbnails) => {
+                self.events.push(DocEvent::ShowPanel(LeftPanel::Thumbnails))
+            }
+            None => {}
+        }
+        if initial.full_screen {
+            self.events.push(DocEvent::FullScreen);
+        }
+    }
+
+    /// Tela cheia: uma página por vez, inteira na tela (o modo de antes volta ao sair).
+    pub(crate) fn enter_presentation(&mut self) {
+        let page = self.last.current_page;
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        self.presentation
+            .get_or_insert((view.mode, view.cover, view.fit, view.zoom));
+        view.set_mode(ViewMode::Single, page);
+        view.fit = Fit::Page;
+        self.jump_to = Some(0.0);
+    }
+
+    pub(crate) fn exit_presentation(&mut self) {
+        let page = self.last.current_page;
+        let (Some((mode, cover, fit, zoom)), Some(view)) =
+            (self.presentation.take(), self.view.as_mut())
+        else {
+            return;
+        };
+        view.cover = cover;
+        view.set_mode(mode, page);
+        view.fit = fit;
+        view.set_zoom(zoom);
+        self.jump_to = view.go_to(page as i32, None);
+    }
+
+    /// Vai à página `page` agora, ou assim que o documento abrir.
+    pub(crate) fn show_page(&mut self, page: i32) {
+        if self.view.is_some() {
+            self.jump(page, None);
+        } else {
+            self.pending_page = Some(page);
+        }
+    }
+
+    /// Salto (link, marcador, miniatura, busca, comentário, Ir para página…): guarda a vista atual
+    /// para a Vista anterior e vai à página `page`, no ponto `at` dela.
+    pub(crate) fn jump(&mut self, page: i32, at: Option<(f32, f32)>) {
+        self.go(page, at, true);
+    }
+
+    /// Única porta para mostrar uma página: `record` diz se a vista de onde se sai entra no
+    /// histórico (Vista anterior).
+    fn go(&mut self, page: i32, at: Option<(f32, f32)>, record: bool) {
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        let current = view.view_entry(self.last.scroll_y, self.last.current_page);
+        if let Some(y) = view.go_to(page, at) {
+            if record {
+                self.history_views.push(current);
+            }
+            self.jump_to = Some(y);
+            self.pending_target = Some((page, at));
+        }
+    }
+
+    /// O zoom mudou pela razão `ratio` (ajuste à janela): um salto ainda não mostrado é refeito na
+    /// mesma página e ponto (o vão entre as páginas não escala); senão a rolagem acompanha o zoom.
+    fn after_zoom_change(&mut self, ratio: f32) {
+        let target = self.pending_target;
+        let redone = target.and_then(|(page, at)| self.view.as_mut()?.go_to(page, at));
+        self.jump_to = redone.or(Some(self.last.scroll_y * ratio));
     }
 
     /// Zoom escolhido pelo usuário, mantendo o mesmo ponto do documento na tela.
@@ -496,11 +691,13 @@ impl DocTab {
         }
         self.form.notes = summary.form_notes;
         self.outline = summary.outline;
+        self.links = summary.links;
         (summary.path, summary.sizes)
     }
 
     fn on_opened(&mut self, summary: DocSummary) {
         let comparison = summary.is_comparison;
+        let initial = summary.initial_view;
         let (path, sizes) = self.apply_summary(summary);
         self.history = HistoryState::default();
         self.password_prompt = None;
@@ -515,6 +712,10 @@ impl DocTab {
         self.last = CanvasFrame::default();
         self.jump_to = Some(0.0);
         self.events.push(DocEvent::Opened);
+        self.apply_initial_view(initial);
+        if let Some(page) = self.pending_page.take() {
+            self.jump(page, None);
+        }
         if comparison {
             self.show_row(app_state::tools_catalog::COMPARE);
         }
@@ -556,9 +757,7 @@ impl DocTab {
             (changes[k].rect.x0, changes[k].rect.y0),
         );
         self.edit.selected = Some((page, id));
-        if let Some(y) = self.view.as_mut().and_then(|v| v.go_to(page, Some(at))) {
-            self.jump_to = Some(y);
-        }
+        self.jump(page, Some(at));
     }
 
     /// O documento mudou de páginas: recarrega tudo, ficando perto da página em que estava.
@@ -704,6 +903,30 @@ impl DocTab {
                         self.events.push(DocEvent::Failed(msg));
                     }
                 }
+                Response::Tile {
+                    page,
+                    scale,
+                    invert,
+                    rotation,
+                    tile,
+                    image,
+                } => {
+                    if let Some(view) = self.view.as_mut() {
+                        view.on_tile(ctx, page, scale, invert, rotation, tile, image);
+                    }
+                }
+                Response::ContentBox { page, rect } => {
+                    if let Some(view) = self.view.as_mut().filter(|v| v.fit == Fit::Visible) {
+                        // página em branco: a página inteira
+                        let full = view.sizes.get(page as usize).map(|s| pdf_core::PdfRect {
+                            x0: 0.0,
+                            y0: 0.0,
+                            x1: s.width,
+                            y1: s.height,
+                        });
+                        view.visible_box = rect.or(full).map(|r| (page as usize, r));
+                    }
+                }
                 Response::Rendered {
                     page,
                     scale,
@@ -735,11 +958,8 @@ impl DocTab {
                     let had_hits = self.search.current().is_some();
                     self.search.on_hits(id, page, rects);
                     // rola até o primeiro resultado (resultados de busca antiga não mudam `current`)
-                    let first = self.search.current().filter(|_| !had_hits);
-                    if let Some(y) =
-                        first.and_then(|(p, r)| self.view.as_mut()?.go_to(p, Some((r.x0, r.y0))))
-                    {
-                        self.jump_to = Some(y);
+                    if let Some((p, r)) = self.search.current().filter(|_| !had_hits) {
+                        self.jump(p, Some((r.x0, r.y0)));
                     }
                 }
                 Response::SearchDone { id } => self.search.on_done(id),
@@ -919,40 +1139,41 @@ impl DocTab {
                 nav.into_iter()
                     .find(|&(_, k)| i.consume_key(egui::Modifiers::NONE, k))
             });
-            if let (Some((key, _)), Some(view)) = (pressed, self.view.as_mut()) {
-                if view.mode.is_paged() {
-                    match key {
-                        NavKey::PageUp => {
-                            view.turn(-1);
+            match pressed.map(|(key, _)| key) {
+                // Home/End são saltos: entram no histórico, como no Acrobat
+                Some(NavKey::Home) => self.run(ctx, DocCommand::FirstPage),
+                Some(NavKey::End) => self.run(ctx, DocCommand::LastPage),
+                Some(key) => {
+                    if let Some(view) = self.view.as_mut() {
+                        if view.mode.is_paged() {
+                            if view.turn(if key == NavKey::PageUp { -1 } else { 1 }) {
+                                self.jump_to = Some(0.0);
+                            }
+                        } else {
+                            let (scroll, height) = (self.last.scroll_y, self.last.viewport_h);
+                            self.jump_to =
+                                Some(nav_target(key, scroll, height, view.layout.total_height()));
                         }
-                        NavKey::PageDown => {
-                            view.turn(1);
-                        }
-                        NavKey::Home => view.turn_to(0),
-                        NavKey::End => view.turn_to(usize::MAX),
                     }
-                    self.jump_to = Some(0.0);
-                } else {
-                    let (scroll, height) = (self.last.scroll_y, self.last.viewport_h);
-                    self.jump_to =
-                        Some(nav_target(key, scroll, height, view.layout.total_height()));
                 }
+                None => {}
             }
-            // setas e espaço viram a página nos modos página a página
-            if let Some(view) = self.view.as_mut().filter(|v| v.mode.is_paged()) {
-                let step = ctx.input_mut(|i| {
-                    [
-                        (egui::Key::ArrowRight, 1),
-                        (egui::Key::Space, 1),
-                        (egui::Key::ArrowLeft, -1),
-                    ]
-                    .into_iter()
-                    .find(|&(k, _)| i.consume_key(egui::Modifiers::NONE, k))
-                    .map(|(_, s)| s)
-                });
-                if step.is_some_and(|s| view.turn(s)) {
-                    self.jump_to = Some(0.0);
-                }
+            // ←/→ mudam de página em qualquer modo; o espaço, só nos modos página a página. Com a
+            // janela de assinatura ou de propriedades do campo aberta, as setas são dela.
+            let paged = self.view.as_ref().is_some_and(|v| v.mode.is_paged());
+            let arrows = self.edit.fill.dialog.is_none() && self.prepare.props.is_none();
+            let step = ctx.input_mut(|i| {
+                [
+                    (egui::Key::ArrowRight, arrows, DocCommand::NextPage),
+                    (egui::Key::Space, paged, DocCommand::NextPage),
+                    (egui::Key::ArrowLeft, arrows, DocCommand::PrevPage),
+                ]
+                .into_iter()
+                .find(|&(k, on, _)| on && i.consume_key(egui::Modifiers::NONE, k))
+                .map(|(_, _, c)| c)
+            });
+            if let Some(cmd) = step {
+                self.run(ctx, cmd);
             }
         }
         let zoom_delta = ctx.input(|i| i.zoom_delta()); // Ctrl+roda e gesto de pinça
@@ -1631,13 +1852,7 @@ impl DocTab {
                     self.worker.send(Request::Signatures)
                 }
                 Some(crate::certificates::PanelAction::GoTo(page, r)) => {
-                    if let Some(y) = self
-                        .view
-                        .as_mut()
-                        .and_then(|v| v.go_to(page, Some((r.x0, r.y0))))
-                    {
-                        self.jump_to = Some(y);
-                    }
+                    self.jump(page, Some((r.x0, r.y0)));
                 }
                 None => {}
             }
@@ -1660,29 +1875,45 @@ impl DocTab {
                 (page, Some(at))
             }
         };
-        if let Some(y) = view.go_to(target.0, target.1) {
-            self.jump_to = Some(y);
-        }
+        self.jump(target.0, target.1);
     }
 
     /// ◀ campo da página / total ▶
     pub fn page_controls(&mut self, ui: &mut egui::Ui) {
-        let Some(view) = self.view.as_mut() else {
+        let Some(view) = self.view.as_ref() else {
             return;
         };
         let count = view.layout.page_count().max(1);
         let mut page = self.last.current_page + 1;
-        let prev = ui.button("◀").on_hover_text("Página anterior").clicked();
-        let go = ui.add(egui::DragValue::new(&mut page).range(1..=count).speed(0.2));
+        let prev = ui
+            .button("◀")
+            .on_hover_ui(|ui| {
+                ui.label(commands::hover(&Command::Doc(DocCommand::PrevPage)));
+            })
+            .clicked();
+        let go = ui
+            .add(egui::DragValue::new(&mut page).range(1..=count).speed(0.2))
+            .on_hover_ui(|ui| {
+                ui.label(commands::hover(&Command::Doc(DocCommand::GoToPage)));
+            });
+        if std::mem::take(&mut self.focus_page) {
+            go.request_focus(); // Ir para página: digita o número e Enter
+        }
         ui.label(format!("/ {count}"));
-        let next = ui.button("▶").on_hover_text("Próxima página").clicked();
-        let target = match (prev, next) {
-            (true, _) => Some(page.saturating_sub(1).max(1)),
-            (_, true) => Some((page + 1).min(count)),
-            _ => go.changed().then_some(page),
-        };
-        if let Some(y) = target.and_then(|p| view.go_to(p as i32 - 1, None)) {
-            self.jump_to = Some(y);
+        let next = ui
+            .button("▶")
+            .on_hover_ui(|ui| {
+                ui.label(commands::hover(&Command::Doc(DocCommand::NextPage)));
+            })
+            .clicked();
+        if prev || next {
+            self.navigate(if next {
+                DocCommand::NextPage
+            } else {
+                DocCommand::PrevPage
+            });
+        } else if go.changed() {
+            self.jump(page as i32 - 1, None);
         }
     }
 
@@ -1704,17 +1935,53 @@ impl DocTab {
         let prev = ui.button("⏶").clicked();
         let next = ui.button("⏷").clicked();
         if prev || next {
-            let target = self.search.step(next);
-            if let Some(y) = target
-                .and_then(|(page, rect)| self.view.as_mut()?.go_to(page, Some((rect.x0, rect.y0))))
-            {
-                self.jump_to = Some(y);
+            if let Some((page, rect)) = self.search.step(next) {
+                self.jump(page, Some((rect.x0, rect.y0)));
             }
         }
     }
 
-    pub fn zoom_percent(&self) -> Option<f32> {
-        self.view.as_ref().map(|v| v.zoom * 100.0)
+    /// Campo de zoom editável ("150" e Enter) e a lista ⏷ com os níveis e os ajustes, como no
+    /// Acrobat. Devolve o ajuste escolhido na lista.
+    pub fn zoom_controls(&mut self, ui: &mut egui::Ui) -> Option<DocCommand> {
+        let zoom = self.view.as_ref()?.zoom;
+        let mut text = self
+            .zoom_text
+            .take()
+            .unwrap_or_else(|| zoom::percent_text(zoom));
+        let field = ui
+            .add(egui::TextEdit::singleline(&mut text).desired_width(60.0))
+            .on_hover_ui(|ui| {
+                ui.label(commands::hover(&Command::Doc(DocCommand::ZoomTo)));
+            });
+        if std::mem::take(&mut self.focus_zoom) {
+            field.request_focus();
+        }
+        if field.lost_focus() {
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                if let Some(z) = zoom::parse_zoom(&text) {
+                    self.zoom_to(z); // valor inválido: o campo volta ao zoom atual
+                }
+            }
+        } else if field.has_focus() {
+            self.zoom_text = Some(text);
+        }
+        let mut picked = None;
+        ui.menu_button("⏷", |ui| {
+            for level in zoom::LEVELS {
+                if ui.button(zoom::percent_text(level)).clicked() {
+                    self.zoom_to(level);
+                }
+            }
+            ui.separator();
+            for fit in [Fit::Page, Fit::Width, Fit::Height, Fit::Visible] {
+                let cmd = DocCommand::Fit(fit);
+                if ui.button(Command::Doc(cmd).label()).clicked() {
+                    picked = Some(cmd);
+                }
+            }
+        });
+        picked
     }
 
     /// Abre o diálogo Dividir documento (partes na pasta do documento, por padrão).
@@ -1968,9 +2235,7 @@ impl DocTab {
             match action {
                 PanelAction::Select { page, id, at } => {
                     self.edit.selected = Some((page, id));
-                    if let Some(y) = self.view.as_mut().and_then(|v| v.go_to(page, Some(at))) {
-                        self.jump_to = Some(y);
-                    }
+                    self.jump(page, Some(at));
                 }
                 PanelAction::Op(op) => self.edit.push_op(op),
                 PanelAction::Properties { page, id } => {
@@ -2032,17 +2297,23 @@ impl DocTab {
     }
 
     fn canvas(&mut self, ui: &mut egui::Ui) {
+        let (avail_w, avail_h) = (ui.available_width() - 24.0, ui.available_height() - 24.0);
+        if let Some(ratio) = self
+            .view
+            .as_mut()
+            .and_then(|v| v.apply_fit(avail_w, avail_h))
+        {
+            self.after_zoom_change(ratio);
+            if let Some(view) = self.view.as_ref().filter(|v| v.fit == Fit::Visible) {
+                self.jump_x = view.visible_left(avail_w);
+            }
+        }
         let Some(view) = self.view.as_mut() else {
             ui.centered_and_justified(|ui| {
                 ui.label(&self.status);
             });
             return;
         };
-        if let Some(ratio) =
-            view.apply_fit(ui.available_width() - 24.0, ui.available_height() - 24.0)
-        {
-            self.jump_to = Some(self.last.scroll_y * ratio);
-        }
         let (worker, edit, search, annots) =
             (&self.worker, &mut self.edit, &self.search, &self.annots);
         let (form, fields) = (&mut self.form, &self.fields);
@@ -2056,7 +2327,13 @@ impl DocTab {
         let mut prepare_ops = Vec::new();
         let can_fill = self.security.permissions.forms;
         let mut open_props = None;
+        let links = &self.links;
+        let mut link_clicked = None;
+        let presenting = self.presentation.is_some();
+        let mut turn = None;
         let jump_to = self.jump_to.take();
+        self.pending_target = None; // a rolagem pedida vai para a tela agora
+        let jump_x = self.jump_x.take();
         // cada aba com seu id: a área de rolagem guarda a posição de cada documento
         self.last = ui
             .push_id(self.id, |ui| {
@@ -2065,6 +2342,7 @@ impl DocTab {
                     view,
                     worker,
                     jump_to,
+                    jump_x,
                     &mut |ui, page, rect, map: &PageMap| {
                         paint_search_hits(ui, search, page as i32, map);
                         if signing {
@@ -2105,7 +2383,19 @@ impl DocTab {
                             open_props = open_props.or(props);
                             return;
                         }
-                        edit.on_page(ui, worker, annots, page as i32, rect, map);
+                        let response = edit.on_page(ui, worker, annots, page as i32, rect, map);
+                        if edit.tool == app_state::tools::Tool::Select {
+                            let hit = link_gesture(ui, &response, links, annots, page as i32, map);
+                            // tela cheia: clicar fora de link avança, o botão direito volta
+                            if presenting && hit.is_none() {
+                                if response.clicked() {
+                                    turn = Some(DocCommand::NextPage);
+                                } else if response.secondary_clicked() {
+                                    turn = Some(DocCommand::PrevPage);
+                                }
+                            }
+                            link_clicked = link_clicked.take().or(hit);
+                        }
                         // depois dos gestos da página: os campos ficam por cima (sem a permissão
                         // de preencher, ficam só visíveis)
                         if !can_fill {
@@ -2173,6 +2463,14 @@ impl DocTab {
         if self.last.turn != 0 && now - self.turned_at > 0.25 && view.turn(self.last.turn) {
             self.turned_at = now;
             self.jump_to = Some(0.0);
+        }
+        match link_clicked {
+            Some(pdf_core::LinkTarget::Page { page, at }) => self.jump(page, at),
+            Some(target) => self.events.push(DocEvent::OpenLink(target)),
+            None => {}
+        }
+        if let Some(cmd) = turn {
+            self.run(ui.ctx(), cmd);
         }
     }
 }
@@ -2276,9 +2574,107 @@ fn arrow_pressed(ctx: &egui::Context) -> Option<((i8, i8), bool)> {
     })
 }
 
+/// Com Selecionar, sobre um link sem comentário por cima: cursor de mão e dica com o destino.
+/// Devolve o alvo quando o link é clicado (sem arrastar).
+fn link_gesture(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    links: &[pdf_core::LinkInfo],
+    annots: &[AnnotInfo],
+    page: i32,
+    map: &PageMap,
+) -> Option<pdf_core::LinkTarget> {
+    let pt = map.to_page(response.hover_pos()?.into());
+    // o link primeiro: quase sempre não há, e é a busca mais barata
+    let link = crate::links::link_at(links, page, pt)?;
+    if crate::edit::hit_at(annots, page, pt, map).is_some() {
+        return None;
+    }
+    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    let clicked = response.clicked();
+    response
+        .clone()
+        .on_hover_text_at_pointer(crate::links::hint(&link.target));
+    clicked.then(|| link.target.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tab_with_pages(n: usize) -> DocTab {
+        let ctx = egui::Context::default();
+        let mut tab = DocTab::new(&ctx, PathBuf::from("/a.pdf"), false);
+        let size = pdf_core::PageSize {
+            width: 100.0,
+            height: 200.0,
+        };
+        tab.view = Some(DocView::new(PathBuf::from("/a.pdf"), vec![size; n]));
+        tab
+    }
+
+    #[test]
+    fn a_pending_jump_survives_the_zoom_change() {
+        // salto pedido antes do primeiro ajuste (página inicial do arquivo, link para outro PDF):
+        // depois que o zoom se ajusta à janela, cai na mesma página (o vão entre páginas não escala)
+        let mut tab = tab_with_pages(400);
+        tab.jump(300, None);
+        let ratio = tab.view.as_mut().unwrap().set_zoom(1.6);
+        tab.after_zoom_change(ratio);
+        let expected = tab.view.as_mut().unwrap().go_to(300, None);
+        assert_eq!(tab.jump_to, expected);
+        // sem salto pendente, a rolagem atual acompanha o zoom
+        let mut tab = tab_with_pages(4);
+        tab.last.scroll_y = 300.0;
+        tab.after_zoom_change(0.5);
+        assert_eq!(tab.jump_to, Some(150.0));
+    }
+
+    #[test]
+    fn presentation_restores_mode_and_fit() {
+        let mut tab = tab_with_pages(4);
+        let v = tab.view.as_mut().unwrap();
+        v.cover = true;
+        v.set_mode(ViewMode::TwoUpContinuous, 0);
+        v.fit = Fit::Width;
+        tab.enter_presentation();
+        let v = tab.view.as_ref().unwrap();
+        assert_eq!((v.mode, v.fit), (ViewMode::Single, Fit::Page));
+        tab.enter_presentation(); // de novo: não perde o que guardou
+        tab.exit_presentation();
+        let v = tab.view.as_ref().unwrap();
+        assert_eq!(
+            (v.mode, v.cover, v.fit),
+            (ViewMode::TwoUpContinuous, true, Fit::Width)
+        );
+        tab.exit_presentation(); // sem apresentação: nada muda
+        assert_eq!(tab.view.as_ref().unwrap().mode, ViewMode::TwoUpContinuous);
+    }
+
+    #[test]
+    fn initial_view_sets_layout_zoom_page_panel_and_full_screen() {
+        let mut tab = tab_with_pages(4);
+        tab.apply_initial_view(pdf_core::InitialView {
+            panel: Some(pdf_core::InitialPanel::Bookmarks),
+            full_screen: true,
+            layout: Some(pdf_core::InitialLayout::TwoPage { cover: true }),
+            page: Some(2),
+            zoom: Some(pdf_core::InitialZoom::Factor(1.5)),
+        });
+        let v = tab.view.as_ref().unwrap();
+        assert_eq!((v.mode, v.cover, v.fit), (ViewMode::TwoUp, true, Fit::None));
+        assert!((v.zoom - 1.5).abs() < 1e-6);
+        assert_eq!(v.spread, v.layout.row_of(2), "abre na página pedida");
+        let events = tab.take_events();
+        assert!(events.contains(&DocEvent::ShowPanel(LeftPanel::Outline)));
+        assert!(events.contains(&DocEvent::FullScreen));
+        // sem nada pedido, nada muda
+        let mut tab = tab_with_pages(2);
+        tab.apply_initial_view(pdf_core::InitialView::default());
+        let v = tab.view.as_ref().unwrap();
+        assert_eq!((v.mode, v.fit), (ViewMode::Continuous, Fit::Width));
+        assert!(tab.take_events().is_empty());
+    }
 
     #[test]
     fn each_tab_has_its_own_scroll_state() {

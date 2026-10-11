@@ -241,7 +241,12 @@ const HIT_TOL: f32 = 3.0;
 
 /// A anotação da página sob `p` (a de cima), como (página, id). Só roda quando há clique.
 /// Linhas contam pela distância ao segmento (o retângulo de uma diagonal é quase todo vazio).
-fn hit_at(annots: &[AnnotInfo], page: i32, p: (f32, f32), map: &PageMap) -> Option<(i32, i32)> {
+pub(crate) fn hit_at(
+    annots: &[AnnotInfo],
+    page: i32,
+    p: (f32, f32),
+    map: &PageMap,
+) -> Option<(i32, i32)> {
     let tol = HIT_TOL / map.zoom;
     annots
         .iter()
@@ -441,7 +446,7 @@ impl EditState {
         page: i32,
         rect: egui::Rect,
         map: &PageMap,
-    ) {
+    ) -> egui::Response {
         let response = ui.interact(
             rect,
             ui.id().with(("page", page)),
@@ -489,6 +494,7 @@ impl EditState {
         self.text_overlay(ui, page, map);
         self.paint_selection(ui.painter(), page, map);
         self.paint_selected(ui.painter(), annots, page, map);
+        response
     }
 
     /// Com Selecionar: clicar numa anotação a seleciona; arrastar uma nota ou desenho move; a alça

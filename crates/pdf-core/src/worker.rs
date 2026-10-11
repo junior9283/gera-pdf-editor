@@ -25,6 +25,9 @@ impl CancelToken {
     }
 }
 
+/// Lado dos ladrilhos de alta resolução, em pixels.
+pub const TILE: u32 = 512;
+
 pub enum Request {
     Open {
         path: PathBuf,
@@ -36,6 +39,19 @@ pub enum Request {
         invert: bool,
         rotation: Rotation,
         cancel: CancelToken,
+    },
+    /// Ladrilho de `TILE` px da página (zoom acima do teto da página inteira).
+    RenderTile {
+        page: i32,
+        scale: f32,
+        invert: bool,
+        rotation: Rotation,
+        tile: (u32, u32),
+        cancel: CancelToken,
+    },
+    /// Caixa da tinta da página, para Ajustar ao conteúdo visível.
+    ContentBox {
+        page: i32,
     },
     Search {
         id: u64,
@@ -191,6 +207,19 @@ pub enum Response {
     RenderFailed {
         page: i32,
         error: String,
+    },
+    /// Ladrilho pronto. Um ladrilho que falha não volta (fica a página ampliada por baixo).
+    Tile {
+        page: i32,
+        scale: f32,
+        invert: bool,
+        rotation: Rotation,
+        tile: (u32, u32),
+        image: RenderedPage,
+    },
+    ContentBox {
+        page: i32,
+        rect: Option<PdfRect>,
     },
     SearchHits {
         id: u64,
@@ -389,6 +418,34 @@ impl State {
                         page,
                         error: e.to_string(),
                     }),
+                }
+            }
+            Request::RenderTile {
+                page,
+                scale,
+                invert,
+                rotation,
+                tile,
+                cancel,
+            } => {
+                let Some(d) = self.doc.as_ref().filter(|_| !cancel.is_cancelled()) else {
+                    return;
+                };
+                if let Ok(image) = d.render_tile(page, scale, invert, rotation, tile, TILE) {
+                    send(Response::Tile {
+                        page,
+                        scale,
+                        invert,
+                        rotation,
+                        tile,
+                        image,
+                    });
+                }
+            }
+            Request::ContentBox { page } => {
+                if let Some(d) = self.doc.as_ref() {
+                    let rect = d.content_box(page).ok().flatten();
+                    send(Response::ContentBox { page, rect });
                 }
             }
             Request::Search { id, needle, cancel } => {

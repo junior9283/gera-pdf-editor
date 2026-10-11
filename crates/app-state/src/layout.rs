@@ -356,3 +356,34 @@ mod tests {
         assert_eq!(labels.len(), 4);
     }
 }
+
+/// Modo e capa pedidos pelo arquivo (`/PageLayout`).
+pub fn initial_layout(layout: pdf_core::InitialLayout) -> (ViewMode, bool) {
+    use pdf_core::InitialLayout as L;
+    match layout {
+        L::Single => (ViewMode::Single, false),
+        L::OneColumn => (ViewMode::Continuous, false),
+        L::TwoColumn { cover } => (ViewMode::TwoUpContinuous, cover),
+        L::TwoPage { cover } => (ViewMode::TwoUp, cover),
+    }
+}
+
+#[cfg(test)]
+mod initial_tests {
+    use super::*;
+    use pdf_core::InitialLayout as L;
+
+    #[test]
+    fn initial_layout_maps_the_pdf_names() {
+        assert_eq!(initial_layout(L::Single), (ViewMode::Single, false));
+        assert_eq!(initial_layout(L::OneColumn), (ViewMode::Continuous, false));
+        assert_eq!(
+            initial_layout(L::TwoColumn { cover: true }),
+            (ViewMode::TwoUpContinuous, true)
+        );
+        assert_eq!(
+            initial_layout(L::TwoPage { cover: false }),
+            (ViewMode::TwoUp, false)
+        );
+    }
+}

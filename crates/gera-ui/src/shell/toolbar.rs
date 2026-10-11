@@ -7,7 +7,6 @@ use app_state::fill_sign::{self as fs, FillTool};
 use app_state::stamps::StampKind;
 use app_state::tools::Tool;
 use app_state::tools_catalog;
-use app_state::zoom::Fit;
 use pdf_core::{AnnotKind, AnnotOp, Mark};
 
 pub fn show(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
@@ -22,23 +21,7 @@ pub fn show(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
         ui.separator();
         doc.page_controls(ui);
         ui.separator();
-        button(ui, &mut out, "−", Command::Doc(DocCommand::ZoomOut), true);
-        if let Some(pct) = doc.zoom_percent() {
-            ui.label(format!("{pct:.0}%"));
-        }
-        button(ui, &mut out, "+", Command::Doc(DocCommand::ZoomIn), true);
-        ui.menu_button("⏷", |ui| {
-            for cmd in [
-                DocCommand::Fit(Fit::Width),
-                DocCommand::Fit(Fit::Page),
-                DocCommand::ZoomReset,
-            ] {
-                let cmd = Command::Doc(cmd);
-                if ui.button(cmd.label()).clicked() {
-                    out = Some(cmd);
-                }
-            }
-        });
+        zoom_group(ui, doc, &mut out);
         ui.separator();
         doc.search_box(ui);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -54,6 +37,15 @@ pub fn show(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
         });
     });
     out
+}
+
+/// − + campo de zoom e ⏷ (barra do documento e barra do modo leitura).
+pub(crate) fn zoom_group(ui: &mut egui::Ui, doc: &mut DocTab, out: &mut Option<Command>) {
+    button(ui, out, "−", Command::Doc(DocCommand::ZoomOut), true);
+    button(ui, out, "+", Command::Doc(DocCommand::ZoomIn), true);
+    if let Some(fit) = doc.zoom_controls(ui) {
+        *out = Some(Command::Doc(fit));
+    }
 }
 
 /// Linha Proteger PDF: Proteger usando senha, Remover segurança, Desbloquear e Fechar.
@@ -524,10 +516,11 @@ fn close_row(ui: &mut egui::Ui, doc: &mut DocTab) {
 }
 
 fn button(ui: &mut egui::Ui, out: &mut Option<Command>, icon: &str, cmd: Command, enabled: bool) {
-    let tip = hover(&cmd);
     if ui
         .add_enabled(enabled, egui::Button::new(icon))
-        .on_hover_text(tip)
+        .on_hover_ui(|ui| {
+            ui.label(hover(&cmd)); // montada só quando a dica aparece
+        })
         .clicked()
     {
         *out = Some(cmd);
