@@ -14,7 +14,7 @@ const MAX_PIXELS: u64 = 100_000_000;
 /// Maior lado de página que o PDF aceita (200 polegadas).
 const MAX_PAGE_PT: f32 = 14_400.0;
 
-fn open_image(path: &Path) -> Result<Image> {
+pub(crate) fn open_image(path: &Path) -> Result<Image> {
     let meta = std::fs::metadata(path)?;
     let name = path
         .file_name()

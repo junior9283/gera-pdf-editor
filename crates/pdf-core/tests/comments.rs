@@ -531,3 +531,21 @@ fn delete_many_is_one_step() {
     d.undo().unwrap();
     assert_eq!(d.annotations(0).unwrap().len(), 3);
 }
+
+#[test]
+fn self_groups_and_group_cycles_from_other_programs_are_not_groups() {
+    let dir = tempfile::tempdir().unwrap();
+    let objs = vec![
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[4 0 R 5 0 R 6 0 R]>>".to_string(),
+        "<</Type/Annot/Subtype/Text/Rect[10 10 30 30]/RT/Group/IRT 4 0 R>>".to_string(),
+        "<</Type/Annot/Subtype/Text/Rect[40 10 60 30]/RT/Group/IRT 6 0 R>>".to_string(),
+        "<</Type/Annot/Subtype/Text/Rect[70 10 90 30]/RT/Group/IRT 5 0 R>>".to_string(),
+    ];
+    let path = dir.path().join("g.pdf");
+    std::fs::write(&path, pdf_core::sample::pdf_from_objects(&objs)).unwrap();
+    let all = PdfDoc::open(&path, None).unwrap().annotations(0).unwrap();
+    assert_eq!(all.len(), 3);
+    assert!(all.iter().all(|a| a.group.is_none()), "{all:?}");
+}

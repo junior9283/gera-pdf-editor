@@ -1,13 +1,13 @@
 //! Exportar e importar comentários, como o Acrobat: arquivo de dados FDF ou XFDF, ou os
 //! comentários de outro PDF. O FDF é escrito e lido pelo MuPDF (é sintaxe de PDF com outro
 //! cabeçalho); as aparências vão junto.
-use crate::doc::{deleted, PdfDoc};
+use crate::doc::{with_group_and_replies, PdfDoc};
 use crate::error::{refused, Result};
 use crate::pdf_obj::{get, name_of};
 use crate::types::AnnotInfo;
 use crate::xfdf::{self, XfdfAnnot};
 use mupdf::pdf::{PdfDocument, PdfGraftMap, PdfObject, PdfWriteOptions};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 /// Formato do arquivo de dados de comentários.
@@ -31,10 +31,62 @@ impl CommentFormat {
 
 /// Resultado de importar: comentários acrescentados e ignorados (página inexistente, tipo
 /// desconhecido ou acima do teto).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ImportReport {
     pub added: usize,
     pub skipped: usize,
+    /// Páginas que ganharam comentários (em ordem).
+    pub pages: Vec<i32>,
+}
+
+/// Põe dicionários de anotação nas páginas (cada página carregada uma vez) e anota quais mudaram.
+#[derive(Default)]
+struct Placer {
+    page_objs: HashMap<i32, PdfObject>,
+    pages: BTreeSet<i32>,
+}
+
+impl Placer {
+    /// Acrescenta `dict` à página `page`; devolve a referência da anotação nova.
+    fn put(&mut self, doc: &mut PdfDocument, page: i32, mut dict: PdfObject) -> Result<PdfObject> {
+        let page_obj = match self.page_objs.get(&page) {
+            Some(p) => p.clone(),
+            None => {
+                let p = doc.load_pdf_page(page)?.object();
+                self.page_objs.insert(page, p.clone());
+                p
+            }
+        };
+        dict.dict_put("P", page_obj.clone())?;
+        let r = doc.add_object(&dict)?;
+        push_annot(doc, page_obj, r.clone())?;
+        self.pages.insert(page);
+        Ok(r)
+    }
+
+    fn report(self, added: usize, skipped: usize) -> ImportReport {
+        ImportReport {
+            added,
+            skipped,
+            pages: self.pages.into_iter().collect(),
+        }
+    }
+}
+
+/// Liga a resposta (ou o membro do grupo) ao pai; sem pai, fica solta (sem grupo).
+fn link_parent(mut child: PdfObject, parent: Option<&PdfObject>) -> Result<()> {
+    match parent {
+        Some(p) => child.dict_put("IRT", p.clone())?,
+        None => child.dict_delete("RT")?,
+    }
+    Ok(())
+}
+
+/// O PDF de que os comentários são (/F do FDF, href do XFDF): o nome do arquivo com `.pdf`.
+fn source_name(path: &Path) -> String {
+    path.with_extension("pdf")
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
 }
 
 /// Teto de comentários lidos de um arquivo.
@@ -79,14 +131,10 @@ impl PdfDoc {
         if picked.is_empty() {
             return Err(refused("não há comentários para exportar"));
         }
+        let name = source_name(path);
         let bytes = match format {
-            CommentFormat::Fdf => self.fdf_bytes(&picked, path)?,
-            CommentFormat::Xfdf => {
-                let name = path.file_name().map_or_else(String::new, |n| {
-                    n.to_string_lossy().replace(".xfdf", ".pdf")
-                });
-                crate::xfdf::write(&self.inner, &picked, &name)?.into_bytes()
-            }
+            CommentFormat::Fdf => self.fdf_bytes(&picked, &name)?,
+            CommentFormat::Xfdf => crate::xfdf::write(&self.inner, &picked, &name)?.into_bytes(),
         };
         crate::doc::write_bytes_atomic(path, &bytes)?;
         Ok(picked.len())
@@ -95,38 +143,35 @@ impl PdfDoc {
     /// Comentários a exportar, na ordem das páginas.
     fn comments_to_export(&self, only: Option<&[(i32, i32)]>) -> Result<Vec<AnnotInfo>> {
         let mut out = Vec::new();
-        for page in 0..self.page_count()? {
-            let annots = self.annotations(page)?;
-            match only {
-                None => out.extend(annots),
-                Some(sel) => {
-                    let ids: Vec<i32> = sel
-                        .iter()
-                        .filter(|(p, _)| *p == page)
-                        .map(|&(_, id)| id)
-                        .collect();
-                    let keep = deleted(&annots, &ids);
-                    out.extend(annots.into_iter().filter(|a| keep.contains(&a.id)));
-                }
+        let Some(sel) = only else {
+            for page in 0..self.page_count()? {
+                out.extend(self.annotations(page)?);
             }
+            return Ok(out);
+        };
+        // só as páginas da seleção
+        let mut by_page: BTreeMap<i32, Vec<i32>> = BTreeMap::new();
+        for &(p, id) in sel {
+            by_page.entry(p).or_default().push(id);
+        }
+        for (page, ids) in by_page {
+            let annots = self.annotations(page)?;
+            let keep: HashSet<i32> = with_group_and_replies(&annots, &ids).into_iter().collect();
+            out.extend(annots.into_iter().filter(|a| keep.contains(&a.id)));
         }
         Ok(out)
     }
 
-    fn fdf_bytes(&self, picked: &[AnnotInfo], path: &Path) -> Result<Vec<u8>> {
+    fn fdf_bytes(&self, picked: &[AnnotInfo], name: &str) -> Result<Vec<u8>> {
         let mut out = PdfDocument::new();
         let mut map = out.new_graft_map()?;
         let mut refs: HashMap<i32, PdfObject> = HashMap::new();
         let mut list = out.new_array()?;
-        for page in 0..self.page_count()? {
-            let on_page: Vec<&AnnotInfo> = picked.iter().filter(|a| a.page == page).collect();
-            if on_page.is_empty() {
-                continue;
-            }
+        for (page, ids) in by_page(picked) {
             let page_ref = self.inner.load_pdf_page(page)?;
             for annot in page_ref.annotations() {
                 let id = annot.object().as_indirect()?;
-                if !on_page.iter().any(|a| a.id == id) {
+                if !ids.contains(&id) {
                     continue;
                 }
                 let Some(dict) = annot.object().resolve()? else {
@@ -148,12 +193,7 @@ impl PdfDoc {
         }
         let mut fdf = out.new_dict()?;
         fdf.dict_put("Annots", list)?;
-        let name = path.file_name().map_or_else(String::new, |n| {
-            n.to_string_lossy()
-                .replace(".fdf", ".pdf")
-                .replace(".FDF", ".pdf")
-        });
-        fdf.dict_put("F", PdfObject::new_string(&name)?)?;
+        fdf.dict_put("F", PdfObject::new_string(name)?)?;
         let mut root = out.new_dict()?;
         root.dict_put("FDF", fdf)?;
         let root = out.add_object(&root)?;
@@ -187,12 +227,12 @@ impl PdfDoc {
         }
         let src = PdfDocument::from_bytes(&bytes)
             .map_err(|_| refused("o arquivo não é um FDF, XFDF ou PDF válido"))?;
-        let (items, mut skipped) = incoming(&src)?;
+        let (items, skipped) = incoming(&src)?;
         if items.is_empty() {
             return Err(refused("o arquivo não tem comentários"));
         }
         let mut report = self.with_snapshot(|d| d.add_incoming(&src, items))?;
-        report.skipped += std::mem::take(&mut skipped);
+        report.skipped += skipped;
         Ok(report)
     }
 
@@ -202,79 +242,52 @@ impl PdfDoc {
         let mut map = self.inner.new_graft_map()?;
         let mut added: HashMap<i32, PdfObject> = HashMap::new();
         let mut pending = Vec::new();
-        let mut report = ImportReport::default();
-        let mut page_objs: HashMap<i32, PdfObject> = HashMap::new();
+        let (mut placer, mut count, mut skipped) = (Placer::default(), 0, 0);
         for item in items {
             if !(0..pages).contains(&item.page) {
-                report.skipped += 1;
+                skipped += 1;
                 continue;
             }
-            let mut copy = graft(&mut map, src, &item.dict)?;
+            let copy = graft(&mut map, src, &item.dict)?;
             if self.inner.count_objects()?.saturating_sub(start) > MAX_IMPORTED_OBJECTS {
                 return Err(refused("os comentários do arquivo são complexos demais"));
             }
-            let page_obj = match page_objs.get(&item.page) {
-                Some(p) => p.clone(),
-                None => {
-                    let p = self.inner.load_pdf_page(item.page)?.object();
-                    page_objs.insert(item.page, p.clone());
-                    p
+            let r = placer.put(&mut self.inner, item.page, copy)?;
+            if let Some(num) = item.num {
+                if let Some(parent) = item.parent {
+                    pending.push((r.clone(), parent));
                 }
-            };
-            copy.dict_put("P", page_obj.clone())?;
-            let r = self.inner.add_object(&copy)?;
-            push_annot(&self.inner, page_obj, r.clone())?;
-            if let (Some(num), Some(parent)) = (item.num, item.parent) {
-                pending.push((r.clone(), parent));
-                added.insert(num, r);
-            } else if let Some(num) = item.num {
                 added.insert(num, r);
             }
-            report.added += 1;
+            count += 1;
         }
         for (child, parent) in pending {
-            let mut child = child;
-            match added.get(&parent) {
-                Some(p) => child.dict_put("IRT", p.clone())?,
-                // o pai não veio: o comentário fica solto (sem grupo)
-                None => child.dict_delete("RT")?,
-            }
+            link_parent(child, added.get(&parent))?;
         }
-        Ok(report)
+        Ok(placer.report(count, skipped))
     }
 }
 
 impl PdfDoc {
     fn add_xfdf(&mut self, items: Vec<XfdfAnnot>) -> Result<ImportReport> {
         let pages = self.page_count()?;
-        let mut report = ImportReport::default();
+        let (mut placer, mut count, mut skipped) = (Placer::default(), 0, 0);
         let mut by_name: HashMap<String, PdfObject> = HashMap::new();
         let mut parents: HashMap<String, String> = HashMap::new();
         let mut pending = Vec::new();
-        let mut fresh: Vec<(i32, i32)> = Vec::new();
-        let mut page_objs: HashMap<i32, PdfObject> = HashMap::new();
+        let mut fresh: HashSet<(i32, i32)> = HashSet::new();
         for item in items {
             let rect = item
                 .attr("rect")
                 .and_then(xfdf::numbers)
                 .filter(|r| r.len() == 4);
             let (Some(rect), true) = (rect, (0..pages).contains(&item.page)) else {
-                report.skipped += 1;
+                skipped += 1;
                 continue;
             };
-            let mut dict = xfdf_dict(&self.inner, &item, &rect)?;
-            let page_obj = match page_objs.get(&item.page) {
-                Some(p) => p.clone(),
-                None => {
-                    let p = self.inner.load_pdf_page(item.page)?.object();
-                    page_objs.insert(item.page, p.clone());
-                    p
-                }
-            };
-            dict.dict_put("P", page_obj.clone())?;
-            let r = self.inner.add_object(&dict)?;
-            push_annot(&self.inner, page_obj, r.clone())?;
-            fresh.push((item.page, r.as_indirect()?));
+            let dict = xfdf::annot_dict(&self.inner, &item, &rect)?;
+            let r = placer.put(&mut self.inner, item.page, dict)?;
+            fresh.insert((item.page, r.as_indirect()?));
             if let Some(name) = item.attr("name").filter(|n| !n.is_empty()) {
                 by_name.insert(name.to_owned(), r.clone());
                 if let Some(parent) = item.attr("inreplyto").filter(|p| !p.is_empty()) {
@@ -282,21 +295,15 @@ impl PdfDoc {
                     pending.push((r, name.to_owned(), parent.to_owned()));
                 }
             }
-            report.added += 1;
+            count += 1;
         }
-        for (mut child, name, parent) in pending {
+        for (child, name, parent) in pending {
             // pai que não veio, ou em ciclo (A responde a B que responde a A): fica solto
-            match by_name.get(&parent) {
-                Some(p) if !in_cycle(&parents, &name) => child.dict_put("IRT", p.clone())?,
-                _ => child.dict_delete("RT")?,
-            }
+            let parent = by_name.get(&parent).filter(|_| !in_cycle(&parents, &name));
+            link_parent(child, parent)?;
         }
         // o XFDF não traz aparência: o MuPDF a faz
-        for page in fresh
-            .iter()
-            .map(|(p, _)| *p)
-            .collect::<std::collections::BTreeSet<_>>()
-        {
+        for &page in &placer.pages {
             let page_ref = self.inner.load_pdf_page(page)?;
             for mut a in page_ref.annotations() {
                 if fresh.contains(&(page, a.object().as_indirect()?)) {
@@ -304,8 +311,17 @@ impl PdfDoc {
                 }
             }
         }
-        Ok(report)
+        Ok(placer.report(count, skipped))
     }
+}
+
+/// Os ids de `picked` por página.
+fn by_page(picked: &[AnnotInfo]) -> BTreeMap<i32, HashSet<i32>> {
+    let mut out: BTreeMap<i32, HashSet<i32>> = BTreeMap::new();
+    for a in picked {
+        out.entry(a.page).or_default().insert(a.id);
+    }
+    out
 }
 
 /// `name` está num ciclo de respostas?
@@ -319,113 +335,6 @@ fn in_cycle(parents: &HashMap<String, String>, name: &str) -> bool {
         }
     }
     true
-}
-
-/// Dicionário da anotação a partir do elemento do XFDF (`rect` já conferido).
-fn xfdf_dict(doc: &PdfDocument, item: &XfdfAnnot, rect: &[f32]) -> Result<PdfObject> {
-    let mut d = doc.new_dict()?;
-    let reals = |v: &[f32]| -> Result<PdfObject> {
-        let mut a = doc.new_array()?;
-        for &x in v {
-            a.array_push(PdfObject::new_real(x)?)?;
-        }
-        Ok(a)
-    };
-    let name = |n: &str| PdfObject::new_name(n);
-    d.dict_put("Type", name("Annot")?)?;
-    d.dict_put("Subtype", name(item.subtype)?)?;
-    d.dict_put("Rect", reals(rect)?)?;
-    for (attr, key) in [("color", "C"), ("interior-color", "IC")] {
-        if let Some(c) = item.attr(attr).and_then(xfdf::parse_color) {
-            d.dict_put(key, reals(&c)?)?;
-        }
-    }
-    if let Some(o) = item
-        .attr("opacity")
-        .and_then(|o| o.trim().parse::<f32>().ok())
-    {
-        if o.is_finite() {
-            d.dict_put("CA", PdfObject::new_real(o.clamp(0.0, 1.0))?)?;
-        }
-    }
-    for (attr, key) in [
-        ("title", "T"),
-        ("date", "M"),
-        ("creationdate", "CreationDate"),
-        ("subject", "Subj"),
-        ("name", "NM"),
-    ] {
-        if let Some(v) = item.attr(attr) {
-            d.dict_put(key, PdfObject::new_string(v)?)?;
-        }
-    }
-    if let Some(words) = item.attr("flags") {
-        let f = xfdf::flag_bits(words);
-        if f != 0 {
-            d.dict_put("F", PdfObject::new_int(f)?)?;
-        }
-    }
-    if item.attr("replyType") == Some("group") {
-        d.dict_put("RT", name("Group")?)?;
-    }
-    for (attr, key) in [("icon", "Name"), ("intent", "IT")] {
-        if let Some(v) = item.attr(attr).filter(|v| xfdf::plain_name(v)) {
-            d.dict_put(key, name(v)?)?;
-        }
-    }
-    if let Some(w) = item
-        .attr("width")
-        .and_then(|w| w.trim().parse::<f32>().ok())
-    {
-        if w.is_finite() {
-            let mut bs = doc.new_dict()?;
-            bs.dict_put("W", PdfObject::new_real(w.clamp(0.0, 100.0))?)?;
-            d.dict_put("BS", bs)?;
-        }
-    }
-    let list = |attr: &str, step: usize| {
-        item.attr(attr)
-            .and_then(xfdf::numbers)
-            .filter(|v| !v.is_empty() && v.len() % step == 0)
-    };
-    if let Some(q) = list("coords", 8) {
-        d.dict_put("QuadPoints", reals(&q)?)?;
-    }
-    if let Some(v) = list("vertices", 2) {
-        d.dict_put("Vertices", reals(&v)?)?;
-    }
-    if let Some(cl) = list("callout", 2).filter(|c| c.len() <= 6) {
-        d.dict_put("CL", reals(&cl)?)?;
-    }
-    if let (Some(a), Some(b)) = (list("start", 2), list("end", 2)) {
-        if a.len() == 2 && b.len() == 2 {
-            d.dict_put("L", reals(&[a[0], a[1], b[0], b[1]])?)?;
-        }
-    }
-    if let (Some(h), Some(t)) = (item.attr("head"), item.attr("tail")) {
-        if xfdf::plain_name(h) && xfdf::plain_name(t) {
-            let mut le = doc.new_array()?;
-            le.array_push(name(h)?)?;
-            le.array_push(name(t)?)?;
-            d.dict_put("LE", le)?;
-        }
-    }
-    if !item.gestures.is_empty() {
-        let mut ink = doc.new_array()?;
-        for g in &item.gestures {
-            if let Some(v) = xfdf::numbers(g).filter(|v| v.len() >= 2 && v.len() % 2 == 0) {
-                ink.array_push(reals(&v)?)?;
-            }
-        }
-        d.dict_put("InkList", ink)?;
-    }
-    if let Some(text) = &item.contents {
-        d.dict_put("Contents", PdfObject::new_string(text)?)?;
-    }
-    if let Some(da) = &item.da {
-        d.dict_put("DA", PdfObject::new_string(da)?)?;
-    }
-    Ok(d)
 }
 
 /// Os comentários do FDF (/FDF /Annots com /Page) ou das páginas do PDF.

@@ -73,8 +73,8 @@ pub use security::{Permissions, Protection, SecurityInfo};
 pub use sign::{display_date, Integrity, SignPlace, SignatureInfo};
 pub use split::{combine, safe_file_name, SplitRule};
 pub use stamp::{
-    natural_size as stamp_natural_size, stamp_image_from_file, stamp_image_size,
-    stamp_source_pages, HEIGHT as STAMP_HEIGHT, WIDTH as STAMP_WIDTH,
+    stamp_image_from_file, stamp_image_size, stamp_source_pages, HEIGHT as STAMP_HEIGHT,
+    WIDTH as STAMP_WIDTH,
 };
 pub use types::*;
 pub use worker::{CancelToken, Request, Response, Worker, TILE};

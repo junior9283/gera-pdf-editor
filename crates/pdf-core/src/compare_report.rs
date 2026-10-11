@@ -62,11 +62,23 @@ pub(crate) fn file_name(path: &Path) -> String {
     }
 }
 
-pub(crate) fn plural(n: usize, one: &str, many: &str) -> String {
+fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// Texto numa posição (Helvetica `/F1` ou negrito `/F2`), na cor `gray`.
+/// Helvetica e Helvetica-Bold em WinAnsi (os acentos do português cabem): `/F1` e `/F2` dos
+/// relatórios.
+pub(crate) fn report_fonts(out: &mut PdfDocument) -> Result<(PdfObject, PdfObject)> {
+    let mut font = |base: &str| -> Result<PdfObject> {
+        let dict = out.new_object_from_str(&format!(
+            "<</Type/Font/Subtype/Type1/BaseFont/{base}/Encoding/WinAnsiEncoding>>"
+        ))?;
+        Ok(out.add_object(&dict)?)
+    };
+    Ok((font("Helvetica")?, font("Helvetica-Bold")?))
+}
+
 pub(crate) fn text_at(font: &str, size: f32, gray: f32, x: f32, y: f32, s: &str) -> String {
     format!(
         "q BT /{font} {} Tf {} g {} {} Td ({}) Tj ET Q\n",
@@ -84,7 +96,7 @@ fn rect_ops(x: f32, y: f32, w: f32, h: f32) -> String {
 
 /// Retângulo preenchido com `color`, entre `q`/`Q`: a cor não vaza para o que vem depois (a página
 /// copiada escreve na cor padrão).
-pub(crate) fn fill_rect(color: [f32; 3], x: f32, y: f32, w: f32, h: f32) -> String {
+fn fill_rect(color: [f32; 3], x: f32, y: f32, w: f32, h: f32) -> String {
     format!(
         "q {} {} f Q\n",
         rgb_ops(color.map(|c| (c * 255.0).round() as u8)),
@@ -93,7 +105,7 @@ pub(crate) fn fill_rect(color: [f32; 3], x: f32, y: f32, w: f32, h: f32) -> Stri
 }
 
 /// Contorno de retângulo com `color` e espessura `width`.
-pub(crate) fn stroke_rect(color: [f32; 3], width: f32, x: f32, y: f32, w: f32, h: f32) -> String {
+fn stroke_rect(color: [f32; 3], width: f32, x: f32, y: f32, w: f32, h: f32) -> String {
     let [r, g, b] = color.map(num);
     format!(
         "q {r} {g} {b} RG {} w {} S Q\n",
@@ -162,12 +174,7 @@ pub(crate) fn write_comparison(
     let mut content_left = limits.content_bytes;
     let (old_name, new_name) = (file_name(&opts.old.path), file_name(&opts.new.path));
     let mut out = PdfDocument::new();
-    let helv = out.add_object(&out.new_object_from_str(
-        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>",
-    )?)?;
-    let bold = out.add_object(&out.new_object_from_str(
-        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica-Bold/Encoding/WinAnsiEncoding>>",
-    )?)?;
+    let (helv, bold) = report_fonts(&mut out)?;
     let multiply = out.add_object(&out.new_object_from_str("<</Type/ExtGState/BM/Multiply>>")?)?;
     let metrics = Font::new("Helvetica")?;
     let mut old_map = out.new_graft_map()?;

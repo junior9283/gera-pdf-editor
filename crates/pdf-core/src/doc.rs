@@ -618,7 +618,7 @@ fn add_one(doc: &mut PdfDocument, page: &mut PdfPage, a: &NewAnnot) -> Result<Pd
     })
 }
 
-fn utf8_path(path: &Path) -> Result<&str> {
+pub(crate) fn utf8_path(path: &Path) -> Result<&str> {
     path.to_str()
         .ok_or_else(|| PdfError::Engine("caminho não é UTF-8 válido".into()))
 }
@@ -659,15 +659,25 @@ pub(crate) fn pdf_now() -> String {
     )
 }
 
-/// Respostas e status de `root`, inclusive respostas de respostas (em qualquer profundidade).
-/// Principal do grupo de `id` (ou o próprio `id`). Um /IRT de outro programa que não aponta para
-/// anotação desta página não conta.
+/// O grupo só vale quando aponta para outra anotação da página que não está, ela mesma, num
+/// grupo: grupo para si mesmo, para fora da página ou em ciclo (de outros programas) vira `None`.
+/// Assim o painel, a seleção e o núcleo leem `group` sem conferir de novo.
+fn normalize_groups(annots: &mut [AnnotInfo]) {
+    let raw: std::collections::HashMap<i32, Option<i32>> =
+        annots.iter().map(|a| (a.id, a.group)).collect();
+    for a in annots.iter_mut() {
+        a.group = a
+            .group
+            .filter(|g| *g != a.id && raw.get(g).is_some_and(|pg| pg.is_none_or(|pg| pg == *g)));
+    }
+}
+
+/// Principal do grupo de `id` (ou o próprio `id`).
 fn group_root(annots: &[AnnotInfo], id: i32) -> i32 {
     annots
         .iter()
         .find(|a| a.id == id)
         .and_then(|a| a.group)
-        .filter(|g| *g != id && annots.iter().any(|a| a.id == *g))
         .unwrap_or(id)
 }
 
@@ -683,8 +693,9 @@ fn group_members(annots: &[AnnotInfo], root: i32) -> Vec<i32> {
         .collect()
 }
 
-/// O que sai ao excluir `ids`: cada um com o grupo e, como no Acrobat, as respostas e os status.
-pub(crate) fn deleted(annots: &[AnnotInfo], ids: &[i32]) -> Vec<i32> {
+/// Cada um de `ids` com o grupo e, como no Acrobat, as respostas e os status (o que sai ao
+/// excluir e o que vai junto ao exportar).
+pub(crate) fn with_group_and_replies(annots: &[AnnotInfo], ids: &[i32]) -> Vec<i32> {
     let mut out: Vec<i32> = Vec::new();
     for &id in ids {
         for root in group_members(annots, group_root(annots, id)) {
@@ -749,6 +760,7 @@ fn group_edit(page: i32, annots: &[AnnotInfo], ids: &[i32]) -> Result<Edit> {
     Ok(Edit::Batch(edits))
 }
 
+/// Respostas e status de `root`, inclusive respostas de respostas (em qualquer profundidade).
 fn descendants(annots: &[AnnotInfo], root: i32) -> Vec<i32> {
     let mut found = vec![root];
     let mut n = 0;
@@ -1048,6 +1060,7 @@ impl PdfDoc {
             }
             out.push(annot_info(&annot, page, &ctm)?);
         }
+        normalize_groups(&mut out);
         Ok(out)
     }
 
@@ -1504,7 +1517,7 @@ impl PdfDoc {
             }
             AnnotOp::Delete { page, id } => {
                 let annots = self.annotations(page)?;
-                hide_all(page, deleted(&annots, &[id]))
+                hide_all(page, with_group_and_replies(&annots, &[id]))
             }
             AnnotOp::DeleteMany { page, ids } => {
                 let annots = self.annotations(page)?;
@@ -1513,7 +1526,7 @@ impl PdfDoc {
                         "anotação não encontrada".into(),
                     ));
                 }
-                hide_all(page, deleted(&annots, &ids))
+                hide_all(page, with_group_and_replies(&annots, &ids))
             }
             AnnotOp::Group { page, ids } => {
                 let annots = self.annotations(page)?;

@@ -1,5 +1,5 @@
 use app_state::prefs::LeftPanel;
-use pdf_core::{AnnotInfo, AnnotKind};
+use pdf_core::AnnotInfo;
 
 pub enum SidebarAction {
     None,
@@ -16,12 +16,8 @@ pub(crate) fn label_of(a: &AnnotInfo) -> &'static str {
     if a.arrow {
         "Seta"
     } else {
-        kind_label(a.kind)
+        a.kind.label()
     }
-}
-
-pub(crate) fn kind_label(kind: AnnotKind) -> &'static str {
-    kind.label()
 }
 
 fn annot_label(a: &AnnotInfo) -> String {
@@ -74,6 +70,7 @@ fn annotation_list(ui: &mut egui::Ui, annots: &[AnnotInfo]) -> SidebarAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pdf_core::AnnotKind;
     use pdf_core::PdfRect;
 
     #[test]

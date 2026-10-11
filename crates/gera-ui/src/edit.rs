@@ -949,7 +949,10 @@ impl EditState {
                 .collect();
             return (ids.len() > 1).then_some(AnnotOp::Group { page, ids });
         }
-        let grouped = self.selected_set(annots).len() > 1 + self.extra.len();
+        // está num grupo: é membro (tem principal) ou é o principal de alguém
+        let grouped = annots
+            .iter()
+            .any(|a| a.page == page && ((a.id == id && a.group.is_some()) || a.group == Some(id)));
         (grouped && self.extra.is_empty()).then_some(AnnotOp::Ungroup { page, id })
     }
 

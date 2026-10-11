@@ -351,7 +351,7 @@ fn filter_menu(ui: &mut egui::Ui, f: &mut CommentFilter, all: &[Thread]) {
     }
     ui.menu_button("Tipo", |ui| {
         for k in &kinds {
-            toggle(ui, &mut f.kinds, k, crate::sidebar::kind_label(*k));
+            toggle(ui, &mut f.kinds, k, k.label());
         }
     });
     ui.menu_button("Autor", |ui| {
@@ -469,7 +469,11 @@ mod tests {
 
     #[test]
     fn import_message_agrees_in_number() {
-        let r = |added, skipped| pdf_core::ImportReport { added, skipped };
+        let r = |added, skipped| pdf_core::ImportReport {
+            added,
+            skipped,
+            pages: vec![0],
+        };
         assert_eq!(import_message(r(1, 0)), "1 comentário importado.");
         assert_eq!(
             import_message(r(3, 2)),

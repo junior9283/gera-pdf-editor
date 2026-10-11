@@ -1,7 +1,7 @@
 //! Resumir comentários, como o Acrobat: um PDF novo com os comentários (e as respostas) listados,
 //! em 4 layouts. A página do documento entra como Form XObject, com as anotações desenhadas por
 //! cima a partir das aparências delas, e as linhas de conexão saem de cada comentário até o item.
-use crate::compare_report::{content_page, file_name, text_at};
+use crate::compare_report::{content_page, file_name, report_fonts, text_at};
 use crate::doc::{write_atomic, PdfDoc};
 use crate::error::{refused, Result};
 use crate::page_content::{form_xobject, matrix_ops, mul, num, page_parts};
@@ -10,6 +10,7 @@ use crate::text_fit::text_width;
 use crate::types::AnnotInfo;
 use mupdf::pdf::{Encryption, PdfDocument, PdfGraftMap, PdfObject, PdfWriteOptions};
 use mupdf::{Font, Matrix, Size};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// Layout do resumo (as 4 opções do Acrobat).
@@ -148,12 +149,7 @@ struct Out {
 impl Out {
     fn new(size: f32) -> Result<Self> {
         let mut doc = PdfDocument::new();
-        let helv = doc.add_object(&doc.new_object_from_str(
-            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>",
-        )?)?;
-        let bold = doc.add_object(&doc.new_object_from_str(
-            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica-Bold/Encoding/WinAnsiEncoding>>",
-        )?)?;
+        let (helv, bold) = report_fonts(&mut doc)?;
         Ok(Self {
             doc,
             helv,
@@ -189,33 +185,43 @@ impl Out {
         Ok(())
     }
 
-    /// Quebra `text` em linhas de até `width` pontos (palavra longa demais é cortada).
+    /// Quebra `text` em linhas de até `width` pontos (palavra longa demais é cortada). Mede só a
+    /// palavra nova e soma à largura da linha.
     fn wrap(&self, text: &str, width: f32) -> Result<Vec<String>> {
-        let fits =
-            |s: &str| -> Result<bool> { Ok(text_width(&self.metrics, s, self.size)? <= width) };
+        let measure = |s: &str| text_width(&self.metrics, s, self.size);
+        let space = measure(" ")?;
         let mut out = Vec::new();
         for para in text.split('\n') {
-            let mut line = String::new();
+            let (mut line, mut used) = (String::new(), 0.0);
             for word in para.split_whitespace() {
-                let candidate = if line.is_empty() {
-                    word.to_string()
-                } else {
-                    format!("{line} {word}")
-                };
-                if fits(&candidate)? {
-                    line = candidate;
+                let w = measure(word)?;
+                let need = if line.is_empty() { w } else { used + space + w };
+                if need <= width {
+                    if !line.is_empty() {
+                        line.push(' ');
+                    }
+                    line.push_str(word);
+                    used = need;
                     continue;
                 }
                 if !line.is_empty() {
                     out.push(std::mem::take(&mut line));
+                    used = 0.0;
+                }
+                if w <= width {
+                    line.push_str(word);
+                    used = w;
+                    continue;
                 }
                 // a palavra sozinha não cabe: corta por caracteres
                 for c in word.chars() {
-                    line.push(c);
-                    if !fits(&line)? && line.chars().count() > 1 {
-                        line.pop();
-                        out.push(std::mem::replace(&mut line, c.to_string()));
+                    let cw = measure(c.encode_utf8(&mut [0; 4]))?;
+                    if used + cw > width && !line.is_empty() {
+                        out.push(std::mem::take(&mut line));
+                        used = 0.0;
                     }
+                    line.push(c);
+                    used += cw;
                 }
             }
             out.push(line);
@@ -249,20 +255,8 @@ impl Out {
             header = format!("Página {}: {header}", item.root.page + 1);
         }
         let mut out = Vec::new();
-        for text in self.wrap(&header, width)? {
-            out.push(Line {
-                bold: true,
-                indent: 0.0,
-                text,
-            });
-        }
-        for text in self.wrap(&capped(&item.root.contents), width)? {
-            out.push(Line {
-                bold: false,
-                indent: 0.0,
-                text,
-            });
-        }
+        self.push_wrapped(&mut out, &header, true, 0.0, width)?;
+        self.push_wrapped(&mut out, &capped(&item.root.contents), false, 0.0, width)?;
         let indent = self.size * 1.5;
         for r in &item.replies {
             let (author, date) = head(r);
@@ -270,15 +264,50 @@ impl Out {
                 true => format!("Resposta de {author}: {}", capped(&r.contents)),
                 false => format!("Resposta de {author} ({date}): {}", capped(&r.contents)),
             };
-            for text in self.wrap(&label, width - indent)? {
-                out.push(Line {
-                    bold: false,
-                    indent,
-                    text,
-                });
-            }
+            self.push_wrapped(&mut out, &label, false, indent, width)?;
         }
         Ok(out)
+    }
+
+    /// Acrescenta `text` quebrado na largura que sobra depois do recuo.
+    fn push_wrapped(
+        &self,
+        out: &mut Vec<Line>,
+        text: &str,
+        bold: bool,
+        indent: f32,
+        width: f32,
+    ) -> Result<()> {
+        for text in self.wrap(text, width - indent)? {
+            out.push(Line { bold, indent, text });
+        }
+        Ok(())
+    }
+
+    /// Distribui os blocos em colunas, uma por página: a primeira em `first` (x, topo), as de
+    /// continuação em `rest`. Devolve, por página, as operações e onde cada bloco começa (a altura
+    /// da linha de conexão).
+    fn flow(
+        &self,
+        blocks: &[Vec<Line>],
+        first: (f32, f32),
+        rest: (f32, f32),
+    ) -> Vec<(String, Vec<f32>)> {
+        let mut pages = Vec::new();
+        let (mut ops, mut starts) = (String::new(), Vec::new());
+        let (mut x, mut y) = first;
+        for lines in blocks {
+            if y - self.height(lines) < MARGIN && !starts.is_empty() {
+                pages.push((std::mem::take(&mut ops), std::mem::take(&mut starts)));
+                (x, y) = rest;
+            }
+            starts.push(y - self.size * 0.6);
+            let (more, end) = self.draw(lines, x, y);
+            ops.push_str(&more);
+            y = end - self.size * 0.9;
+        }
+        pages.push((ops, starts));
+        pages
     }
 
     /// Desenha as linhas a partir de `y` (topo, coordenadas do PDF).
@@ -340,21 +369,24 @@ pub fn summarize_comments(doc: &PdfDoc, opts: &SummaryOptions, dest: &Path) -> R
         return Err(refused("intervalo de páginas inválido"));
     }
     // comentários por página, cada um com as respostas
+    let only: Option<HashSet<(i32, i32)>> = opts.only.as_ref().map(|o| o.iter().copied().collect());
     let mut pages: Vec<(i32, Vec<Item>)> = Vec::new();
     let mut total = 0;
     for p in first..=last {
         let annots = doc.annotations(p)?;
+        let mut replies: HashMap<i32, Vec<AnnotInfo>> = HashMap::new();
+        for r in annots.iter().filter(|r| r.state.is_none()) {
+            if let Some(parent) = r.reply_to {
+                replies.entry(parent).or_default().push(r.clone());
+            }
+        }
         let mut items: Vec<Item> = annots
             .iter()
             .filter(|a| !a.is_reply())
-            .filter(|a| opts.only.as_ref().is_none_or(|o| o.contains(&(p, a.id))))
+            .filter(|a| only.as_ref().is_none_or(|o| o.contains(&(p, a.id))))
             .take(MAX_ITEMS - total)
             .map(|a| {
-                let mut replies: Vec<AnnotInfo> = annots
-                    .iter()
-                    .filter(|r| r.reply_to == Some(a.id) && r.state.is_none())
-                    .cloned()
-                    .collect();
+                let mut replies = replies.remove(&a.id).unwrap_or_default();
                 replies.sort_by(|x, y| date_key(x).cmp(date_key(y)));
                 Item {
                     root: a.clone(),
@@ -410,8 +442,6 @@ fn comments_only(
     title: &str,
 ) -> Result<()> {
     let width = A4.0 - 2.0 * MARGIN;
-    let mut ops = text_at("F2", 16.0, 0.0, MARGIN, A4.1 - MARGIN - 16.0, title);
-    let mut y = A4.1 - MARGIN - 34.0;
     let by_page = opts.sort == SummarySort::Page;
     let mut blocks: Vec<Vec<Line>> = Vec::new();
     if by_page {
@@ -419,17 +449,10 @@ fn comments_only(
             if items.is_empty() && !opts.include_empty {
                 continue;
             }
-            let mut heading = vec![Line {
-                bold: true,
-                indent: 0.0,
-                text: format!("Página {}", p + 1),
-            }];
+            let mut heading = Vec::new();
+            out.push_wrapped(&mut heading, &format!("Página {}", p + 1), true, 0.0, width)?;
             if items.is_empty() {
-                heading.push(Line {
-                    bold: false,
-                    indent: 0.0,
-                    text: "Sem comentários.".into(),
-                });
+                out.push_wrapped(&mut heading, "Sem comentários.", false, 0.0, width)?;
             }
             blocks.push(heading);
             for i in items {
@@ -443,17 +466,14 @@ fn comments_only(
             blocks.push(out.lines(i, false, width)?);
         }
     }
-    for lines in blocks {
-        if y - out.height(&lines) < MARGIN && !ops.is_empty() {
-            out.page(A4, &ops, None)?;
-            ops.clear();
-            y = A4.1 - MARGIN;
-        }
-        let (more, end) = out.draw(&lines, MARGIN, y);
-        ops.push_str(&more);
-        y = end - out.size * 0.9;
-    }
-    if !ops.is_empty() {
+    let title = text_at("F2", 16.0, 0.0, MARGIN, A4.1 - MARGIN - 16.0, title);
+    let pages = out.flow(
+        &blocks,
+        (MARGIN, A4.1 - MARGIN - 34.0),
+        (MARGIN, A4.1 - MARGIN),
+    );
+    for (k, (ops, _)) in pages.into_iter().enumerate() {
+        let ops = if k == 0 { format!("{title}{ops}") } else { ops };
         out.page(A4, &ops, None)?;
     }
     Ok(())
@@ -476,15 +496,13 @@ fn line_ops(color: [f32; 3], a: (f32, f32), b: (f32, f32)) -> String {
 /// Círculo cheio com o número branco no meio (layout de números de sequência).
 fn badge(out: &Out, color: [f32; 3], (x, y): (f32, f32), n: usize) -> Result<String> {
     let r = 7.0;
-    let k = r * 0.5523;
+    // a moldura arredondada do carimbo, com raio igual à metade do lado, é um círculo
     let mut ops = format!(
-        "q {} {} {} rg {} {} m {} {} {} {} {} {} c {} {} {} {} {} {} c {} {} {} {} {} {} c {} {} {} {} {} {} c f Q\n",
-        num(color[0]), num(color[1]), num(color[2]),
-        num(x + r), num(y),
-        num(x + r), num(y + k), num(x + k), num(y + r), num(x), num(y + r),
-        num(x - k), num(y + r), num(x - r), num(y + k), num(x - r), num(y),
-        num(x - r), num(y - k), num(x - k), num(y - r), num(x), num(y - r),
-        num(x + k), num(y - r), num(x + r), num(y - k), num(x + r), num(y),
+        "q {} {} {} rg {} f Q\n",
+        num(color[0]),
+        num(color[1]),
+        num(color[2]),
+        crate::stamp::rounded_rect(x - r, y - r, x + r, y + r, r)
     );
     let label = n.to_string();
     let size = if label.len() > 2 { 5.0 } else { 7.0 };
@@ -498,12 +516,11 @@ fn badge(out: &Out, color: [f32; 3], (x, y): (f32, f32), n: usize) -> Result<Str
     Ok(ops)
 }
 
-/// A página do documento posta no resultado: as operações, os XObjects e onde ela ficou.
+/// A página do documento posta no alto à esquerda do resultado: as operações e os XObjects.
 struct Placed {
     ops: String,
     xobjects: PdfObject,
-    /// Canto superior esquerdo no resultado, origem da tela da página e altura do resultado.
-    at: (f32, f32),
+    /// Origem da tela da página de origem e altura da página do resultado.
     origin: (f32, f32),
     height: f32,
 }
@@ -511,24 +528,21 @@ struct Placed {
 impl Placed {
     /// Ponto da tela da página de origem no resultado (origem embaixo).
     fn to_out(&self, (x, y): (f32, f32)) -> (f32, f32) {
-        (
-            self.at.0 + (x - self.origin.0),
-            self.height - self.at.1 - (y - self.origin.1),
-        )
+        (x - self.origin.0, self.height - (y - self.origin.1))
     }
 }
 
-/// A página do documento como desenho: o conteúdo e as anotações (das aparências delas).
-/// `ox`/`oy`: canto superior esquerdo no resultado; `height`: altura da página do resultado.
+/// A página do documento como desenho: o conteúdo e as anotações (das aparências delas), no
+/// canto superior esquerdo de uma página do resultado de altura `height`.
 fn place_page(
     out: &mut Out,
     map: &mut PdfGraftMap,
     doc: &PdfDoc,
     page: i32,
-    (ox, oy): (f32, f32),
+    bounds: mupdf::Rect,
     height: f32,
 ) -> Result<Placed> {
-    let bounds = doc.inner.load_page(page)?.bounds()?;
+    let (ox, oy) = (0.0, 0.0);
     let (bx, by) = (bounds.x0, bounds.y0);
     let (w, h) = (bounds.width(), bounds.height());
     let src = doc.inner.find_page(page)?;
@@ -548,7 +562,7 @@ fn place_page(
     );
     // as anotações por cima, como estão na tela (respostas e escondidas não aparecem)
     let pdf_page = doc.inner.load_pdf_page(page)?;
-    let shown: Vec<i32> = doc
+    let shown: HashSet<i32> = doc
         .annotations(page)?
         .iter()
         .filter(|a| !a.is_reply())
@@ -579,7 +593,6 @@ fn place_page(
     Ok(Placed {
         ops,
         xobjects,
-        at: (ox, oy),
         origin: (bx, by),
         height,
     })
@@ -700,77 +713,40 @@ fn with_document(
         .iter()
         .map(|i| out.lines(i, true, col_w))
         .collect::<Result<_>>()?;
-    // o que cabe na primeira coluna; o resto vai para páginas de continuação
-    let mut y = h - MARGIN;
-    let mut col_ops = String::new();
-    let mut starts = Vec::new();
-    let mut fit = 0;
-    for lines in &blocks {
-        if y - out.height(lines) < MARGIN && fit > 0 {
-            break;
-        }
-        starts.push(y - out.size * 0.6);
-        let (ops, end) = out.draw(lines, col_x, y);
-        col_ops.push_str(&ops);
-        y = end - out.size * 0.9;
-        fit += 1;
-    }
+    // a primeira coluna (com as linhas de conexão) e as de continuação
+    let mut columns = out
+        .flow(&blocks, (col_x, h - MARGIN), (MARGIN, h - MARGIN))
+        .into_iter();
+    let (mut column, starts) = columns.next().unwrap_or_default();
     let page_size = if single { (2.0 * w, h) } else { (w, h) };
-    let placed = place_page(out, map, doc, page, (0.0, 0.0), page_size.1)?;
-    let mut ops = placed.ops.clone();
-    let mut column = col_ops;
-    for (k, item) in items.iter().enumerate().take(fit) {
+    let mut placed = place_page(out, map, doc, page, bounds, page_size.1)?;
+    let mut ops = std::mem::take(&mut placed.ops);
+    for (item, start) in items.iter().zip(starts) {
         let color = color_of(&item.root);
         let a = placed.to_out(anchor(&item.root));
         if numbered {
             ops.push_str(&badge(out, color, a, item.number)?);
         } else if single {
-            ops.push_str(&line_ops(color, a, (col_x - 4.0, starts[k])));
+            ops.push_str(&line_ops(color, a, (col_x - 4.0, start)));
         } else {
             // em páginas separadas: até a borda na página do documento e da borda até o item
-            ops.push_str(&line_ops(color, a, (w, starts[k])));
-            column.push_str(&line_ops(color, (0.0, starts[k]), (col_x - 4.0, starts[k])));
-        }
-    }
-    if items.is_empty() {
-        let note = text_at(
-            "F1",
-            out.size,
-            0.4,
-            col_x,
-            h - MARGIN - out.size,
-            "Sem comentários.",
-        );
-        if single {
-            ops.push_str(&note);
+            ops.push_str(&line_ops(color, a, (w, start)));
+            column.push_str(&line_ops(color, (0.0, start), (col_x - 4.0, start)));
         }
     }
     if single {
+        if items.is_empty() {
+            let at = h - MARGIN - out.size;
+            ops.push_str(&text_at("F1", out.size, 0.4, col_x, at, "Sem comentários."));
+        }
         ops.push_str(&column);
-        out.page(page_size, &ops, Some(placed.xobjects.clone()))?;
-    } else {
-        out.page(page_size, &ops, Some(placed.xobjects.clone()))?;
-        if !items.is_empty() {
-            out.page((w, h), &column, None)?;
-        }
     }
-    // continuação: os itens que não couberam
-    let mut rest = blocks.iter().skip(fit).peekable();
-    while rest.peek().is_some() {
-        let mut y = h - MARGIN;
-        let mut ops = String::new();
-        let mut placed = 0;
-        while let Some(lines) = rest.peek() {
-            if y - out.height(lines) < MARGIN && placed > 0 {
-                break;
-            }
-            let (more, end) = out.draw(lines, MARGIN, y);
-            ops.push_str(&more);
-            y = end - out.size * 0.9;
-            placed += 1;
-            rest.next();
-        }
-        out.page((w, h), &ops, None)?;
+    out.page(page_size, &ops, Some(placed.xobjects))?;
+    if !single && !items.is_empty() {
+        out.page((w, h), &column, None)?;
+    }
+    for (more, _) in columns {
+        out.page((w, h), &more, None)?;
     }
     Ok(())
 }

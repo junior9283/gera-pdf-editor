@@ -1371,6 +1371,14 @@ impl DocTab {
                         [] => "Nada exportado.".into(),
                     };
                 }
+                Response::CommentsExported(path) => {
+                    self.status = format!("Comentários exportados para {}", path.display());
+                }
+                Response::SummaryReady(dest) => {
+                    self.status.clear();
+                    self.events.push(DocEvent::OpenAttachment(dest));
+                }
+                Response::CommentsFailed(e) => self.status = format!("Não foi possível: {e}"),
                 Response::CommentsImported(r) => {
                     self.status = crate::comments_panel::import_message(r);
                 }

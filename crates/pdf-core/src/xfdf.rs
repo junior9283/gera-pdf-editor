@@ -8,6 +8,7 @@ use crate::types::AnnotInfo;
 use mupdf::pdf::{PdfDocument, PdfObject};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 /// Maior XFDF aceito.
@@ -36,6 +37,14 @@ const KINDS: [(&str, &str); 15] = [
     ("stamp", "Stamp"),
     ("caret", "Caret"),
     ("redact", "Redact"),
+];
+
+/// Chaves de texto do dicionário e os atributos do XFDF (os dois sentidos usam a mesma tabela).
+const TEXT_ATTRS: [(&str, &str); 4] = [
+    ("T", "title"),
+    ("M", "date"),
+    ("CreationDate", "creationdate"),
+    ("Subj", "subject"),
 ];
 
 /// Bits de /F e os nomes do XFDF.
@@ -172,29 +181,24 @@ fn name_for(dict: &PdfObject, a: &AnnotInfo) -> String {
 
 /// Escreve o XFDF dos comentários `picked` (na ordem dada).
 pub(crate) fn write(doc: &PdfDocument, picked: &[AnnotInfo], file_name: &str) -> Result<String> {
-    let mut names = std::collections::HashMap::new();
-    let mut dicts = Vec::new();
-    let mut page_now = -1;
-    let mut page_ref = None;
-    for a in picked {
-        if a.page != page_now {
-            page_now = a.page;
-            page_ref = Some(doc.load_pdf_page(a.page)?);
+    // os dicionários de cada página numa passada só
+    let mut found: HashMap<(i32, i32), PdfObject> = HashMap::new();
+    let pages: std::collections::BTreeSet<i32> = picked.iter().map(|a| a.page).collect();
+    for page in pages {
+        for annot in doc.load_pdf_page(page)?.annotations() {
+            if let (Ok(id), Some(dict)) = (annot.object().as_indirect(), annot.object().resolve()?)
+            {
+                found.insert((page, id), dict);
+            }
         }
-        let Some(page) = page_ref.as_ref() else {
-            continue;
-        };
-        let Some(annot) = page
-            .annotations()
-            .find(|x| x.object().as_indirect().ok() == Some(a.id))
-        else {
-            continue;
-        };
-        let Some(dict) = annot.object().resolve()? else {
-            continue;
-        };
-        names.insert(a.id, name_for(&dict, a));
-        dicts.push((a, dict));
+    }
+    let mut names = HashMap::new();
+    let mut dicts = Vec::new();
+    for a in picked {
+        if let Some(dict) = found.remove(&(a.page, a.id)) {
+            names.insert(a.id, name_for(&dict, a));
+            dicts.push((a, dict));
+        }
     }
     let mut out = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<xfdf xmlns=\"http://ns.adobe.com/xfdf/\" xml:space=\"preserve\">\n<annots>\n",
@@ -220,12 +224,7 @@ pub(crate) fn write(doc: &PdfDocument, picked: &[AnnotInfo], file_name: &str) ->
         if let Some(o) = get(dict, "CA").and_then(|o| o.as_float().ok()) {
             attrs.push(("opacity", num(o)));
         }
-        for (key, attr) in [
-            ("T", "title"),
-            ("M", "date"),
-            ("CreationDate", "creationdate"),
-            ("Subj", "subject"),
-        ] {
+        for (key, attr) in TEXT_ATTRS {
             if let Some(v) = text_of(dict, key) {
                 attrs.push((attr, v));
             }
@@ -311,6 +310,107 @@ pub(crate) fn write(doc: &PdfDocument, picked: &[AnnotInfo], file_name: &str) ->
         escape(file_name)
     );
     Ok(out)
+}
+
+/// Dicionário da anotação a partir do elemento do XFDF (`rect` já conferido).
+pub(crate) fn annot_dict(doc: &PdfDocument, item: &XfdfAnnot, rect: &[f32]) -> Result<PdfObject> {
+    let mut d = doc.new_dict()?;
+    let reals = |v: &[f32]| -> Result<PdfObject> {
+        let mut a = doc.new_array()?;
+        for &x in v {
+            a.array_push(PdfObject::new_real(x)?)?;
+        }
+        Ok(a)
+    };
+    let name = |n: &str| PdfObject::new_name(n);
+    d.dict_put("Type", name("Annot")?)?;
+    d.dict_put("Subtype", name(item.subtype)?)?;
+    d.dict_put("Rect", reals(rect)?)?;
+    for (attr, key) in [("color", "C"), ("interior-color", "IC")] {
+        if let Some(c) = item.attr(attr).and_then(parse_color) {
+            d.dict_put(key, reals(&c)?)?;
+        }
+    }
+    if let Some(o) = item
+        .attr("opacity")
+        .and_then(|o| o.trim().parse::<f32>().ok())
+    {
+        if o.is_finite() {
+            d.dict_put("CA", PdfObject::new_real(o.clamp(0.0, 1.0))?)?;
+        }
+    }
+    for &(key, attr) in TEXT_ATTRS.iter().chain(&[("NM", "name")]) {
+        if let Some(v) = item.attr(attr) {
+            d.dict_put(key, PdfObject::new_string(v)?)?;
+        }
+    }
+    if let Some(words) = item.attr("flags") {
+        let f = flag_bits(words);
+        if f != 0 {
+            d.dict_put("F", PdfObject::new_int(f)?)?;
+        }
+    }
+    if item.attr("replyType") == Some("group") {
+        d.dict_put("RT", name("Group")?)?;
+    }
+    for (attr, key) in [("icon", "Name"), ("intent", "IT")] {
+        if let Some(v) = item.attr(attr).filter(|v| plain_name(v)) {
+            d.dict_put(key, name(v)?)?;
+        }
+    }
+    if let Some(w) = item
+        .attr("width")
+        .and_then(|w| w.trim().parse::<f32>().ok())
+    {
+        if w.is_finite() {
+            let mut bs = doc.new_dict()?;
+            bs.dict_put("W", PdfObject::new_real(w.clamp(0.0, 100.0))?)?;
+            d.dict_put("BS", bs)?;
+        }
+    }
+    let list = |attr: &str, step: usize| {
+        item.attr(attr)
+            .and_then(numbers)
+            .filter(|v| !v.is_empty() && v.len() % step == 0)
+    };
+    if let Some(q) = list("coords", 8) {
+        d.dict_put("QuadPoints", reals(&q)?)?;
+    }
+    if let Some(v) = list("vertices", 2) {
+        d.dict_put("Vertices", reals(&v)?)?;
+    }
+    if let Some(cl) = list("callout", 2).filter(|c| c.len() <= 6) {
+        d.dict_put("CL", reals(&cl)?)?;
+    }
+    if let (Some(a), Some(b)) = (list("start", 2), list("end", 2)) {
+        if a.len() == 2 && b.len() == 2 {
+            d.dict_put("L", reals(&[a[0], a[1], b[0], b[1]])?)?;
+        }
+    }
+    if let (Some(h), Some(t)) = (item.attr("head"), item.attr("tail")) {
+        if plain_name(h) && plain_name(t) {
+            let mut le = doc.new_array()?;
+            le.array_push(name(h)?)?;
+            le.array_push(name(t)?)?;
+            d.dict_put("LE", le)?;
+        }
+    }
+    if !item.gestures.is_empty() {
+        let mut ink = doc.new_array()?;
+        for g in &item.gestures {
+            if let Some(v) = numbers(g).filter(|v| v.len() >= 2 && v.len() % 2 == 0) {
+                ink.array_push(reals(&v)?)?;
+            }
+        }
+        d.dict_put("InkList", ink)?;
+    }
+    if let Some(text) = &item.contents {
+        d.dict_put("Contents", PdfObject::new_string(text)?)?;
+    }
+    if let Some(da) = &item.da {
+        d.dict_put("DA", PdfObject::new_string(da)?)?;
+    }
+    Ok(d)
 }
 
 /// O que se está lendo dentro de um comentário.

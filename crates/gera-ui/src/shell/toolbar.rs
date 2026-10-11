@@ -556,7 +556,7 @@ fn stamp_menu(ui: &mut egui::Ui, doc: &mut DocTab) {
             }
         }
         // categorias do usuário, depois Criar e Gerenciar (como no Acrobat)
-        for c in crate::stamp_dialogs::catalog().categories {
+        for c in &crate::stamp_dialogs::catalog().categories {
             ui.separator();
             ui.label(
                 egui::RichText::new(crate::links::safe_display(&c.name))

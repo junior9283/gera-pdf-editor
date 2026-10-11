@@ -77,21 +77,13 @@ fn chrono_key(a: &AnnotInfo) -> (i64, i32) {
 /// Monta as conversas: só os comentários (sem `reply_to`) viram linhas; respostas e status ficam
 /// dentro do pai; os de pai inexistente (PDF de outro programa) são ignorados.
 pub fn threads(annots: &[AnnotInfo]) -> Vec<Thread> {
-    let by_id: HashMap<i32, &AnnotInfo> = annots.iter().map(|a| (a.id, a)).collect();
-    // o principal do grupo de `a`: outra anotação da lista que não está, ela mesma, num grupo
-    // (grupo apontando para si mesmo ou em ciclo não esconde ninguém)
-    let principal = |a: &AnnotInfo| {
-        a.group.filter(|g| *g != a.id).filter(|g| {
-            by_id
-                .get(g)
-                .is_some_and(|p| p.group.is_none_or(|pg| pg == p.id))
-        })
-    };
-    let group_roots: std::collections::HashSet<i32> = annots.iter().filter_map(principal).collect();
+    // `group` já vem conferido do pdf-core (só aponta para um principal da mesma página)
+    let group_roots: std::collections::HashSet<i32> =
+        annots.iter().filter_map(|a| a.group).collect();
     let mut out: Vec<Thread> = annots
         .iter()
         // o membro de um grupo (o riscado do Substituir texto) aparece no item da principal
-        .filter(|a| !a.is_reply() && principal(a).is_none())
+        .filter(|a| !a.is_reply() && a.group.is_none())
         .map(|a| Thread {
             root: a.clone(),
             replies: Vec::new(),
@@ -230,19 +222,6 @@ pub fn sorted(mut threads: Vec<Thread>, by: SortBy) -> Vec<Thread> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn self_groups_and_group_cycles_stay_visible() {
-        let mk = |id, group| AnnotInfo {
-            id,
-            kind: pdf_core::AnnotKind::Note,
-            group,
-            ..Default::default()
-        };
-        let all = [mk(1, Some(1)), mk(2, Some(3)), mk(3, Some(2))];
-        let shown: Vec<i32> = threads(&all).iter().map(|t| t.root.id).collect();
-        assert_eq!(shown.len(), 3, "{shown:?}");
-    }
-
     use super::*;
 
     fn a(id: i32, page: i32, author: &str, modified: &str, text: &str) -> AnnotInfo {
