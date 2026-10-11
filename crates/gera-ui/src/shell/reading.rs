@@ -37,7 +37,7 @@ pub fn bar(ctx: &egui::Context, doc: &mut DocTab, full_screen: bool) -> Option<C
                     } else {
                         "Sair do modo leitura"
                     };
-                    if ui.button("✕").on_hover_text(label).clicked() {
+                    if ui.button("×").on_hover_text(label).clicked() {
                         out = Some(exit.clone());
                     }
                 });
