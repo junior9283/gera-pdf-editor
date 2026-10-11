@@ -844,6 +844,11 @@ impl DocTab {
         self.focus_zoom = false;
     }
 
+    /// O Espaço segurado vira Mão (fora de um campo de formulário com o foco).
+    pub(crate) fn space_is_hand(&self) -> bool {
+        !self.form.has_focus()
+    }
+
     /// Alguma janela da aba que usa o Esc está aberta.
     pub(crate) fn has_modal(&self) -> bool {
         self.revert_ask || self.edit.fill.dialog.is_some() || self.prepare.props.is_some()
@@ -1472,10 +1477,11 @@ impl DocTab {
                 None => {}
             }
             // Espaço segurado: Mão temporária (como no Acrobat), em qualquer modo
-            let space = ctx.input_mut(|i| {
-                i.consume_key(egui::Modifiers::NONE, egui::Key::Space);
-                i.key_down(egui::Key::Space)
-            });
+            let space = self.space_is_hand()
+                && ctx.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Space);
+                    i.key_down(egui::Key::Space)
+                });
             if space {
                 self.edit.tool = self.temp_tool.press(self.edit.tool);
             } else if let Some(tool) = self.temp_tool.release() {
@@ -3289,6 +3295,14 @@ mod tests {
             tab.history_views.back(e).is_none(),
             "só uma vista no histórico"
         );
+    }
+
+    #[test]
+    fn space_is_left_to_a_focused_form_field() {
+        let mut tab = tab_with_pages(1);
+        assert!(tab.space_is_hand());
+        tab.form.focus_for_test(Some((0, 3)));
+        assert!(!tab.space_is_hand(), "o Espaço marca a caixa com o foco");
     }
 
     #[test]

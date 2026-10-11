@@ -66,6 +66,16 @@ impl Default for FormState {
 }
 
 impl FormState {
+    /// Um campo (caixa, opção, lista) tem o foco do teclado: o Espaço e o Enter são dele.
+    pub fn has_focus(&self) -> bool {
+        self.focused.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn focus_for_test(&mut self, field: Option<(i32, i32)>) {
+        self.focused = field;
+    }
+
     /// Há texto em edição num campo (conta como alteração pendente).
     pub fn has_draft(&self) -> bool {
         self.draft.as_ref().is_some_and(|d| d.text != d.original)
