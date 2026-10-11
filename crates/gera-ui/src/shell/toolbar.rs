@@ -161,9 +161,24 @@ pub fn prepare_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
             }
         }
         ui.separator();
-        ui.menu_button("Ordem", |ui| {
-            tab_order_menu(ui, doc);
+        ui.menu_button("Organizar", |ui| {
+            let (count, can_paste) = (
+                doc.prepare.selection.len(),
+                !doc.prepare.clipboard.is_empty(),
+            );
+            crate::prepare::arrange_menu(ui, &mut doc.prepare.cmds, count, can_paste);
             ui.separator();
+            ui.checkbox(&mut doc.prepare.preview, "Visualizar (P)")
+                .on_hover_text("Preencha os campos como o leitor verá, sem sair do Preparar");
+            let mut guides = !doc.prepare.guides_off;
+            if ui
+                .checkbox(&mut guides, "Guias de alinhamento (G)")
+                .changed()
+            {
+                doc.prepare.guides_off = !guides;
+            }
+            ui.separator();
+            ui.menu_button("Ordem de tabulação", |ui| tab_order_menu(ui, doc));
             if ui.button("Ordem de cálculo…").clicked() {
                 doc.open_calc_order();
                 ui.close();
@@ -198,7 +213,7 @@ fn tab_order_menu(ui: &mut egui::Ui, doc: &mut DocTab) {
     }
     ui.separator();
     // os campos da página do selecionado, já na ordem de tabulação
-    let selected = doc.prepare.selected.map(|(p, id)| {
+    let selected = doc.prepare.anchor().map(|(p, id)| {
         let ids: Vec<i32> = doc
             .fields
             .iter()

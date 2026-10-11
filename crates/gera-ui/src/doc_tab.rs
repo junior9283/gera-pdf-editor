@@ -234,6 +234,8 @@ pub struct DocTab {
     /// Linha Preparar formulário aberta (os campos viram objetos editáveis).
     pub(crate) prepare_tools: bool,
     pub(crate) prepare: crate::prepare::PrepareState,
+    /// Janela Duplicar ou Criar várias cópias do Preparar.
+    arrange_dialog: Option<crate::shell::arrange_dialogs::ArrangeDialog>,
     /// Linha Editar PDF aberta (as imagens viram objetos editáveis).
     pub(crate) edit_pdf_tools: bool,
     pub(crate) edit_pdf: crate::edit_pdf::EditPdfState,
@@ -410,6 +412,7 @@ impl DocTab {
             fill_tools: false,
             prepare_tools: false,
             prepare: Default::default(),
+            arrange_dialog: None,
             edit_pdf_tools: false,
             edit_pdf: Default::default(),
             pagination: Default::default(),
@@ -538,6 +541,20 @@ impl DocTab {
         let Some(view) = self.view.as_mut() else {
             return;
         };
+        // no Preparar formulário, Excluir, Copiar e Selecionar tudo agem sobre os campos
+        if self.prepare_tools && !self.prepare.preview {
+            use crate::prepare::ArrangeCmd;
+            match cmd {
+                DocCommand::Delete => return self.run_arrange(ArrangeCmd::Delete),
+                DocCommand::Copy => return self.run_arrange(ArrangeCmd::Copy),
+                DocCommand::SelectAll => {
+                    let page = self.last.current_page as i32;
+                    self.prepare.select_all(&self.fields, page);
+                    return;
+                }
+                _ => {}
+            }
+        }
         // no modo Organizar, Excluir e Selecionar tudo agem sobre as páginas
         if let Some(org) = self.organize.as_mut() {
             match cmd {
@@ -574,12 +591,6 @@ impl DocTab {
                 self.edit.selected = None;
             }
             DocCommand::SelectAll => self.edit.select_all(&self.worker),
-            DocCommand::Delete if self.prepare_tools => {
-                if let Some((page, id)) = self.prepare.selected.take() {
-                    self.worker
-                        .send(Request::Prepare(pdf_core::PrepareOp::Delete { page, id }));
-                }
-            }
             DocCommand::Delete if self.edit_pdf_tools => {
                 if let Some(action) = self.edit_pdf.delete_selected() {
                     send_edit_action(&self.worker, &mut self.status, action);
@@ -696,6 +707,10 @@ impl DocTab {
     /// Colar (Ctrl+V com o texto da área do sistema, ou Editar → Colar, que a lê aqui): o
     /// comentário copiado no app, uma caixa de texto ou, com imagem, um carimbo.
     pub(crate) fn paste(&mut self, system_text: Option<String>) {
+        if self.prepare_tools && !self.prepare.clipboard.is_empty() {
+            self.run_arrange(crate::prepare::ArrangeCmd::Paste);
+            return;
+        }
         if !self.security.permissions.annotate {
             self.deny("colar comentários");
             return;
@@ -1797,7 +1812,10 @@ impl DocTab {
         // com a janela de assinatura aberta, as setas são dela; no Preparar, movem o campo; no
         // Editar PDF, só a imagem
         let image = self.edit_pdf.selected.is_some();
-        let field = self.prepare.selected.filter(|_| self.prepare_tools);
+        let field = self
+            .prepare
+            .anchor()
+            .filter(|_| self.prepare_tools && !self.prepare.preview);
         let target = field
             .or(self.edit.selected)
             .filter(|_| self.edit.fill.dialog.is_none() && self.prepare.props.is_none());
@@ -1823,24 +1841,18 @@ impl DocTab {
         let Some((page, id)) = target else {
             return;
         };
-        let rect = field.and_then(|_| {
-            self.fields
-                .iter()
-                .find(|f| f.page == page && f.id == id)
-                .map(|f| f.rect.translated(dx, dy))
-        });
-        match rect {
-            Some(rect) => self
-                .worker
-                .send(Request::Prepare(pdf_core::PrepareOp::Move {
-                    page,
-                    id,
-                    rect,
-                })),
-            None if !self.security.permissions.annotate => self.deny("mover comentários"),
-            None => self
-                .worker
-                .send(Request::Annot(pdf_core::AnnotOp::Move { page, id, dx, dy })),
+        if field.is_some() {
+            // no Preparar, as setas movem toda a seleção
+            if let Some(op) = crate::prepare::nudge_op(&self.prepare, &self.fields, dx, dy) {
+                self.worker.send(Request::Prepare(op));
+            }
+            return;
+        }
+        if self.security.permissions.annotate {
+            self.worker
+                .send(Request::Annot(pdf_core::AnnotOp::Move { page, id, dx, dy }));
+        } else {
+            self.deny("mover comentários");
         }
     }
 
@@ -2223,7 +2235,9 @@ impl DocTab {
         self.cert_tools = id == app_state::tools_catalog::CERTIFICATES;
         self.cert.placing = false;
         self.prepare.set_tool(None);
-        self.prepare.selected = None;
+        self.prepare.selection.clear();
+        self.prepare.preview = false;
+        self.arrange_dialog = None;
         self.edit_pdf_tools = id == tc::EDIT_PDF;
         let pagination = match id {
             tc::WATERMARK => Some(pdf_core::Pagination::Watermark),
@@ -2460,6 +2474,11 @@ impl DocTab {
         self.sign_window(ui.ctx());
         self.split_window(ui);
         self.calc_order_window(ui.ctx());
+        // pedidos do menu de contexto (e do menu Organizar)
+        for cmd in std::mem::take(&mut self.prepare.cmds) {
+            self.run_arrange(cmd);
+        }
+        self.arrange_window(ui.ctx());
         self.field_alert_window(ui.ctx());
         self.stamp_windows(ui.ctx());
         self.poll_files();
@@ -3429,6 +3448,132 @@ impl DocTab {
         }
     }
 
+    /// Atalhos de tecla única do Preparar (com "Usar aceleradores de tecla única", como no
+    /// Acrobat): L R T B H V alinham, Shift+H e Shift+V centralizam, P visualiza e G liga as guias.
+    /// Chamado antes dos atalhos do app, que consumiriam H e V (ferramentas).
+    pub(crate) fn prepare_shortcuts(&mut self, ctx: &egui::Context, single_key: bool) {
+        if !self.prepare_tools || !single_key || ctx.egui_wants_keyboard_input() || self.has_modal()
+        {
+            return;
+        }
+        use crate::prepare::ArrangeCmd as C;
+        use app_state::arrange::{Axis, Edge};
+        use egui::{Key, Modifiers};
+        let consume = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
+        if consume(Modifiers::NONE, Key::P) {
+            self.prepare.preview = !self.prepare.preview;
+            self.status = if self.prepare.preview {
+                "Visualizar: preencha os campos como o leitor verá (P volta a editar).".into()
+            } else {
+                String::new()
+            };
+            return;
+        }
+        if self.prepare.preview {
+            return;
+        }
+        if consume(Modifiers::NONE, Key::G) {
+            self.prepare.guides_off = !self.prepare.guides_off;
+            return;
+        }
+        if self.prepare.selection.is_empty() {
+            return;
+        }
+        let keys = [
+            (Modifiers::SHIFT, Key::H, C::Center(Axis::H)),
+            (Modifiers::SHIFT, Key::V, C::Center(Axis::V)),
+            (Modifiers::NONE, Key::L, C::Align(Edge::Left)),
+            (Modifiers::NONE, Key::R, C::Align(Edge::Right)),
+            (Modifiers::NONE, Key::T, C::Align(Edge::Top)),
+            (Modifiers::NONE, Key::B, C::Align(Edge::Bottom)),
+            (Modifiers::NONE, Key::H, C::Align(Edge::CenterH)),
+            (Modifiers::NONE, Key::V, C::Align(Edge::CenterV)),
+        ];
+        for (m, k, cmd) in keys {
+            if consume(m, k) {
+                self.run_arrange(cmd);
+                return;
+            }
+        }
+    }
+
+    /// Executa um pedido sobre a seleção do Preparar (menu, tecla ou Editar).
+    pub(crate) fn run_arrange(&mut self, cmd: crate::prepare::ArrangeCmd) {
+        use crate::prepare::ArrangeCmd as C;
+        use crate::shell::arrange_dialogs::ArrangeDialog;
+        let anchor = self.prepare.anchor();
+        let anchor_field = anchor.and_then(|(p, id)| {
+            self.fields
+                .iter()
+                .find(|f| f.page == p && f.id == id)
+                .cloned()
+        });
+        let pages = self.view.as_ref().map_or(0, |v| v.sizes.len());
+        match cmd {
+            C::Copy => self.prepare.clipboard = self.prepare.selection.clone(),
+            C::Paste => {
+                // no lugar do original; na mesma página, um pouco abaixo (como colar no Acrobat)
+                let to = self.last.current_page as i32;
+                for (page, id) in self.prepare.clipboard.clone() {
+                    let offset = if page == to { (10.0, 10.0) } else { (0.0, 0.0) };
+                    self.worker
+                        .send(Request::Prepare(pdf_core::PrepareOp::Duplicate {
+                            page,
+                            id,
+                            pages: vec![to],
+                            offset,
+                        }));
+                }
+            }
+            C::Props => {
+                if let Some((page, id)) = anchor {
+                    self.prepare.props_for = Some((page, id));
+                    self.worker.send(Request::FieldProps { page, id });
+                }
+            }
+            C::Duplicate => {
+                if let Some((page, id)) = anchor {
+                    self.arrange_dialog = Some(ArrangeDialog::duplicate(page, id, pages));
+                }
+            }
+            C::Copies => {
+                if let Some(f) = anchor_field {
+                    self.arrange_dialog = Some(ArrangeDialog::copies(f.page, f.id, f.rect));
+                }
+            }
+            _ => {
+                let bounds = anchor.and_then(|(p, _)| {
+                    let s = self.view.as_ref()?.sizes.get(p as usize)?;
+                    Some(pdf_core::PdfRect::new(0.0, 0.0, s.width, s.height))
+                });
+                if let Some(op) =
+                    crate::prepare::arrange_op(&self.prepare, &self.fields, cmd, bounds)
+                {
+                    self.worker.send(Request::Prepare(op));
+                }
+            }
+        }
+    }
+
+    /// Janela Duplicar ou Criar várias cópias (com a prévia na página).
+    fn arrange_window(&mut self, ctx: &egui::Context) {
+        let pages = self.view.as_ref().map_or(0, |v| v.sizes.len());
+        let Some(dialog) = self.arrange_dialog.as_mut() else {
+            self.prepare.ghosts.clear();
+            return;
+        };
+        let done = crate::shell::arrange_dialogs::show(ctx, dialog, pages);
+        let page = dialog.page();
+        self.prepare.ghosts = dialog.preview().into_iter().map(|r| (page, r)).collect();
+        if let Some(op) = done {
+            self.arrange_dialog = None;
+            self.prepare.ghosts.clear();
+            if let Some(op) = op {
+                self.worker.send(Request::Prepare(op));
+            }
+        }
+    }
+
     /// Aviso de valor recusado pelo campo (Formatar ou Validar), como o alerta do Acrobat.
     fn field_alert_window(&mut self, ctx: &egui::Context) {
         let Some(msg) = self.form.alert.as_deref() else {
@@ -3618,7 +3763,8 @@ impl DocTab {
         let (worker, edit, search, annots) =
             (&self.worker, &mut self.edit, &self.search, &self.annots);
         let (form, fields) = (&mut self.form, &self.fields);
-        let (prepare, preparing) = (&mut self.prepare, self.prepare_tools);
+        let preparing = self.prepare_tools && !self.prepare.preview;
+        let prepare = &mut self.prepare;
         let (edit_pdf, editing_pdf) = (&mut self.edit_pdf, self.edit_pdf_tools);
         let mut edit_actions = Vec::new();
         let signing = self.cert_tools && self.cert.placing;
@@ -3744,6 +3890,7 @@ impl DocTab {
         for op in prepare_ops {
             self.worker.send(Request::Prepare(op));
         }
+
         for action in edit_actions {
             send_edit_action(&self.worker, &mut self.status, action);
         }

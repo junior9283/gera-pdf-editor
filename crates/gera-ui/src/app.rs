@@ -977,6 +977,12 @@ impl eframe::App for GeraApp {
         }
         self.persist_when_idle(ctx);
         if self.closing.is_none() {
+            // o Preparar formulário consome as teclas dele antes (H e V alinham, não trocam a
+            // ferramenta)
+            let single_key = self.prefs.single_key;
+            if let Some(doc) = self.active_doc() {
+                doc.prepare_shortcuts(ctx, single_key);
+            }
             for cmd in commands::from_keyboard(ctx, self.prefs.single_key) {
                 self.run(ctx, cmd);
             }
