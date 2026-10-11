@@ -587,3 +587,54 @@ fn calc_order_is_saved() {
     d.undo().unwrap();
     assert_eq!(d.calc_order_names().unwrap(), ["S1", "S2"]);
 }
+
+#[test]
+fn row_column_and_manual_orders() {
+    let (_d, path, mut d) = doc();
+    // A à direita na primeira linha, B à esquerda dela, C embaixo de B
+    for (name, x, y) in [
+        ("A", 300.0, 100.0),
+        ("B", 100.0, 100.0),
+        ("C", 100.0, 300.0),
+    ] {
+        d.add_field(
+            0,
+            PdfRect::new(x, y, x + 120.0, y + 22.0),
+            NewFieldKind::Text,
+            name,
+        )
+        .unwrap();
+    }
+    let names =
+        |d: &PdfDoc| -> Vec<String> { d.fields(0).unwrap().into_iter().map(|f| f.name).collect() };
+    assert_eq!(
+        names(&d),
+        ["A", "B", "C"],
+        "pela estrutura: a ordem de criação"
+    );
+    let set = |d: &mut PdfDoc, order| {
+        d.prepare(pdf_core::PrepareOp::SetTabOrder { page: 0, order })
+            .unwrap()
+    };
+    set(&mut d, pdf_core::TabOrder::Row);
+    assert_eq!(names(&d), ["B", "A", "C"]);
+    set(&mut d, pdf_core::TabOrder::Column);
+    assert_eq!(names(&d), ["B", "C", "A"]);
+    let ids: Vec<i32> = d.fields(0).unwrap().iter().map(|f| f.id).collect();
+    set(
+        &mut d,
+        pdf_core::TabOrder::Manual(vec![ids[1], ids[2], ids[0]]),
+    );
+    assert_eq!(names(&d), ["C", "A", "B"]);
+    d.save(&path).unwrap();
+    let back = PdfDoc::open(&path, None).unwrap();
+    assert_eq!(names(&back), ["C", "A", "B"]);
+    assert_eq!(
+        back.tab_order_kind(0).unwrap(),
+        pdf_core::TabOrder::Structure
+    );
+    let mut d = back;
+    set(&mut d, pdf_core::TabOrder::Row);
+    d.undo().unwrap();
+    assert_eq!(names(&d), ["C", "A", "B"], "desfazer volta a ordem");
+}

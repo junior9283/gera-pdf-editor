@@ -306,8 +306,34 @@ fn info(w: &PdfWidget, page: i32) -> Result<FieldInfo> {
 }
 
 impl PdfDoc {
-    /// Campos de formulário da página (cada botão de opção aparece separado, com o seu estado).
+    /// Campos de formulário da página (cada botão de opção aparece separado, com o seu estado), na
+    /// ordem de tabulação da página: por linha, por coluna ou pela estrutura (/Annots).
     pub fn fields(&self, page: i32) -> Result<Vec<FieldInfo>> {
+        let mut out = self.fields_in_annots_order(page)?;
+        let by = |column: bool| {
+            move |a: &FieldInfo, b: &FieldInfo| {
+                let key = |f: &FieldInfo| {
+                    if column {
+                        (f.rect.x0, f.rect.y0)
+                    } else {
+                        (f.rect.y0, f.rect.x0)
+                    }
+                };
+                key(a)
+                    .partial_cmp(&key(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }
+        };
+        match self.tab_order_kind(page)? {
+            crate::prepare::TabOrder::Row => out.sort_by(by(false)),
+            crate::prepare::TabOrder::Column => out.sort_by(by(true)),
+            _ => {}
+        }
+        Ok(out)
+    }
+
+    /// Os campos da página na ordem de /Annots.
+    fn fields_in_annots_order(&self, page: i32) -> Result<Vec<FieldInfo>> {
         self.check_page(page)?;
         let page_ref = self.inner.load_pdf_page(page)?;
         let mut out = Vec::new();

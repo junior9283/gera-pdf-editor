@@ -69,6 +69,24 @@ pub enum PrepareOp {
     SetCalcOrder {
         names: Vec<String>,
     },
+    /// Ordem de tabulação da página (/Tabs; a manual reordena /Annots).
+    SetTabOrder {
+        page: i32,
+        order: TabOrder,
+    },
+}
+
+/// Ordem de tabulação, como no menu do Acrobat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TabOrder {
+    /// Por linha (/Tabs /R): de cima para baixo, da esquerda para a direita.
+    Row,
+    /// Por coluna (/Tabs /C).
+    Column,
+    /// Pela estrutura (/Tabs /S, ou sem /Tabs): a ordem de /Annots.
+    Structure,
+    /// Manual: os widgets nesta ordem (grava /Annots e /Tabs /S).
+    Manual(Vec<i32>),
 }
 
 /// Propriedades editáveis de um campo (a janela Propriedades do Acrobat). Os itens que não se
@@ -559,7 +577,70 @@ impl PdfDoc {
             PrepareOp::Move { page, id, rect } => self.move_field(page, id, rect),
             PrepareOp::Delete { page, id } => self.delete_field(page, id),
             PrepareOp::SetCalcOrder { names } => self.with_snapshot(|d| d.write_calc_order(&names)),
+            PrepareOp::SetTabOrder { page, order } => {
+                self.check_page(page)?;
+                self.with_snapshot(|d| d.write_tab_order(page, &order))
+            }
         }
+    }
+
+    /// A ordem de tabulação da página (pelo /Tabs).
+    pub fn tab_order_kind(&self, page: i32) -> Result<TabOrder> {
+        let tabs = self
+            .inner
+            .load_pdf_page(page)?
+            .object()
+            .get_dict("Tabs")?
+            .and_then(|t| t.as_name().ok());
+        Ok(match tabs.as_deref() {
+            Some(b"R") => TabOrder::Row,
+            Some(b"C") => TabOrder::Column,
+            _ => TabOrder::Structure,
+        })
+    }
+
+    fn write_tab_order(&mut self, page: i32, order: &TabOrder) -> Result<()> {
+        let mut page_obj = self.inner.load_pdf_page(page)?.object();
+        let tabs = match order {
+            TabOrder::Row => "R",
+            TabOrder::Column => "C",
+            TabOrder::Structure => "S",
+            TabOrder::Manual(ids) => {
+                // os widgets citados entram juntos, na ordem pedida, onde estava o primeiro deles
+                let Some(annots) = page_obj
+                    .get_dict("Annots")?
+                    .filter(|a| a.is_array().unwrap_or(false))
+                else {
+                    return Ok(());
+                };
+                let items: Vec<PdfObject> = (0..annots.len()? as i32)
+                    .filter_map(|k| annots.get_array(k).ok().flatten())
+                    .collect();
+                let num = |o: &PdfObject| o.as_indirect().ok();
+                let listed: Vec<PdfObject> = ids
+                    .iter()
+                    .filter_map(|id| items.iter().find(|o| num(o) == Some(*id)).cloned())
+                    .collect();
+                let mut out = self.inner.new_array()?;
+                let mut placed = false;
+                for item in &items {
+                    if num(item).is_some_and(|n| ids.contains(&n)) {
+                        if !placed {
+                            for l in &listed {
+                                out.array_push(l.clone())?;
+                            }
+                            placed = true;
+                        }
+                    } else {
+                        out.array_push(item.clone())?;
+                    }
+                }
+                page_obj.dict_put("Annots", out)?;
+                "S"
+            }
+        };
+        page_obj.dict_put("Tabs", name_obj(tabs)?)?;
+        Ok(())
     }
 
     /// Nomes dos campos na ordem de cálculo (/AcroForm /CO).
