@@ -3,6 +3,9 @@ use app_state::nav::paged_step;
 use app_state::transform::PageMap;
 use pdf_core::Worker;
 
+/// Coordenadas de textura da imagem inteira.
+const FULL_UV: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+
 #[derive(Default)]
 pub struct CanvasFrame {
     pub scroll_y: f32,
@@ -112,8 +115,7 @@ fn paint_page(ui: &egui::Ui, view: &mut DocView, page: i32, rect: egui::Rect, sc
     let painter = ui.painter();
     match texture {
         Some(id) => {
-            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-            painter.image(id, rect, uv, egui::Color32::WHITE);
+            painter.image(id, rect, FULL_UV, egui::Color32::WHITE);
         }
         None => {
             let gray = if view.dark { 30 } else { 245 };
@@ -125,12 +127,10 @@ fn paint_page(ui: &egui::Ui, view: &mut DocView, page: i32, rect: egui::Rect, sc
 /// Acima do teto da página inteira, cobre a parte visível com ladrilhos na escala exata do zoom
 /// (os que ainda não chegaram deixam ver a página ampliada por baixo).
 fn paint_tiles(ui: &egui::Ui, view: &mut DocView, worker: &Worker, page: usize, rect: egui::Rect) {
-    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
     for tile in view.wanted_tiles(page, rect, ui.clip_rect()) {
-        view.request_tile(worker, page as i32, tile);
-        if let Some((id, offset, size)) = view.tile_texture(page as i32, tile) {
+        if let Some((id, offset, size)) = view.tile(worker, page as i32, tile) {
             let at = egui::Rect::from_min_size(rect.min + offset, size);
-            ui.painter().image(id, at, uv, egui::Color32::WHITE);
+            ui.painter().image(id, at, FULL_UV, egui::Color32::WHITE);
         }
     }
 }

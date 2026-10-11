@@ -3,15 +3,16 @@
 use app_state::link_policy::{self, LinkDecision};
 use pdf_core::{LinkInfo, LinkTarget};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
-/// Link da página `page` sob o ponto `pt` (coordenadas do MuPDF). Com links sobrepostos vale o
-/// de cima, o último da lista.
+/// Link da página `page` sob o ponto `pt` (coordenadas do MuPDF). `links` vem em ordem de página
+/// (como no resumo do documento); com links sobrepostos vale o de cima, o último.
 pub fn link_at(links: &[LinkInfo], page: i32, pt: (f32, f32)) -> Option<&LinkInfo> {
-    links
+    let start = links.partition_point(|l| l.page < page);
+    let end = start + links[start..].partition_point(|l| l.page == page);
+    links[start..end]
         .iter()
         .rev()
-        .find(|l| l.page == page && l.rect.contains(pt.0, pt.1))
+        .find(|l| l.rect.contains(pt.0, pt.1))
 }
 
 /// Dica mostrada sobre o link.
@@ -19,10 +20,7 @@ pub fn hint(target: &LinkTarget) -> String {
     match target {
         LinkTarget::Page { page, .. } => format!("Página {}", page + 1),
         LinkTarget::Uri(url) => url.clone(),
-        LinkTarget::File { path, .. } => path.file_name().map_or_else(
-            || path.display().to_string(),
-            |n| n.to_string_lossy().into(),
-        ),
+        LinkTarget::File { path, .. } => app_state::tabs::tab_title(path, 80),
         LinkTarget::Blocked(_) => "Link bloqueado".into(),
     }
 }
@@ -48,31 +46,21 @@ pub fn outcome(target: &LinkTarget, sites: &BTreeMap<String, LinkDecision>) -> O
         LinkTarget::Uri(url) => match link_policy::remembered(sites, url) {
             Some(LinkDecision::Allow) => Outcome::OpenUrl(url.clone()),
             Some(LinkDecision::Block) => Outcome::Refuse(format!("Link bloqueado: {url}")),
-            None => Outcome::Ask(LinkWarning::url(url)),
+            None => Outcome::Ask(LinkWarning::new(target.clone())),
         },
-        LinkTarget::File { path, page } => Outcome::Ask(LinkWarning {
-            target: Target::File(path.clone(), *page),
-            remember: false,
-            opened_at: None,
-        }),
+        LinkTarget::File { .. } => Outcome::Ask(LinkWarning::new(target.clone())),
         LinkTarget::Blocked(_) => Outcome::Refuse(BLOCKED_MESSAGE.into()),
     })
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum Target {
-    Url(String),
-    File(PathBuf, Option<i32>),
-}
-
-/// Janela "Aviso de segurança".
+/// Janela "Aviso de segurança" (endereço ou outro arquivo).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LinkWarning {
-    pub target: Target,
+    pub target: LinkTarget,
     /// "Lembrar desta ação para este site" (só para endereços).
     pub remember: bool,
     /// Quando a janela apareceu (os botões só valem depois de `ARM_DELAY`).
-    pub opened_at: Option<f64>,
+    opened_at: Option<f64>,
 }
 
 /// Segundos até os botões aceitarem clique: o clique que abriu o aviso não pode cair em Permitir.
@@ -82,24 +70,17 @@ pub(crate) fn armed(opened_at: f64, now: f64) -> bool {
     now - opened_at >= ARM_DELAY - 1e-9
 }
 
-/// Resposta da janela.
-#[derive(Debug, PartialEq)]
-pub enum Answer {
-    Allow,
-    Block,
-}
-
 impl LinkWarning {
-    fn url(url: &str) -> Self {
+    fn new(target: LinkTarget) -> Self {
         Self {
-            target: Target::Url(url.into()),
+            target,
             remember: false,
             opened_at: None,
         }
     }
 
-    /// Mostra a janela; devolve a resposta quando o usuário escolhe.
-    pub fn show(&mut self, ctx: &egui::Context) -> Option<Answer> {
+    /// Mostra a janela; devolve a escolha (Permitir ou Bloquear) quando o usuário escolhe.
+    pub fn show(&mut self, ctx: &egui::Context) -> Option<LinkDecision> {
         let mut answer = None;
         let now = ctx.input(|i| i.time);
         let ready = armed(*self.opened_at.get_or_insert(now), now);
@@ -112,9 +93,17 @@ impl LinkWarning {
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.set_max_width(460.0);
-                let (what, detail) = match &self.target {
-                    Target::Url(url) => ("se conectar a:", url.clone()),
-                    Target::File(path, _) => ("abrir o arquivo:", path.display().to_string()),
+                let (what, detail, rememberable) = match &self.target {
+                    // endereço ambíguo (sem site reconhecível): nada a lembrar, o aviso volta sempre
+                    LinkTarget::Uri(url) => (
+                        "se conectar a:",
+                        url.clone(),
+                        link_policy::site_key(url).is_some(),
+                    ),
+                    LinkTarget::File { path, .. } => {
+                        ("abrir o arquivo:", path.display().to_string(), false)
+                    }
+                    _ => return,
                 };
                 ui.label(format!("O documento está tentando {what}"));
                 ui.add(egui::Label::new(egui::RichText::new(detail).monospace()).wrap());
@@ -123,11 +112,6 @@ impl LinkWarning {
                     "Se você confia neste destino, escolha Permitir. Se não confia, escolha \
                      Bloquear.",
                 );
-                // endereço ambíguo (sem site reconhecível): nada a lembrar, o aviso volta sempre
-                let rememberable = match &self.target {
-                    Target::Url(url) => link_policy::site_key(url).is_some(),
-                    Target::File(..) => false,
-                };
                 if rememberable {
                     ui.checkbox(
                         &mut self.remember,
@@ -140,11 +124,11 @@ impl LinkWarning {
                         .add_enabled(ready, egui::Button::new("Permitir"))
                         .clicked()
                     {
-                        answer = Some(Answer::Allow);
+                        answer = Some(LinkDecision::Allow);
                     }
                     let block = ui.add_enabled(ready, egui::Button::new("Bloquear"));
                     if block.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        answer = Some(Answer::Block);
+                        answer = Some(LinkDecision::Block);
                     }
                 });
             });
@@ -199,7 +183,7 @@ mod tests {
         assert!(matches!(
             o,
             Some(Outcome::Ask(LinkWarning {
-                target: Target::Url(_),
+                target: LinkTarget::Uri(_),
                 ..
             }))
         ));
@@ -230,7 +214,7 @@ mod tests {
         assert!(matches!(
             outcome(&file, &BTreeMap::new()),
             Some(Outcome::Ask(LinkWarning {
-                target: Target::File(_, Some(2)),
+                target: LinkTarget::File { page: Some(2), .. },
                 ..
             }))
         ));

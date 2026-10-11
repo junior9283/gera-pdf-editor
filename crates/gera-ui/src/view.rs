@@ -338,44 +338,41 @@ impl DocView {
         )
     }
 
-    fn tile_key(&self, page: i32, tile: (u32, u32)) -> TileKey {
-        let scale = zoom::quantize(self.page_scale());
-        (page, scale, self.dark, self.rotation, tile.0, tile.1)
-    }
-
-    /// Textura do ladrilho e onde desenhá-lo dentro da página (`offset`, `size` em pontos de tela).
-    pub fn tile_texture(
+    /// Ladrilho da página: pede se ainda não pediu e devolve a textura e onde desenhá-la dentro da
+    /// página (`offset`, `size` em pontos de tela), se já chegou.
+    pub fn tile(
         &mut self,
+        worker: &Worker,
         page: i32,
         tile: (u32, u32),
     ) -> Option<(egui::TextureId, egui::Vec2, egui::Vec2)> {
-        let key = self.tile_key(page, tile);
-        let side = pdf_core::TILE as f32 / self.ppp;
-        let t = self.tiles.get(&key)?;
-        let size = t.handle.size_vec2() / self.ppp;
-        Some((
-            t.handle.id(),
-            egui::vec2(tile.0 as f32 * side, tile.1 as f32 * side),
-            size,
-        ))
-    }
-
-    pub fn request_tile(&mut self, worker: &Worker, page: i32, tile: (u32, u32)) {
-        let key = self.tile_key(page, tile);
-        self.wanted_tiles.insert(key);
-        if self.tiles.contains(&key) || self.requested_tiles.contains_key(&key) {
-            return;
-        }
-        let cancel = CancelToken::new();
-        self.requested_tiles.insert(key, cancel.clone());
-        worker.send(Request::RenderTile {
+        let scale = self.page_scale();
+        let key = (
             page,
-            scale: self.page_scale(),
-            invert: self.dark,
-            rotation: self.rotation,
-            tile,
-            cancel,
-        });
+            zoom::quantize(scale),
+            self.dark,
+            self.rotation,
+            tile.0,
+            tile.1,
+        );
+        self.wanted_tiles.insert(key);
+        if let Some(t) = self.tiles.get(&key) {
+            let side = pdf_core::TILE as f32 / self.ppp;
+            let offset = egui::vec2(tile.0 as f32 * side, tile.1 as f32 * side);
+            return Some((t.handle.id(), offset, t.handle.size_vec2() / self.ppp));
+        }
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.requested_tiles.entry(key) {
+            let cancel = slot.insert(CancelToken::new()).clone();
+            worker.send(Request::RenderTile {
+                page,
+                scale,
+                invert: self.dark,
+                rotation: self.rotation,
+                tile,
+                cancel,
+            });
+        }
+        None
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -397,17 +394,15 @@ impl DocView {
             tile.0,
             tile.1,
         );
-        if self.requested_tiles.remove(&key).is_none() {
+        // como em `on_rendered`: só o que ainda está sendo esperado
+        if self.requested_tiles.remove(&key).is_none()
+            || invert != self.dark
+            || rotation != self.rotation
+        {
             return;
         }
-        let image = egui::ColorImage::from_rgb([img.width as usize, img.height as usize], &img.rgb);
-        let handle = ctx.load_texture(
-            format!("t{page}-{}-{}-{}", key.1, tile.0, tile.1),
-            image,
-            egui::TextureOptions::LINEAR,
-        );
-        let bytes = img.width as usize * img.height as usize * 4;
-        self.tiles.insert(key, CachedTexture { handle, bytes });
+        let name = format!("t{page}-{}-{}-{}", key.1, tile.0, tile.1);
+        self.tiles.insert(key, upload(ctx, name, &img));
     }
 
     pub fn begin_frame(&mut self) {
@@ -417,22 +412,9 @@ impl DocView {
 
     /// Cancela os pedidos de render que ninguém pediu neste quadro.
     pub fn end_frame(&mut self) {
-        let wanted = &self.wanted;
-        self.requested.retain(|k, token| {
-            let keep = wanted.contains(k);
-            if !keep {
-                token.cancel();
-            }
-            keep
-        });
-        let wanted = &self.wanted_tiles;
-        self.requested_tiles.retain(|k, token| {
-            let keep = wanted.contains(k);
-            if !keep {
-                token.cancel();
-            }
-            keep
-        });
+        let (wanted, wanted_tiles) = (&self.wanted, &self.wanted_tiles);
+        cancel_where(&mut self.requested, |k| !wanted.contains(k));
+        cancel_where(&mut self.requested_tiles, |k| !wanted_tiles.contains(k));
     }
 
     pub fn texture_at(&mut self, page: i32, scale: f32) -> Option<egui::TextureId> {
@@ -483,46 +465,43 @@ impl DocView {
         {
             return;
         }
-        let image = egui::ColorImage::from_rgb([img.width as usize, img.height as usize], &img.rgb);
-        let handle = ctx.load_texture(
-            format!("p{}-{}", key.0, key.1),
-            image,
-            egui::TextureOptions::LINEAR,
-        );
-        let bytes = img.width as usize * img.height as usize * 4;
-        self.cache.insert(key, CachedTexture { handle, bytes });
+        let name = format!("p{}-{}", key.0, key.1);
+        self.cache.insert(key, upload(ctx, name, &img));
     }
 
     /// Descarta as texturas e os pedidos da página (o conteúdo dela mudou).
     pub fn invalidate_page(&mut self, page: i32) {
-        self.requested.retain(|k, token| {
-            if k.0 == page {
-                token.cancel();
-            }
-            k.0 != page
-        });
+        cancel_where(&mut self.requested, |k| k.0 == page);
         self.cache.retain(|k| k.0 != page);
-        self.requested_tiles.retain(|k, token| {
-            if k.0 == page {
-                token.cancel();
-            }
-            k.0 != page
-        });
+        cancel_where(&mut self.requested_tiles, |k| k.0 == page);
         self.tiles.retain(|k| k.0 != page);
     }
 
     pub fn clear_cache(&mut self) {
-        for token in self.requested.values() {
-            token.cancel();
-        }
-        self.requested.clear();
+        cancel_where(&mut self.requested, |_| true);
         self.cache.clear();
-        for token in self.requested_tiles.values() {
-            token.cancel();
-        }
-        self.requested_tiles.clear();
+        cancel_where(&mut self.requested_tiles, |_| true);
         self.tiles.clear();
     }
+}
+
+/// Cancela e esquece os pedidos de render em que `drop` é verdadeiro.
+fn cancel_where<K>(requested: &mut HashMap<K, CancelToken>, drop: impl Fn(&K) -> bool) {
+    requested.retain(|k, token| {
+        let gone = drop(k);
+        if gone {
+            token.cancel();
+        }
+        !gone
+    });
+}
+
+/// Sobe a imagem renderizada para a GPU, com o peso dela para o orçamento do cache.
+fn upload(ctx: &egui::Context, name: String, img: &RenderedPage) -> CachedTexture {
+    let image = egui::ColorImage::from_rgb([img.width as usize, img.height as usize], &img.rgb);
+    let handle = ctx.load_texture(name, image, egui::TextureOptions::LINEAR);
+    let bytes = img.width as usize * img.height as usize * 4;
+    CachedTexture { handle, bytes }
 }
 
 #[cfg(test)]

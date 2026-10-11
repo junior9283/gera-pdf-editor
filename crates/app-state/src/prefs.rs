@@ -45,6 +45,11 @@ impl LeftPanel {
     }
 }
 
+/// Clicar no painel aberto o fecha; em outro, troca para ele.
+pub fn toggled(open: Option<LeftPanel>, p: LeftPanel) -> Option<LeftPanel> {
+    (open != Some(p)).then_some(p)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
@@ -85,7 +90,7 @@ impl Prefs {
 
     /// Abre o painel `p`, ou fecha se ele já estiver aberto.
     pub fn toggle_left(&mut self, p: LeftPanel) {
-        self.left_panel = (self.left_panel != Some(p)).then_some(p);
+        self.left_panel = toggled(self.left_panel, p);
     }
 
     /// Larguras dentro de `MIN_PANEL..=MAX_PANEL` (valores estranhos voltam ao padrão).

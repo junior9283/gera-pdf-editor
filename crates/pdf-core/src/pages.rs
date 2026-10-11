@@ -54,7 +54,7 @@ fn moved_order(count: i32, moving: &[i32], to: i32) -> Vec<i32> {
 }
 
 /// Nome do tipo de um objeto (/Subtype) ou vazio.
-fn name_of(obj: &PdfObject, key: &str) -> Result<String> {
+pub(crate) fn name_of(obj: &PdfObject, key: &str) -> Result<String> {
     Ok(match obj.get_dict(key)? {
         Some(o) if o.is_name()? => String::from_utf8_lossy(&o.as_name()?).into_owned(),
         _ => String::new(),

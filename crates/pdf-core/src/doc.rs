@@ -246,11 +246,15 @@ impl PdfDoc {
         }
         let ctm = Matrix::new_scale(scale, scale);
         let pix = page.to_pixmap(&ctm, &Colorspace::device_rgb(), false, false)?;
-        let img = packed_rgb(&pix, false);
-        let (w, h) = (img.width as usize, img.height as usize);
+        let (w, h, stride) = (
+            pix.width() as usize,
+            pix.height() as usize,
+            pix.stride() as usize,
+        );
+        // direto nas amostras (sem copiar o pixmap): limites da tinta
         let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
-        for (y, row) in img.rgb.chunks(w * 3).take(h).enumerate() {
-            for (x, px) in row.chunks(3).enumerate() {
+        for (y, row) in pix.samples().chunks(stride).take(h).enumerate() {
+            for (x, px) in row[..w * 3].chunks(3).enumerate() {
                 if px.iter().any(|&c| c < 250) {
                     (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
                 }
@@ -260,12 +264,12 @@ impl PdfDoc {
             return Ok(None);
         }
         let to_pt = |v: usize, origin: f32| v as f32 / scale + origin;
-        Ok(Some(PdfRect {
-            x0: to_pt(x0, bounds.x0),
-            y0: to_pt(y0, bounds.y0),
-            x1: to_pt(x1, bounds.x0).min(bounds.x1),
-            y1: to_pt(y1, bounds.y0).min(bounds.y1),
-        }))
+        Ok(Some(PdfRect::new(
+            to_pt(x0, bounds.x0),
+            to_pt(y0, bounds.y0),
+            to_pt(x1, bounds.x0).min(bounds.x1),
+            to_pt(y1, bounds.y0).min(bounds.y1),
+        )))
     }
 
     pub fn search(&self, page: i32, needle: &str) -> Result<Vec<PdfRect>> {
@@ -791,7 +795,11 @@ fn temp_path(dest: &Path) -> Result<PathBuf> {
 impl PdfDoc {
     pub fn annotations(&self, page: i32) -> Result<Vec<AnnotInfo>> {
         self.check_page(page)?;
-        let page_ref = self.inner.load_pdf_page(page)?;
+        self.annotations_in(&mut self.inner.load_pdf_page(page)?, page)
+    }
+
+    /// Anotações da página já carregada (a abertura carrega cada página uma vez só).
+    fn annotations_in(&self, page_ref: &mut PdfPage, page: i32) -> Result<Vec<AnnotInfo>> {
         let mut out = Vec::new();
         for mut annot in page_ref.annotations() {
             // campos de formulário não são comentários (ficam em `fields`)
@@ -814,6 +822,19 @@ impl PdfDoc {
             out.push(annot_info(&annot, page)?);
         }
         Ok(out)
+    }
+
+    /// Anotações e links de todas as páginas, numa passada (cada página é carregada uma vez).
+    /// Uma página ilegível perde só os próprios links.
+    fn annotations_and_links(&self) -> Result<(Vec<AnnotInfo>, Vec<crate::LinkInfo>)> {
+        let (mut annots, mut links) = (Vec::new(), Vec::new());
+        let count = self.page_count()?;
+        for p in 0..count {
+            let mut page_ref = self.inner.load_pdf_page(p)?;
+            annots.extend(self.annotations_in(&mut page_ref, p)?);
+            links.extend(self.links_in(&page_ref, p, count).unwrap_or_default());
+        }
+        Ok((annots, links))
     }
 
     pub fn all_annotations(&self) -> Result<Vec<AnnotInfo>> {
@@ -1241,12 +1262,16 @@ impl PdfDoc {
         let sizes = (0..self.page_count()?)
             .map(|p| self.page_size(p))
             .collect::<Result<Vec<_>>>()?;
+        let (annots, links) = match self.annotations_and_links() {
+            Ok(both) => both,
+            Err(_) => (self.all_annotations().unwrap_or_default(), Vec::new()),
+        };
         Ok(DocSummary {
             path: self.path.clone(),
             sizes,
             outline: self.outline().unwrap_or_default(),
-            annots: self.all_annotations().unwrap_or_default(),
-            links: self.all_links(),
+            annots,
+            links,
             initial_view: self.initial_view(),
             fields: self.all_fields().unwrap_or_default(),
             form_notes: self.form_notes().unwrap_or_default(),

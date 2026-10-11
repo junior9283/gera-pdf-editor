@@ -1,6 +1,7 @@
 //! Vista anterior e seguinte (`Alt+←` / `Alt+→`), como no Acrobat: cada salto guarda a vista de
 //! onde se saiu.
-use crate::zoom::Fit;
+use crate::zoom::{quantize, Fit};
+use std::collections::VecDeque;
 
 /// Uma vista: página, posição dentro dela (pontos, do topo) e ampliação.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -16,7 +17,7 @@ impl ViewEntry {
     fn same(&self, other: &ViewEntry) -> bool {
         self.page == other.page
             && (self.y - other.y).abs() < 1.0
-            && (self.zoom - other.zoom).abs() < 1e-3
+            && quantize(self.zoom) == quantize(other.zoom)
             && self.fit == other.fit
     }
 }
@@ -25,7 +26,7 @@ const MAX_ENTRIES: usize = 100;
 
 #[derive(Debug, Default)]
 pub struct ViewHistory {
-    back: Vec<ViewEntry>,
+    back: VecDeque<ViewEntry>,
     forward: Vec<ViewEntry>,
 }
 
@@ -33,18 +34,18 @@ impl ViewHistory {
     /// Guarda `current` antes de um salto. Um salto novo apaga o "seguinte".
     pub fn push(&mut self, current: ViewEntry) {
         self.forward.clear();
-        if self.back.last().is_some_and(|last| last.same(&current)) {
+        if self.back.back().is_some_and(|last| last.same(&current)) {
             return;
         }
         if self.back.len() == MAX_ENTRIES {
-            self.back.remove(0);
+            self.back.pop_front();
         }
-        self.back.push(current);
+        self.back.push_back(current);
     }
 
     /// Volta: devolve a vista anterior e guarda `current` como seguinte.
     pub fn back(&mut self, current: ViewEntry) -> Option<ViewEntry> {
-        let to = self.back.pop()?;
+        let to = self.back.pop_back()?;
         self.forward.push(current);
         Some(to)
     }
@@ -52,7 +53,7 @@ impl ViewHistory {
     /// Avança: o inverso de `back`.
     pub fn forward(&mut self, current: ViewEntry) -> Option<ViewEntry> {
         let to = self.forward.pop()?;
-        self.back.push(current);
+        self.back.push_back(current);
         Some(to)
     }
 

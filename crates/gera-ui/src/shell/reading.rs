@@ -1,6 +1,6 @@
 //! Barras flutuantes da tela cheia e do modo leitura (como no Acrobat).
-use crate::doc_tab::{DocCommand, DocTab};
-use crate::shell::commands::{hover, Command};
+use crate::doc_tab::DocTab;
+use crate::shell::commands::Command;
 
 /// Tela cheia: ◀ página ▶ ✕ no canto inferior esquerdo. Modo leitura: página, zoom e ✕ no centro,
 /// embaixo. Semitransparente, por cima das páginas.
@@ -29,16 +29,7 @@ pub fn bar(ctx: &egui::Context, doc: &mut DocTab, full_screen: bool) -> Option<C
                     doc.page_controls(ui);
                     if !full_screen {
                         ui.separator();
-                        for (text, cmd) in [("−", DocCommand::ZoomOut), ("+", DocCommand::ZoomIn)]
-                        {
-                            let cmd = Command::Doc(cmd);
-                            if ui.button(text).on_hover_text(hover(&cmd)).clicked() {
-                                out = Some(cmd);
-                            }
-                        }
-                        if let Some(fit) = doc.zoom_controls(ui) {
-                            out = Some(Command::Doc(fit));
-                        }
+                        crate::shell::toolbar::zoom_group(ui, doc, &mut out);
                     }
                     ui.separator();
                     let label = if full_screen {

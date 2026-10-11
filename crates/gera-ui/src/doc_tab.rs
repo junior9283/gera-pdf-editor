@@ -458,7 +458,7 @@ impl DocTab {
             DocCommand::PrevPage | DocCommand::NextPage => {
                 let step = if cmd == DocCommand::NextPage { 1 } else { -1 };
                 if let Some(target) = view.page_step(page, step) {
-                    self.scroll_to_page(target);
+                    self.go(target as i32, None, false); // virar página não é salto
                 }
             }
             DocCommand::FirstPage => self.jump(0, None),
@@ -480,13 +480,6 @@ impl DocTab {
         true
     }
 
-    /// Mostra a página `page` sem guardar no histórico (página anterior/próxima).
-    fn scroll_to_page(&mut self, page: usize) {
-        if let Some(y) = self.view.as_mut().and_then(|v| v.go_to(page as i32, None)) {
-            self.jump_to = Some(y);
-        }
-    }
-
     /// Visualização inicial pedida pelo arquivo: modo, zoom, página, painel e tela cheia.
     pub(crate) fn apply_initial_view(&mut self, initial: pdf_core::InitialView) {
         let Some(view) = self.view.as_mut() else {
@@ -506,8 +499,8 @@ impl DocTab {
                 view.set_zoom(z);
             }
         }
-        if let Some(y) = page.and_then(|p| view.go_to(p as i32, None)) {
-            self.jump_to = Some(y);
+        if let Some(p) = page {
+            self.go(p as i32, None, false);
         }
         match initial.panel {
             Some(pdf_core::InitialPanel::Bookmarks) => {
@@ -562,12 +555,20 @@ impl DocTab {
     /// Salto (link, marcador, miniatura, busca, comentário, Ir para página…): guarda a vista atual
     /// para a Vista anterior e vai à página `page`, no ponto `at` dela.
     pub(crate) fn jump(&mut self, page: i32, at: Option<(f32, f32)>) {
+        self.go(page, at, true);
+    }
+
+    /// Única porta para mostrar uma página: `record` diz se a vista de onde se sai entra no
+    /// histórico (Vista anterior).
+    fn go(&mut self, page: i32, at: Option<(f32, f32)>, record: bool) {
         let Some(view) = self.view.as_mut() else {
             return;
         };
         let current = view.view_entry(self.last.scroll_y, self.last.current_page);
         if let Some(y) = view.go_to(page, at) {
-            self.history_views.push(current);
+            if record {
+                self.history_views.push(current);
+            }
             self.jump_to = Some(y);
         }
     }
@@ -945,11 +946,8 @@ impl DocTab {
                     let had_hits = self.search.current().is_some();
                     self.search.on_hits(id, page, rects);
                     // rola até o primeiro resultado (resultados de busca antiga não mudam `current`)
-                    let first = self.search.current().filter(|_| !had_hits);
-                    if let Some(y) =
-                        first.and_then(|(p, r)| self.view.as_mut()?.go_to(p, Some((r.x0, r.y0))))
-                    {
-                        self.jump_to = Some(y);
+                    if let Some((p, r)) = self.search.current().filter(|_| !had_hits) {
+                        self.jump(p, Some((r.x0, r.y0)));
                     }
                 }
                 Response::SearchDone { id } => self.search.on_done(id),
@@ -1877,18 +1875,24 @@ impl DocTab {
         let mut page = self.last.current_page + 1;
         let prev = ui
             .button("◀")
-            .on_hover_text(commands::hover(&Command::Doc(DocCommand::PrevPage)))
+            .on_hover_ui(|ui| {
+                ui.label(commands::hover(&Command::Doc(DocCommand::PrevPage)));
+            })
             .clicked();
         let go = ui
             .add(egui::DragValue::new(&mut page).range(1..=count).speed(0.2))
-            .on_hover_text(commands::hover(&Command::Doc(DocCommand::GoToPage)));
+            .on_hover_ui(|ui| {
+                ui.label(commands::hover(&Command::Doc(DocCommand::GoToPage)));
+            });
         if std::mem::take(&mut self.focus_page) {
             go.request_focus(); // Ir para página: digita o número e Enter
         }
         ui.label(format!("/ {count}"));
         let next = ui
             .button("▶")
-            .on_hover_text(commands::hover(&Command::Doc(DocCommand::NextPage)))
+            .on_hover_ui(|ui| {
+                ui.label(commands::hover(&Command::Doc(DocCommand::NextPage)));
+            })
             .clicked();
         if prev || next {
             self.navigate(if next {
@@ -1935,7 +1939,9 @@ impl DocTab {
             .unwrap_or_else(|| zoom::percent_text(zoom));
         let field = ui
             .add(egui::TextEdit::singleline(&mut text).desired_width(60.0))
-            .on_hover_text(commands::hover(&Command::Doc(DocCommand::ZoomTo)));
+            .on_hover_ui(|ui| {
+                ui.label(commands::hover(&Command::Doc(DocCommand::ZoomTo)));
+            });
         if std::mem::take(&mut self.focus_zoom) {
             field.request_focus();
         }
@@ -2307,6 +2313,8 @@ impl DocTab {
         let mut open_props = None;
         let links = &self.links;
         let mut link_clicked = None;
+        let presenting = self.presentation.is_some();
+        let mut turn = None;
         let jump_to = self.jump_to.take();
         let jump_x = self.jump_x.take();
         // cada aba com seu id: a área de rolagem guarda a posição de cada documento
@@ -2361,9 +2369,15 @@ impl DocTab {
                         let response = edit.on_page(ui, worker, annots, page as i32, rect, map);
                         if edit.tool == app_state::tools::Tool::Select {
                             let hit = link_gesture(ui, &response, links, annots, page as i32, map);
-                            if link_clicked.is_none() {
-                                link_clicked = hit;
+                            // tela cheia: clicar fora de link avança, o botão direito volta
+                            if presenting && hit.is_none() {
+                                if response.clicked() {
+                                    turn = Some(DocCommand::NextPage);
+                                } else if response.secondary_clicked() {
+                                    turn = Some(DocCommand::PrevPage);
+                                }
                             }
+                            link_clicked = link_clicked.take().or(hit);
                         }
                         // depois dos gestos da página: os campos ficam por cima (sem a permissão
                         // de preencher, ficam só visíveis)
@@ -2436,25 +2450,10 @@ impl DocTab {
         match link_clicked {
             Some(pdf_core::LinkTarget::Page { page, at }) => self.jump(page, at),
             Some(target) => self.events.push(DocEvent::OpenLink(target)),
-            // tela cheia: clicar avança e o botão direito volta (fora da barra de navegação)
-            None if self.presentation.is_some()
-                && ui.rect_contains_pointer(ui.max_rect())
-                && on_this_layer(ui) =>
-            {
-                let (next, prev) =
-                    ui.input(|i| (i.pointer.primary_clicked(), i.pointer.secondary_clicked()));
-                if next || prev {
-                    self.run(
-                        ui.ctx(),
-                        if next {
-                            DocCommand::NextPage
-                        } else {
-                            DocCommand::PrevPage
-                        },
-                    );
-                }
-            }
             None => {}
+        }
+        if let Some(cmd) = turn {
+            self.run(ui.ctx(), cmd);
         }
     }
 }
@@ -2739,20 +2738,15 @@ fn link_gesture(
     map: &PageMap,
 ) -> Option<pdf_core::LinkTarget> {
     let pt = map.to_page(response.hover_pos()?.into());
+    // o link primeiro: quase sempre não há, e é a busca mais barata
+    let link = crate::links::link_at(links, page, pt)?;
     if crate::edit::hit_at(annots, page, pt, map).is_some() {
         return None;
     }
-    let link = crate::links::link_at(links, page, pt)?;
     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     let clicked = response.clicked();
     response
         .clone()
         .on_hover_text_at_pointer(crate::links::hint(&link.target));
     clicked.then(|| link.target.clone())
-}
-
-/// O ponteiro está nesta camada (e não numa janela ou barra flutuante por cima dela).
-fn on_this_layer(ui: &egui::Ui) -> bool {
-    let ctx = ui.ctx();
-    ctx.pointer_hover_pos().and_then(|p| ctx.layer_id_at(p)) == Some(ui.layer_id())
 }

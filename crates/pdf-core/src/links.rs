@@ -4,7 +4,7 @@ use crate::error::Result;
 use crate::types::{
     InitialLayout, InitialPanel, InitialView, InitialZoom, LinkInfo, LinkTarget, PdfRect,
 };
-use mupdf::pdf::{FileSpec, LinkAction, PdfAction, PdfDestination, PdfObject};
+use mupdf::pdf::{FileSpec, LinkAction, PdfAction, PdfDestination, PdfObject, PdfPage};
 use mupdf::DestinationKind;
 use std::path::{Component, Path, PathBuf};
 
@@ -16,26 +16,27 @@ impl PdfDoc {
     /// fora: um PDF quebrado nunca derruba a leitura.
     pub fn links(&self, page: i32) -> Result<Vec<LinkInfo>> {
         self.check_page(page)?;
-        let count = self.page_count()?;
+        self.links_in(&self.inner.load_pdf_page(page)?, page, self.page_count()?)
+    }
+
+    /// Links da página já carregada (`count`: páginas do documento).
+    pub(crate) fn links_in(
+        &self,
+        pdf_page: &PdfPage,
+        page: i32,
+        count: i32,
+    ) -> Result<Vec<LinkInfo>> {
         let dir = self.path.parent().unwrap_or(Path::new("."));
-        let pdf_page = self.inner.load_pdf_page(page)?;
         Ok(pdf_page
             .resolved_links()?
             .flatten()
             .filter_map(|link| {
                 let rect = PdfRect::from(link.bounds);
-                let usable = rect.x1 > rect.x0 && rect.y1 > rect.y0;
+                let usable = rect.width() > 0.0 && rect.height() > 0.0;
                 let target = target_of(link.action, count, dir)?;
                 usable.then_some(LinkInfo { page, rect, target })
             })
             .collect())
-    }
-
-    /// Links de todas as páginas (na abertura). Uma página ilegível só perde os seus.
-    pub(crate) fn all_links(&self) -> Vec<LinkInfo> {
-        (0..self.page_count().unwrap_or(0))
-            .flat_map(|p| self.links(p).unwrap_or_default())
-            .collect()
     }
 }
 
@@ -45,25 +46,22 @@ impl PdfDoc {
         let Ok(catalog) = self.inner.catalog() else {
             return InitialView::default();
         };
-        let name = |key: &str| -> Option<Vec<u8>> {
-            let o = catalog.get_dict(key).ok().flatten()?;
-            o.is_name().ok()?.then(|| o.as_name().ok()).flatten()
-        };
+        let name = |key: &str| crate::pages::name_of(&catalog, key).unwrap_or_default();
         let mode = name("PageMode");
         let mut view = InitialView {
-            panel: match mode.as_deref() {
-                Some(b"UseOutlines") => Some(InitialPanel::Bookmarks),
-                Some(b"UseThumbs") => Some(InitialPanel::Thumbnails),
+            panel: match mode.as_str() {
+                "UseOutlines" => Some(InitialPanel::Bookmarks),
+                "UseThumbs" => Some(InitialPanel::Thumbnails),
                 _ => None,
             },
-            full_screen: mode.as_deref() == Some(b"FullScreen"),
-            layout: match name("PageLayout").as_deref() {
-                Some(b"SinglePage") => Some(InitialLayout::Single),
-                Some(b"OneColumn") => Some(InitialLayout::OneColumn),
-                Some(b"TwoColumnLeft") => Some(InitialLayout::TwoColumn { cover: false }),
-                Some(b"TwoColumnRight") => Some(InitialLayout::TwoColumn { cover: true }),
-                Some(b"TwoPageLeft") => Some(InitialLayout::TwoPage { cover: false }),
-                Some(b"TwoPageRight") => Some(InitialLayout::TwoPage { cover: true }),
+            full_screen: mode == "FullScreen",
+            layout: match name("PageLayout").as_str() {
+                "SinglePage" => Some(InitialLayout::Single),
+                "OneColumn" => Some(InitialLayout::OneColumn),
+                "TwoColumnLeft" => Some(InitialLayout::TwoColumn { cover: false }),
+                "TwoColumnRight" => Some(InitialLayout::TwoColumn { cover: true }),
+                "TwoPageLeft" => Some(InitialLayout::TwoPage { cover: false }),
+                "TwoPageRight" => Some(InitialLayout::TwoPage { cover: true }),
                 _ => None,
             },
             ..InitialView::default()

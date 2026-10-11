@@ -1,28 +1,10 @@
 use pdf_core::{InitialLayout, InitialPanel, InitialZoom, LinkTarget, PdfDoc};
 use std::path::{Path, PathBuf};
 
-/// Escreve um PDF a partir dos corpos dos objetos (o objeto `i` é `objs[i - 1]`), com xref.
+/// Escreve um PDF a partir dos corpos dos objetos (o objeto `i` é `objs[i - 1]`).
 fn raw_pdf(dir: &Path, name: &str, objs: &[String]) -> PathBuf {
-    let mut out = b"%PDF-1.7\n".to_vec();
-    let mut offsets = Vec::new();
-    for (i, body) in objs.iter().enumerate() {
-        offsets.push(out.len());
-        out.extend(format!("{} 0 obj\n{body}\nendobj\n", i + 1).bytes());
-    }
-    let xref = out.len();
-    out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).bytes());
-    for o in offsets {
-        out.extend(format!("{o:010} 00000 n \n").bytes());
-    }
-    out.extend(
-        format!(
-            "trailer\n<</Size {}/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n",
-            objs.len() + 1
-        )
-        .bytes(),
-    );
     let path = dir.join(name);
-    std::fs::write(&path, out).unwrap();
+    std::fs::write(&path, pdf_core::sample::pdf_from_objects(objs)).unwrap();
     path
 }
 
