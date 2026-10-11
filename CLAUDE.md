@@ -64,4 +64,4 @@ proteger, comprimir) → v4 (editar texto e imagens).
 
 ## Metas de desempenho
 
-Abertura < 300 ms (binário), memória < 150 MB (também com 3 abas), binário < 25 MB.
+Abertura < 300 ms (binário), memória < 150 MB (também com 3 abas), binário < 50 MB (limite elevado pelo dono em 11/10/2026; antes 25 MB).
