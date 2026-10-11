@@ -1,6 +1,6 @@
 //! Preferências da interface, guardadas entre sessões.
-use crate::link_policy::{site_key, LinkDecision, MAX_SITES};
 use crate::layout::ViewMode;
+use crate::link_policy::{site_key, LinkDecision, MAX_SITES};
 use crate::store;
 use crate::view_history::ViewEntry;
 use serde::{Deserialize, Serialize};
@@ -182,7 +182,10 @@ mod tests {
     #[test]
     fn prefs_defaults_match_acrobat() {
         let p = Prefs::default();
-        assert!(!p.single_key, "aceleradores de tecla única desligados de fábrica");
+        assert!(
+            !p.single_key,
+            "aceleradores de tecla única desligados de fábrica"
+        );
         assert!(p.restore_views);
         assert_eq!(p.max_recents, 20);
         assert_eq!((p.default_mode, p.default_zoom), (None, DefaultZoom::Auto));
@@ -203,7 +206,10 @@ mod tests {
         }
         assert_eq!(p.last_views.len(), MAX_LAST_VIEWS);
         assert_eq!(p.last_view("/doc0.pdf"), None, "o mais antigo sai");
-        assert_eq!(p.last_view(&format!("/doc{}.pdf", MAX_LAST_VIEWS + 29)), Some(e));
+        assert_eq!(
+            p.last_view(&format!("/doc{}.pdf", MAX_LAST_VIEWS + 29)),
+            Some(e)
+        );
         // de novo o mesmo arquivo: vira o mais recente, sem duplicar
         p.remember_view("/doc40.pdf", e);
         assert_eq!(p.last_views.len(), MAX_LAST_VIEWS);

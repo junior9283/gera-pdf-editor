@@ -63,6 +63,8 @@ pub enum DocCommand {
     GoToPage,
     /// Zoom para…: leva o foco ao campo de zoom.
     ZoomTo,
+    /// Escolhe a ferramenta (Selecionar, Mão, Zoom com marca; teclas únicas).
+    Tool(app_state::tools::Tool),
     /// Histórico de vistas (Alt+← / Alt+→).
     ViewBack,
     ViewForward,
@@ -115,6 +117,10 @@ pub struct DocTab {
     /// Último quadro do canvas (rolagem e página atual).
     pub(crate) last: CanvasFrame,
     pub(crate) jump_to: Option<f32>,
+    /// Mão temporária enquanto o Espaço está segurado.
+    temp_tool: app_state::tools::TempTool,
+    /// Zoom com marca: a página e o ponto (tela) onde o arraste começou.
+    marquee: Option<(usize, egui::Pos2)>,
     /// Página e ponto do último salto ainda não mostrado (refeito se o zoom mudar antes).
     pending_target: Option<(i32, Option<(f32, f32)>)>,
     /// Rolagem horizontal pedida (Ajustar ao conteúdo visível).
@@ -260,6 +266,8 @@ impl DocTab {
             jump_to: None,
             jump_x: None,
             pending_target: None,
+            temp_tool: Default::default(),
+            marquee: None,
             focus_zoom: false,
             zoom_text: None,
             history_views: Default::default(),
@@ -420,6 +428,7 @@ impl DocTab {
             }
             DocCommand::Fit(fit) => view.fit = fit,
             DocCommand::ZoomTo => self.focus_zoom = true,
+            DocCommand::Tool(tool) => self.edit.tool = tool,
             DocCommand::NextChange
             | DocCommand::PrevChange
             | DocCommand::FirstPage
@@ -1158,14 +1167,22 @@ impl DocTab {
                 }
                 None => {}
             }
-            // ←/→ mudam de página em qualquer modo; o espaço, só nos modos página a página. Com a
-            // janela de assinatura ou de propriedades do campo aberta, as setas são dela.
-            let paged = self.view.as_ref().is_some_and(|v| v.mode.is_paged());
+            // Espaço segurado: Mão temporária (como no Acrobat), em qualquer modo
+            let space = ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Space);
+                i.key_down(egui::Key::Space)
+            });
+            if space {
+                self.edit.tool = self.temp_tool.press(self.edit.tool);
+            } else if let Some(tool) = self.temp_tool.release() {
+                self.edit.tool = tool;
+            }
+            // ←/→ mudam de página em qualquer modo. Com a janela de assinatura ou de propriedades
+            // do campo aberta, as setas são dela.
             let arrows = self.edit.fill.dialog.is_none() && self.prepare.props.is_none();
             let step = ctx.input_mut(|i| {
                 [
                     (egui::Key::ArrowRight, arrows, DocCommand::NextPage),
-                    (egui::Key::Space, paged, DocCommand::NextPage),
                     (egui::Key::ArrowLeft, arrows, DocCommand::PrevPage),
                 ]
                 .into_iter()
@@ -2329,6 +2346,8 @@ impl DocTab {
         let mut open_props = None;
         let links = &self.links;
         let mut link_clicked = None;
+        let mut screen_action = None;
+        let marquee = &mut self.marquee;
         let presenting = self.presentation.is_some();
         let mut turn = None;
         let jump_to = self.jump_to.take();
@@ -2384,7 +2403,13 @@ impl DocTab {
                             return;
                         }
                         let response = edit.on_page(ui, worker, annots, page as i32, rect, map);
-                        if edit.tool == app_state::tools::Tool::Select {
+                        use app_state::tools::Tool;
+                        if let Some(a) =
+                            screen_gesture(ui, &response, edit.tool, marquee, page, map)
+                        {
+                            screen_action = Some(a);
+                        }
+                        if matches!(edit.tool, Tool::Select | Tool::Hand) {
                             let hit = link_gesture(ui, &response, links, annots, page as i32, map);
                             // tela cheia: clicar fora de link avança, o botão direito volta
                             if presenting && hit.is_none() {
@@ -2472,6 +2497,132 @@ impl DocTab {
         if let Some(cmd) = turn {
             self.run(ui.ctx(), cmd);
         }
+        if let Some(action) = screen_action {
+            self.screen_action(action);
+        }
+    }
+
+    /// Mão (rola pelo arraste) e Zoom com marca (amplia até o retângulo, ou um nível no clique).
+    fn screen_action(&mut self, action: ScreenAction) {
+        let avail = (self.last.viewport_w, self.last.viewport_h);
+        let target = match action {
+            ScreenAction::Pan(d) => Some((
+                (self.last.scroll_x - d.x).max(0.0),
+                (self.last.scroll_y - d.y).max(0.0),
+            )),
+            ScreenAction::ZoomRect { page, a, b } => self
+                .view
+                .as_mut()
+                .and_then(|v| v.zoom_to_rect(page, pdf_core::PdfRect::from_corners(a, b), avail)),
+            ScreenAction::ZoomAt { page, pt, out } => self.view.as_mut().and_then(|v| {
+                let z = if out {
+                    zoom::zoom_out(v.zoom)
+                } else {
+                    zoom::zoom_in(v.zoom)
+                };
+                v.set_manual_zoom(z);
+                v.center_on(page, pt, avail)
+            }),
+        };
+        if let Some((x, y)) = target {
+            self.jump_x = Some(x);
+            self.jump_to = Some(y);
+        }
+    }
+}
+
+/// O que a Mão ou o Zoom com marca pedem neste quadro.
+enum ScreenAction {
+    /// Arraste da Mão (tela).
+    Pan(egui::Vec2),
+    /// Retângulo do Zoom com marca, em pontos da página.
+    ZoomRect {
+        page: usize,
+        a: (f32, f32),
+        b: (f32, f32),
+    },
+    /// Clique do Zoom com marca: um nível a mais (ou a menos, com Ctrl) em torno do ponto.
+    ZoomAt {
+        page: usize,
+        pt: (f32, f32),
+        out: bool,
+    },
+}
+
+/// Gestos da Mão e do Zoom com marca na página (cursor, retângulo tracejado e a ação).
+fn screen_gesture(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    tool: app_state::tools::Tool,
+    marquee: &mut Option<(usize, egui::Pos2)>,
+    page: usize,
+    map: &PageMap,
+) -> Option<ScreenAction> {
+    use app_state::tools::Tool;
+    match tool {
+        Tool::Hand => {
+            if response.hovered() || response.dragged() {
+                let grab = if response.dragged() {
+                    egui::CursorIcon::Grabbing
+                } else {
+                    egui::CursorIcon::Grab
+                };
+                ui.ctx().set_cursor_icon(grab);
+            }
+            response
+                .dragged()
+                .then(|| ScreenAction::Pan(response.drag_delta()))
+                .filter(|a| matches!(a, ScreenAction::Pan(d) if *d != egui::Vec2::ZERO))
+        }
+        Tool::Zoom => {
+            let ctrl = ui.input(|i| i.modifiers.command);
+            if response.hovered() {
+                let icon = if ctrl {
+                    egui::CursorIcon::ZoomOut
+                } else {
+                    egui::CursorIcon::ZoomIn
+                };
+                ui.ctx().set_cursor_icon(icon);
+            }
+            let pointer = response.interact_pointer_pos().or(response.hover_pos());
+            if response.drag_started() {
+                *marquee = pointer.map(|p| (page, p));
+            }
+            let start = marquee.filter(|(p, _)| *p == page).map(|(_, s)| s);
+            if let (Some(start), Some(now)) = (start, pointer) {
+                if response.dragged() {
+                    let r = egui::Rect::from_two_pos(start, now);
+                    let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 110, 220));
+                    ui.painter()
+                        .rect_stroke(r, 0.0, stroke, egui::StrokeKind::Middle);
+                }
+                if response.drag_stopped() {
+                    *marquee = None;
+                    // arraste curto conta como clique
+                    if start.distance(now) >= 4.0 {
+                        return Some(ScreenAction::ZoomRect {
+                            page,
+                            a: map.to_page(start.into()),
+                            b: map.to_page(now.into()),
+                        });
+                    }
+                    return Some(ScreenAction::ZoomAt {
+                        page,
+                        pt: map.to_page(now.into()),
+                        out: ctrl,
+                    });
+                }
+            }
+            match (response.clicked(), pointer) {
+                (true, Some(p)) => Some(ScreenAction::ZoomAt {
+                    page,
+                    pt: map.to_page(p.into()),
+                    out: ctrl,
+                }),
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 

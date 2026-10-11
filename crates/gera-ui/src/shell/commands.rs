@@ -90,6 +90,7 @@ impl Command {
                 DocCommand::LastPage => "Última página",
                 DocCommand::GoToPage => "Ir para página…",
                 DocCommand::ZoomTo => "Zoom para…",
+                DocCommand::Tool(t) => return t.label().into(),
                 DocCommand::ViewBack => "Vista anterior",
                 DocCommand::ViewForward => "Vista seguinte",
             },

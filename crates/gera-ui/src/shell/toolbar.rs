@@ -19,6 +19,21 @@ pub fn show(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
         button(ui, &mut out, "⎙", Command::Print, true);
         button(ui, &mut out, "🔍", Command::Doc(DocCommand::Find), true);
         ui.separator();
+        // ferramentas de tela, como no Acrobat: Selecionar, Mão e Zoom com marca
+        for (icon, tool) in [("↖", Tool::Select), ("✋", Tool::Hand), ("🔎", Tool::Zoom)] {
+            let cmd = Command::Doc(DocCommand::Tool(tool));
+            let on = doc.edit.tool == tool;
+            if ui
+                .add(egui::Button::selectable(on, icon))
+                .on_hover_ui(|ui| {
+                    ui.label(hover(&cmd));
+                })
+                .clicked()
+            {
+                out = Some(cmd);
+            }
+        }
+        ui.separator();
         doc.page_controls(ui);
         ui.separator();
         zoom_group(ui, doc, &mut out);

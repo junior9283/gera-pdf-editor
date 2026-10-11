@@ -22,7 +22,12 @@ fn regex_for(needle: &str, opts: &SearchOptions) -> Option<Regex> {
 
 impl PdfDoc {
     /// Resultados da página: o texto (e, com a opção, os comentários cujo conteúdo casa).
-    pub fn search_with(&self, page: i32, needle: &str, opts: &SearchOptions) -> Result<Vec<PdfRect>> {
+    pub fn search_with(
+        &self,
+        page: i32,
+        needle: &str,
+        opts: &SearchOptions,
+    ) -> Result<Vec<PdfRect>> {
         let plain = !opts.whole_words && !opts.match_case;
         let mut hits = if plain {
             // o padrão continua sendo a busca do MuPDF (acha frases entre linhas)

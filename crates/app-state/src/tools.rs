@@ -69,9 +69,41 @@ impl Tool {
     }
 }
 
+/// Mão temporária do Espaço segurado: guarda a ferramenta de antes e a devolve ao soltar.
+#[derive(Debug, Default)]
+pub struct TempTool {
+    saved: Option<Tool>,
+}
+
+impl TempTool {
+    /// Espaço pressionado (ou ainda segurado): a ferramenta passa a ser a Mão.
+    pub fn press(&mut self, current: Tool) -> Tool {
+        self.saved.get_or_insert(current);
+        Tool::Hand
+    }
+
+    /// Espaço solto: a ferramenta de antes, se havia uma guardada.
+    pub fn release(&mut self) -> Option<Tool> {
+        self.saved.take()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn space_hand_is_temporary() {
+        let mut t = TempTool::default();
+        assert_eq!(t.press(Tool::Note), Tool::Hand);
+        assert_eq!(
+            t.press(Tool::Hand),
+            Tool::Hand,
+            "segurar não perde a anterior"
+        );
+        assert_eq!(t.release(), Some(Tool::Note));
+        assert_eq!(t.release(), None, "soltar de novo não muda nada");
+    }
 
     #[test]
     fn hand_and_zoom_are_not_comment_tools() {

@@ -78,7 +78,16 @@ fn comments_are_found_when_asked() {
         match_case: true,
         ..Default::default()
     };
-    assert_eq!(count(SearchOptions { match_case: true, ..Default::default() }, "secreta"), 0);
+    assert_eq!(
+        count(
+            SearchOptions {
+                match_case: true,
+                ..Default::default()
+            },
+            "secreta"
+        ),
+        0
+    );
     assert_eq!(count(o, "secreta"), 1);
 }
 

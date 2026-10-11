@@ -1,7 +1,7 @@
 use crate::error::PdfError;
-use crate::types::{SearchOptions, 
+use crate::types::{
     AnnotInfo, AnnotOp, Changed, DocProperties, DocSummary, HistoryState, PageOp, PdfRect,
-    RenderedPage, Rotation, TextSelection,
+    RenderedPage, Rotation, SearchOptions, TextSelection,
 };
 use crate::PdfDoc;
 use std::path::PathBuf;
