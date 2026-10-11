@@ -11,7 +11,13 @@ pub fn opens_in_app(name: &str) -> bool {
 
 /// Nome sugerido ao salvar: só o nome final, sem caminho nem caracteres proibidos.
 pub fn save_name(name: &str) -> String {
-    let last = name.rsplit(['/', '\\']).next().unwrap_or("");
+    let last: String = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|&c| !crate::links::hidden_mark(c))
+        .collect();
     let last = last.trim().trim_start_matches('.');
     if last.is_empty() {
         return "anexo".into();
@@ -29,6 +35,19 @@ pub fn spool_name(path: &std::path::Path) -> Option<String> {
     parts.next()?.parse::<u32>().ok()?;
     parts.next()?.parse::<u32>().ok()?;
     parts.next().filter(|n| !n.is_empty()).map(String::from)
+}
+
+/// Linha da lista: nome (sem marcas de direção, que disfarçariam a extensão), tamanho e página.
+fn row_label(a: &AttachmentInfo) -> String {
+    let place = match a.origin {
+        AttachmentOrigin::Document => String::new(),
+        AttachmentOrigin::Comment { page, .. } => format!(" · p. {}", page + 1),
+    };
+    format!(
+        "📎 {}  ({}{place})",
+        crate::links::safe_display(&a.name),
+        crate::shell::properties::size_text(a.size as u64)
+    )
 }
 
 /// O que o painel pede à aba.
@@ -106,16 +125,10 @@ impl AttachmentsPanel {
             .auto_shrink(false)
             .show(ui, |ui| {
                 for (k, a) in list.iter().enumerate() {
-                    let place = match a.origin {
-                        AttachmentOrigin::Document => String::new(),
-                        AttachmentOrigin::Comment { page, .. } => format!(" · p. {}", page + 1),
-                    };
-                    let text = format!(
-                        "📎 {}  ({}{place})",
-                        a.name,
-                        crate::shell::properties::size_text(a.size as u64)
-                    );
-                    let row = ui.add(egui::Button::selectable(self.selected == Some(k), text));
+                    let row = ui.add(egui::Button::selectable(
+                        self.selected == Some(k),
+                        row_label(a),
+                    ));
                     if row.clicked() {
                         self.selected = Some(k);
                         if let AttachmentOrigin::Comment { page, .. } = a.origin {
@@ -143,9 +156,9 @@ impl AttachmentsPanel {
                         }
                         None => {
                             let shown = if a.description.is_empty() {
-                                "(sem descrição)"
+                                "(sem descrição)".to_owned()
                             } else {
-                                a.description.as_str()
+                                crate::links::safe_display(&a.description)
                             };
                             let desc = ui.add(
                                 egui::Label::new(egui::RichText::new(shown).weak().italics())
@@ -186,6 +199,24 @@ mod tests {
         assert_eq!(save_name(""), "anexo");
         assert_eq!(save_name(".."), "anexo");
         assert_eq!(save_name(".bashrc"), "bashrc", "nada de arquivo oculto");
+        assert_eq!(
+            save_name("fatura\u{202E}fdp.exe"),
+            "faturafdp.exe",
+            "sem marca de direção"
+        );
+    }
+
+    #[test]
+    fn direction_marks_cannot_disguise_the_extension() {
+        let a = AttachmentInfo {
+            name: "fatura\u{202E}fdp.exe".into(),
+            description: "ok\u{202E}".into(),
+            size: 10,
+            origin: AttachmentOrigin::Document,
+        };
+        let label = row_label(&a);
+        assert!(!label.contains('\u{202E}'), "{label}");
+        assert!(label.contains("exe"), "{label}");
     }
 
     #[test]

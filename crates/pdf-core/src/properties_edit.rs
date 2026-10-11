@@ -27,6 +27,8 @@ const STANDARD_INFO: [&str; 9] = [
 const MAX_NAME_BYTES: usize = 127;
 /// Teto de fontes listadas e de níveis de XObject percorridos.
 const MAX_FONTS: usize = 10_000;
+/// Maior XMP que o app lê.
+const MAX_XMP_BYTES: usize = 4 * 1024 * 1024;
 const MAX_XOBJECT_DEPTH: u32 = 10;
 
 /// Nome aceito numa propriedade personalizada: não vazio, curto, fora dos nomes padrão do `/Info`
@@ -148,7 +150,8 @@ impl PdfDoc {
     /// O pacote XMP (`/Metadata` do catálogo), se houver.
     pub fn xmp(&self) -> Option<String> {
         let meta = get(&self.inner.catalog().ok()?, "Metadata")?;
-        let bytes = meta.read_stream().ok()?;
+        // com teto: o XMP vem do arquivo e pode ser uma bomba de compressão
+        let bytes = crate::attachments::read_capped(&meta, MAX_XMP_BYTES).ok()?;
         Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 

@@ -254,3 +254,33 @@ fn changing_only_the_title_keeps_the_initial_view_as_it_was() {
     assert!(bytes.contains("/UseOC"), "o modo de página continua");
     assert!(bytes.contains("/OneColumn"));
 }
+
+#[test]
+fn a_compressed_xmp_bomb_is_not_read() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+    z.write_all(&vec![b' '; 64 << 20]).unwrap();
+    let packed = z.finish().unwrap();
+    // o objeto 4 é o stream: montado à mão, com os bytes comprimidos
+    let mut objs = vec![
+        "<</Type/Catalog/Pages 2 0 R/Metadata 4 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>".to_string(),
+    ];
+    let path = dir.path().join("x.pdf");
+    objs.push(format!(
+        "<</Type/Metadata/Subtype/XML/Filter/FlateDecode/Length {}>>\nstream\n",
+        packed.len()
+    ));
+    let mut bytes = pdf_from_objects(&objs[..3]);
+    // anexa o objeto 4 em bruto e refaz o final com xref simples: mais simples deixar o MuPDF
+    // reparar (sem xref), como num arquivo danificado
+    bytes.truncate(bytes.windows(4).position(|w| w == b"xref").unwrap());
+    bytes.extend_from_slice(objs[3].replace("<<", "4 0 obj\n<<").as_bytes());
+    bytes.extend_from_slice(&packed);
+    bytes.extend_from_slice(b"\nendstream\nendobj\ntrailer\n<</Root 1 0 R>>\n%%EOF\n");
+    std::fs::write(&path, bytes).unwrap();
+    let d = PdfDoc::open(&path, None).unwrap();
+    assert!(d.xmp().is_none(), "64 MB de XMP: não é lido");
+}
