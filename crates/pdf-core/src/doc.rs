@@ -1733,6 +1733,7 @@ impl PdfDoc {
             last.x1 + h * 0.3,
             last.y1 + h * 0.1,
         );
+        let marks = quads(rects)?; // confere antes de criar qualquer coisa
         let mut caret = add_one(
             &mut self.inner,
             &mut page_ref,
@@ -1742,12 +1743,23 @@ impl PdfDoc {
                 text: text.to_owned(),
             },
         )?;
-        let mut strike = page_ref.add_strikeout_annotation(quads(rects)?)?;
-        strike.set_color(rgb(TEXT_EDIT_BLUE))?;
-        let mut obj = strike.object();
-        obj.dict_put("IRT", caret.object())?;
-        obj.dict_put("RT", PdfObject::new_name("Group")?)?;
-        obj.dict_put("IT", PdfObject::new_name("StrikeOutTextEdit")?)?;
+        let strike = (|| -> Result<PdfAnnotation> {
+            let mut strike = page_ref.add_strikeout_annotation(marks)?;
+            strike.set_color(rgb(TEXT_EDIT_BLUE))?;
+            let mut obj = strike.object();
+            obj.dict_put("IRT", caret.object())?;
+            obj.dict_put("RT", PdfObject::new_name("Group")?)?;
+            obj.dict_put("IT", PdfObject::new_name("StrikeOutTextEdit")?)?;
+            Ok(strike)
+        })();
+        // o riscado não saiu: o cursor sozinho também não fica
+        let mut strike = match strike {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = page_ref.delete_annotation(caret);
+                return Err(e);
+            }
+        };
         for a in [&mut caret, &mut strike] {
             self.sign(a)?;
             a.update()?;

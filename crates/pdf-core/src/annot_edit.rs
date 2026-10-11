@@ -418,6 +418,12 @@ pub fn erase_strokes(
     // apagar só tira pontos: o desenho nunca cresce, e todo traço longe da borracha fica
     let mut out = Vec::new();
     for stroke in strokes {
+        let touched =
+            stroke.iter().any(|&p| near(p)) || stroke.windows(2).any(|w| crosses(w[0], w[1]));
+        if !touched {
+            out.push(stroke.clone()); // fica como estava (até um ponto solto)
+            continue;
+        }
         let mut current: Vec<(f32, f32)> = Vec::new();
         for &p in stroke {
             let gone = near(p);
@@ -850,6 +856,23 @@ pub(crate) fn scaled(from: PdfRect, to: PdfRect, ink: Option<Strokes>) -> Option
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn strokes_the_eraser_does_not_touch_stay_as_they_are() {
+        let dot = vec![(500.0, 500.0)];
+        let far = vec![(300.0, 0.0), (400.0, 0.0)];
+        let hit = vec![(0.0, 0.0), (10.0, 0.0), (20.0, 0.0)];
+        let out = super::erase_strokes(&[dot.clone(), far.clone(), hit], &[(10.0, 0.0)], 3.0);
+        assert!(
+            out.contains(&dot),
+            "o ponto solto longe da borracha fica: {out:?}"
+        );
+        assert!(out.contains(&far));
+        assert_eq!(
+            out.len(),
+            2,
+            "o traço tocado perdeu o ponto do meio e ficou sem pares"
+        );
+    }
 
     fn line() -> Vec<(f32, f32)> {
         (0..=10).map(|k| (k as f32 * 10.0, 0.0)).collect()

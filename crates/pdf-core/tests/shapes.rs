@@ -593,3 +593,18 @@ fn huge_vertex_arrays_are_listed_quickly() {
     assert_eq!(a[0].vertices.len(), 1000);
     assert!(t.elapsed().as_millis() < 300, "{:?}", t.elapsed());
 }
+
+#[test]
+fn polygons_with_too_few_finite_vertices_are_empty() {
+    let (_d, _p, mut d) = doc();
+    let r = d.apply(AnnotOp::Create(NewAnnot::Polygon {
+        page: 0,
+        vertices: vec![(100.0, 100.0), (f32::NAN, 120.0), (200.0, 100.0)],
+        closed: true,
+        cloud: false,
+    }));
+    assert!(
+        matches!(r, Err(pdf_core::PdfError::InvalidAnnotation(ref m)) if m.contains("vazia")),
+        "{r:?}"
+    );
+}

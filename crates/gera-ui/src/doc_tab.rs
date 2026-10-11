@@ -1060,7 +1060,9 @@ impl DocTab {
         if !self.security.permissions.annotate {
             return self.deny("alterar comentários");
         }
-        if !self.files.busy() {
+        if self.files.busy() {
+            self.status = "Feche o seletor de arquivos aberto antes de anexar.".into();
+        } else {
             self.picking = Some(PickFor::AttachComment { page, at });
             self.files.pick_any_file(ctx, "Anexar arquivo");
         }

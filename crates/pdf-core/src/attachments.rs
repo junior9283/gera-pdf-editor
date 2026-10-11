@@ -163,7 +163,12 @@ pub(crate) fn comment_attachments(pdf_page: &PdfPage, page: i32, out: &mut Vec<A
 
 /// Nome e tamanho do arquivo a anexar (até 100 MB; arquivo sem nome é recusado).
 pub(crate) fn attachment_file(path: &Path) -> Result<(String, u64)> {
-    let len = std::fs::metadata(path)?.len();
+    let meta = std::fs::metadata(path)?;
+    // FIFO, dispositivo ou pasta: abrir travaria ou não faz sentido
+    if !meta.is_file() {
+        return Err(refused("escolha um arquivo comum"));
+    }
+    let len = meta.len();
     if len > MAX_ATTACHMENT_BYTES {
         return Err(refused("o arquivo passa de 100 MB"));
     }

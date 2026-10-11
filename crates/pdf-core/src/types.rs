@@ -500,7 +500,14 @@ impl NewAnnot {
                 closed,
                 cloud,
                 ..
-            } => vertices.len() < if *closed || *cloud { 3 } else { 2 },
+            } => {
+                // conta só os vértices de verdade (coordenadas não finitas saem ao gravar)
+                let finite = vertices
+                    .iter()
+                    .filter(|(x, y)| x.is_finite() && y.is_finite())
+                    .count();
+                finite < if *closed || *cloud { 3 } else { 2 }
+            }
         }
     }
 }

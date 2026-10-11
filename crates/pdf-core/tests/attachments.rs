@@ -144,3 +144,24 @@ fn attaching_more_than_100_mb_as_a_comment_is_refused() {
     assert!(r.is_err());
     assert!(d.annotations(0).unwrap().is_empty());
 }
+
+#[test]
+fn a_fifo_is_refused_without_blocking() {
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("cano");
+    assert!(std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap()
+        .success());
+    let path = common::write_sample(&dir, "a.pdf", 1, 0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut d = pdf_core::PdfDoc::open(&path, None).unwrap();
+        let _ = tx.send(d.add_attachment(&fifo, "").is_err());
+    });
+    let refused = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("anexar um FIFO travou");
+    assert!(refused);
+}
