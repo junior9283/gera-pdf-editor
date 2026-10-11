@@ -43,6 +43,8 @@ pub struct PrefsDraft {
     category: Category,
     /// "Esquecer os documentos recentes" pedido (vale com OK).
     pub forget_recents: bool,
+    /// Nome como está sendo digitado (aparado só no OK).
+    pub author_text: String,
 }
 
 impl PrefsDraft {
@@ -51,11 +53,14 @@ impl PrefsDraft {
             prefs: prefs.clone(),
             category: Category::default(),
             forget_recents: false,
+            author_text: prefs.author.clone().unwrap_or_default(),
         }
     }
 
     /// OK: as preferências novas (dentro dos limites); Cancelar: `None`.
-    pub fn finish(self, ok: bool) -> Option<Prefs> {
+    pub fn finish(mut self, ok: bool) -> Option<Prefs> {
+        let name = self.author_text.trim();
+        self.prefs.author = (!name.is_empty()).then(|| name.to_owned());
         ok.then(|| self.prefs.sanitized())
     }
 
@@ -156,11 +161,8 @@ impl PrefsDraft {
                 );
             }
             Category::Identity => {
-                let mut name = p.author.clone().unwrap_or_default();
                 ui.label("Nome (autor dos comentários e linha dos carimbos dinâmicos):");
-                if ui.text_edit_singleline(&mut name).changed() {
-                    p.author = (!name.trim().is_empty()).then(|| name.trim().to_owned());
-                }
+                ui.text_edit_singleline(&mut self.author_text);
             }
             Category::Security => {
                 ui.label("Sites lembrados no aviso de segurança dos links:");
@@ -215,6 +217,17 @@ fn zoom_label(z: DefaultZoom) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_name_keeps_its_spaces_while_typing() {
+        let mut draft = PrefsDraft::new(&Prefs::default());
+        draft.author_text = "João ".into(); // digitando: o espaço fica
+        draft.author_text.push_str("Silva ");
+        assert_eq!(draft.finish(true).unwrap().author.as_deref(), Some("João Silva"));
+        let mut draft = PrefsDraft::new(&Prefs::default());
+        draft.author_text = "   ".into();
+        assert_eq!(draft.finish(true).unwrap().author, None);
+    }
 
     #[test]
     fn cancel_keeps_the_old_values_and_ok_applies() {
