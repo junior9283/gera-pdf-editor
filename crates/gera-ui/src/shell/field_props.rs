@@ -30,7 +30,7 @@ impl FieldPropsWindow {
             FieldKind::Radio { .. } => Kind::Button { radio: true },
             FieldKind::Combo { .. } => Kind::Choice { combo: true },
             FieldKind::List { .. } => Kind::Choice { combo: false },
-            FieldKind::Signature | FieldKind::Button => Kind::Other,
+            FieldKind::Signature | FieldKind::Button { .. } => Kind::Other,
         };
         Self {
             page,

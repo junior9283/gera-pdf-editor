@@ -814,8 +814,12 @@ pub fn validate(v: &FieldValidate, raw: &str) -> Result<(), String> {
     let FieldValidate::Range { min, max } = v else {
         return Ok(());
     };
+    if raw.trim().is_empty() {
+        return Ok(());
+    }
+    // texto que não é número não passa por um intervalo numérico (falha fechada)
     let Some(x) = parse_number(raw, 0).or_else(|| parse_number(raw, 2)) else {
-        return Ok(()); // vazio ou não numérico: o Acrobat não valida
+        return Err("O valor inserido deve ser um número.".into());
     };
     if min.is_some_and(|m| x < m) || max.is_some_and(|m| x > m) {
         let mut msg = String::from("O valor inserido deve ser");

@@ -15,15 +15,20 @@ pub fn label(kind: NewFieldKind) -> &'static str {
         NewFieldKind::Combo => "Lista suspensa",
         NewFieldKind::List => "Caixa de listagem",
         NewFieldKind::Signature => "Campo de assinatura",
+        NewFieldKind::Button => "Botão",
+        NewFieldKind::Date => "Campo de data",
     }
 }
 
-pub const KINDS: [NewFieldKind; 6] = [
+/// Na ordem da barra do Acrobat (Botão e Data antes da Assinatura).
+pub const KINDS: [NewFieldKind; 8] = [
     NewFieldKind::Text,
     NewFieldKind::Checkbox,
     NewFieldKind::Radio,
     NewFieldKind::Combo,
     NewFieldKind::List,
+    NewFieldKind::Button,
+    NewFieldKind::Date,
     NewFieldKind::Signature,
 ];
 
@@ -43,6 +48,8 @@ pub fn next_name<'a>(
 pub fn default_size(kind: NewFieldKind) -> (f32, f32) {
     match kind {
         NewFieldKind::Text | NewFieldKind::Combo => (150.0, 22.0),
+        NewFieldKind::Date => (100.0, 22.0),
+        NewFieldKind::Button => (90.0, 24.0),
         NewFieldKind::Checkbox | NewFieldKind::Radio => (14.0, 14.0),
         NewFieldKind::List => (150.0, 60.0),
         NewFieldKind::Signature => (180.0, 40.0),

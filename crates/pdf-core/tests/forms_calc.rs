@@ -176,5 +176,140 @@ fn calc_cycle_stops() {
 fn acrobat_scripts_do_not_raise_the_unsupported_warning() {
     let dir = tempfile::tempdir().unwrap();
     let d = PdfDoc::open(&order_form(&dir, "Preco * Qtd"), None).unwrap();
-    assert!(!d.form_notes().unwrap().scripts, "as chamadas AF são executadas");
+    assert!(
+        !d.form_notes().unwrap().scripts,
+        "as chamadas AF são executadas"
+    );
+}
+
+/// Formulário com os objetos dados (o campo é o objeto 4, na página).
+fn one_field_form(dir: &tempfile::TempDir, field: &str, extra: &[String]) -> std::path::PathBuf {
+    let mut objs = vec![
+        "<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[4 0 R]/DA(/Helv 0 Tf 0 g)\
+         /DR<</Font<</Helv 5 0 R>>>>>>>>"
+            .to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[4 0 R]>>".to_string(),
+        field.to_string(),
+        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>".to_string(),
+    ];
+    objs.extend(extra.iter().cloned());
+    let path = dir.path().join("um.pdf");
+    std::fs::write(&path, pdf_core::sample::pdf_from_objects(&objs)).unwrap();
+    path
+}
+
+const WIDGET: &str = "/Type/Annot/Subtype/Widget/FT/Tx/T(C)/Rect[100 700 300 720]/P 3 0 R\
+                      /DA(/Helv 10 Tf 0 g)/F 4";
+
+#[test]
+fn range_refuses_text_that_is_not_a_number() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = one_field_form(
+        &dir,
+        &format!("<<{WIDGET}/AA<</V<</S/JavaScript/JS(AFRange_Validate(true, 1, true, 10);)>>>>>>"),
+        &[],
+    );
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let id = d.fields(0).unwrap()[0].id;
+    assert!(d.set_field(0, id, "abc").is_err());
+    assert_eq!(d.fields(0).unwrap()[0].value, "");
+}
+
+#[test]
+fn chained_actions_are_not_trusted() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = one_field_form(
+        &dir,
+        &format!(
+            "<<{WIDGET}/V(5)/AA<</F<</S/JavaScript/JS(AFNumber_Format(2, 2, 0, 0, \"R$ \", true);)\
+             /Next<</S/JavaScript/JS(event.value = 'outro';)>>>>>>>>"
+        ),
+        &[],
+    );
+    let d = PdfDoc::open(&path, None).unwrap();
+    let f = &d.fields(0).unwrap()[0];
+    assert_eq!(
+        f.format,
+        FieldFormat::Custom,
+        "a ação seguinte mudaria o valor"
+    );
+    assert!(d.form_notes().unwrap().scripts);
+}
+
+#[test]
+fn a_script_stream_bomb_is_not_inflated() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+    z.write_all(&vec![b' '; 200 * 1024 * 1024]).unwrap();
+    let packed = z.finish().unwrap();
+    let path = dir.path().join("bomba.pdf");
+    let mut pdf = pdf_core::sample::pdf_from_objects(&[
+        "<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[4 0 R]>>>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[4 0 R]>>".to_string(),
+        format!("<<{WIDGET}/AA<</F<</S/JavaScript/JS 5 0 R>>>>>>"),
+        format!("<</Length {}/Filter/FlateDecode>>", packed.len()),
+    ]);
+    // o stream do objeto 5 vai à mão (o gerador de amostra só faz dicionários)
+    let marker = format!("<</Length {}/Filter/FlateDecode>>", packed.len());
+    let at = pdf
+        .windows(marker.len())
+        .position(|w| w == marker.as_bytes())
+        .unwrap()
+        + marker.len();
+    let mut body = b"\nstream\n".to_vec();
+    body.extend_from_slice(&packed);
+    body.extend_from_slice(b"\nendstream");
+    pdf.splice(at..at, body);
+    std::fs::write(&path, &pdf).unwrap();
+    let d = PdfDoc::open(&path, None).unwrap();
+    let t = std::time::Instant::now();
+    let f = d.fields(0).unwrap();
+    assert_eq!(f[0].format, FieldFormat::Custom);
+    assert!(t.elapsed().as_secs() < 2, "{:?}", t.elapsed());
+}
+
+#[test]
+fn a_huge_calculation_cycle_finishes_quickly() {
+    let dir = tempfile::tempdir().unwrap();
+    const N: usize = 300;
+    let mut fields = Vec::new();
+    let mut annots = Vec::new();
+    for k in 0..N {
+        let prev = if k == 0 { N - 1 } else { k - 1 };
+        let js = pdf_core::calc_script(&FieldCalc::Sfn(format!("F{prev} + 1")));
+        fields.push(format!(
+            "<</Type/Annot/Subtype/Widget/FT/Tx/T(F{k})/Rect[10 10 20 20]/P 3 0 R\
+             /DA(/Helv 10 Tf 0 g)/F 4/AA<</C<</S/JavaScript/JS({js})>>>>>>"
+        ));
+        annots.push(format!("{} 0 R", 5 + k));
+    }
+    let mut objs = vec![
+        format!(
+            "<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[{} 4 0 R]/DA(/Helv 0 Tf 0 g)>>>>",
+            annots.join(" ")
+        ),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        format!(
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[{} 4 0 R]>>",
+            annots.join(" ")
+        ),
+        format!("<<{WIDGET}>>"),
+    ];
+    objs.extend(fields);
+    let path = dir.path().join("ciclo.pdf");
+    std::fs::write(&path, pdf_core::sample::pdf_from_objects(&objs)).unwrap();
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let id = d
+        .fields(0)
+        .unwrap()
+        .iter()
+        .find(|f| f.name == "C")
+        .unwrap()
+        .id;
+    let t = std::time::Instant::now();
+    d.set_field(0, id, "x").unwrap();
+    assert!(t.elapsed().as_secs() < 10, "{:?}", t.elapsed());
 }

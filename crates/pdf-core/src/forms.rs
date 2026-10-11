@@ -35,7 +35,10 @@ pub enum FieldKind {
         options: Vec<(String, String)>,
     },
     Signature,
-    Button,
+    /// Botão de ação; `reset`: Redefinir formulário ao clicar.
+    Button {
+        reset: bool,
+    },
 }
 
 /// O que o formulário tem e o app não executa: a barra avisa (o Acrobat roda ambos).
@@ -69,10 +72,18 @@ pub struct FieldInfo {
     pub calc: FieldCalc,
 }
 
-/// Teto de passadas do recálculo (uma cadeia de cálculos em ciclo não pode travar o app).
+/// Tetos do recálculo (uma cadeia de cálculos em ciclo não pode travar o app): passadas e
+/// gravações no total.
 const MAX_CALC_PASSES: usize = 64;
+const MAX_CALC_WRITES: usize = 2000;
 
-/// O JavaScript da ação `key` de /AA do campo (vazio se não houver).
+/// Marca de script que não é confiável (lido como script arbitrário, que não executa).
+const UNTRUSTED_SCRIPT: &str = "/* script não reconhecido */";
+/// Maior script lido de um stream (acima disso é arbitrário de qualquer forma).
+const MAX_SCRIPT_BYTES: usize = 70_000;
+
+/// O JavaScript da ação `key` de /AA do campo (vazio se não houver). Ação encadeada (/Next),
+/// de outro tipo ou grande demais vira script arbitrário: o Acrobat rodaria o resto também.
 pub(crate) fn aa_script(head: &PdfObject, key: &str) -> Result<String> {
     let Some(action) = head
         .get_dict("AA")?
@@ -80,13 +91,23 @@ pub(crate) fn aa_script(head: &PdfObject, key: &str) -> Result<String> {
     else {
         return Ok(String::new());
     };
+    let javascript = action
+        .get_dict("S")?
+        .is_some_and(|s| s.as_name().is_ok_and(|n| n == b"JavaScript"));
+    if !javascript || action.get_dict("Next")?.is_some() {
+        return Ok(UNTRUSTED_SCRIPT.into());
+    }
     let Some(js) = action.get_dict("JS")? else {
         return Ok(String::new());
     };
     if js.is_stream()? {
-        // texto grande demais não é reconhecido de qualquer forma (vira script arbitrário)
-        let bytes = js.read_stream()?;
-        return Ok(String::from_utf8_lossy(&bytes[..bytes.len().min(70_000)]).into_owned());
+        // descompactado com teto: um stream-bomba não é aberto inteiro
+        return Ok(
+            match crate::attachments::read_capped(&js, MAX_SCRIPT_BYTES) {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(_) => UNTRUSTED_SCRIPT.into(),
+            },
+        );
     }
     Ok(js.as_string().unwrap_or_default())
 }
@@ -141,6 +162,19 @@ pub(crate) fn on_state(obj: &PdfObject) -> Result<String> {
         }
     }
     Ok("Yes".into())
+}
+
+/// O botão tem a ação Redefinir formulário (/A /S /ResetForm no widget ou no campo)?
+pub(crate) fn resets_form(obj: &PdfObject) -> Result<bool> {
+    let is_reset = |o: &PdfObject| -> Result<bool> {
+        Ok(match o.get_dict("A")? {
+            Some(a) => a
+                .get_dict("S")?
+                .is_some_and(|s| s.as_name().is_ok_and(|n| n == b"ResetForm")),
+            None => false,
+        })
+    };
+    Ok(is_reset(obj)? || is_reset(&field_head(obj)?)?)
 }
 
 /// Nó do campo (com /T) de um widget: os botões de opção são filhos sem nome do grupo.
@@ -233,7 +267,9 @@ fn info(w: &PdfWidget, page: i32) -> Result<FieldInfo> {
             options: options_of(&obj)?,
         },
         WidgetType::Signature => FieldKind::Signature,
-        _ => FieldKind::Button,
+        _ => FieldKind::Button {
+            reset: resets_form(&obj)?,
+        },
     };
     let head = field_head(&obj)?;
     let text = matches!(kind, FieldKind::Text { .. } | FieldKind::Combo { .. });
@@ -377,8 +413,9 @@ impl PdfDoc {
             .filter(|f| matches!(f.calc, FieldCalc::Simple { .. } | FieldCalc::Sfn(_)))
             .collect();
         let mut out: Vec<FieldInfo> = Vec::new();
-        let push = |f: &FieldInfo, out: &mut Vec<FieldInfo>| {
-            if !out.iter().any(|o| o.name == f.name) {
+        let mut seen = std::collections::HashSet::new();
+        let mut push = |f: &FieldInfo, out: &mut Vec<FieldInfo>| {
+            if seen.insert(f.name.clone()) {
                 out.push(f.clone());
             }
         };
@@ -388,15 +425,17 @@ impl PdfDoc {
             .get_dict("AcroForm")?
             .and_then(|a| a.get_dict("CO").ok().flatten());
         if let Some(co) = co.filter(|c| c.is_array().unwrap_or(false)) {
-            // nome do campo de cada objeto da ordem (pelo número do objeto do nó do campo)
+            // nome de cada nó de campo, lido numa passada pelas páginas
+            let heads = self.field_heads()?;
+            let by_name: std::collections::HashMap<&str, &FieldInfo> =
+                calculated.iter().map(|f| (f.name.as_str(), *f)).collect();
             for k in 0..co.len()?.min(10_000) as i32 {
-                let Some(num) = co.get_array(k)?.and_then(|o| o.as_indirect().ok()) else {
-                    continue;
-                };
-                for f in &calculated {
-                    if self.head_num(f)? == Some(num) {
-                        push(f, &mut out);
-                    }
+                let name = co
+                    .get_array(k)?
+                    .and_then(|o| o.as_indirect().ok())
+                    .and_then(|num| heads.get(&num));
+                if let Some(f) = name.and_then(|n| by_name.get(n.as_str())) {
+                    push(f, &mut out);
                 }
             }
         }
@@ -406,43 +445,51 @@ impl PdfDoc {
         Ok(out)
     }
 
-    /// Número do objeto do nó do campo do widget `f`.
-    fn head_num(&self, f: &FieldInfo) -> Result<Option<i32>> {
-        let page_ref = self.inner.load_pdf_page(f.page)?;
-        let w = page_ref
-            .widgets()
-            .find(|w| annot_id(w.annotation()).ok() == Some(f.id));
-        Ok(match w {
-            Some(w) => field_head(&w.annotation().object())?.as_indirect().ok(),
-            None => None,
-        })
+    /// Número do objeto do nó de cada campo → nome completo.
+    fn field_heads(&self) -> Result<std::collections::HashMap<i32, String>> {
+        let mut out = std::collections::HashMap::new();
+        for p in 0..self.page_count()? {
+            for w in self.inner.load_pdf_page(p)?.widgets() {
+                if let Ok(num) = field_head(&w.annotation().object())?.as_indirect() {
+                    out.entry(num)
+                        .or_insert_with(|| w.name().ok().flatten().unwrap_or_default());
+                }
+            }
+        }
+        Ok(out)
     }
 
-    /// Refaz os cálculos até nada mudar (com teto); devolve os valores anteriores do que mudou.
+    /// Refaz os cálculos até nada mudar (com tetos); devolve os valores anteriores do que mudou.
     fn recalculate(&mut self) -> Result<Vec<(i32, i32, String)>> {
+        let fields = self.all_fields()?;
+        let order = self.calc_order(&fields)?;
         let mut changes = Vec::new();
+        if order.is_empty() {
+            return Ok(changes);
+        }
+        let mut values: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        let mut raws: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for f in &fields {
+            values
+                .entry(f.name.clone())
+                .or_insert_with(|| number_of(&f.value));
+            raws.entry(f.name.clone())
+                .or_insert_with(|| f.value.clone());
+        }
         for _ in 0..MAX_CALC_PASSES {
-            let fields = self.all_fields()?;
-            let order = self.calc_order(&fields)?;
-            if order.is_empty() {
-                break;
-            }
-            let mut values: std::collections::HashMap<String, f64> =
-                std::collections::HashMap::new();
-            for f in &fields {
-                values
-                    .entry(f.name.clone())
-                    .or_insert_with(|| number_of(&f.value));
-            }
             let mut changed = false;
-            for f in order {
+            for f in &order {
+                if changes.len() >= MAX_CALC_WRITES {
+                    return Ok(changes);
+                }
                 let raw = evaluate(&f.calc, &|n: &str| values.get(n).copied().unwrap_or(0.0))
                     .map(calc_raw)
                     .unwrap_or_default();
-                if raw != f.value {
+                if raws.get(&f.name) != Some(&raw) {
                     let old = self.write_field(f.page, f.id, &raw, true)?;
                     changes.push((f.page, f.id, old));
                     values.insert(f.name.clone(), number_of(&raw));
+                    raws.insert(f.name.clone(), raw);
                     changed = true;
                 }
             }

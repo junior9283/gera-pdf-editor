@@ -2180,7 +2180,7 @@ impl DocTab {
                     .send(Request::Prepare(pdf_core::PrepareOp::SetProps {
                         page,
                         id,
-                        props,
+                        props: Box::new(props),
                     }));
             }
         }
