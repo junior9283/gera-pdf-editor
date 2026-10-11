@@ -19,7 +19,7 @@ A meta da versão **1.0.0**: todas as ferramentas do Adobe Acrobat Pro, com qual
 - [x] v5f — comparar arquivos (0.12.0)
 - [x] v6a — navegar e exibir: links, histórico de vistas, tela cheia, modo leitura, zoom até 6400 % (0.13.0)
 - [x] v6b — Mão, Zoom com marca, Preferências, Recortar/Colar, busca com opções (0.14.0)
-- [x] v6c — Propriedades editáveis, painéis Marcadores e Anexos (0.15.0)
+- [x] v6c — Propriedades editáveis, painéis Marcadores e Anexos (0.15.1)
 
 ## Em andamento
 

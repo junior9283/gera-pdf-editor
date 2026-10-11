@@ -8,6 +8,16 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 - v6c2 — miniaturas com menu e arraste, Camadas, Destinos, rótulos de página.
 
+## [0.15.1] — 2026-10-11 · Correções de segurança
+
+### Segurança
+- O XMP do documento é lido com teto de tamanho (uma "bomba" de compressão no XMP não trava mais
+  o app).
+- Anexos com cadeia de filtros longa demais, ou com filtros que não são nomes, são recusados em vez
+  de lidos sem teto.
+- Marcas de direção do texto (que podem disfarçar a extensão, como "fdp.exe" parecendo "exe.pdf")
+  saem do nome do anexo na lista e no nome sugerido ao salvar.
+
 ## [0.15.0] — 2026-10-11 · Propriedades, Marcadores e Anexos (v6c)
 
 ### Adicionado
