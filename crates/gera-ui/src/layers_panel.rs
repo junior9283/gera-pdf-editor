@@ -104,9 +104,29 @@ pub enum LayerAction {
     },
 }
 
+impl From<LayerAction> for pdf_core::Request {
+    fn from(action: LayerAction) -> Self {
+        match action {
+            LayerAction::View { id, on } => Self::LayerView { id, on },
+            LayerAction::Reset => Self::ResetLayers,
+            LayerAction::Edit {
+                id,
+                name,
+                default_on,
+            } => Self::EditLayer {
+                id,
+                name,
+                default_on,
+            },
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct LayersPanel {
     closed: HashSet<String>,
+    /// Linhas calculadas, refeitas só quando a árvore ou os recolhidos mudam.
+    rows: Option<Vec<Row>>,
     /// Janela Propriedades da camada: (camada, nome, estado padrão).
     props: Option<(i32, String, bool)>,
 }
@@ -132,6 +152,11 @@ fn find(tree: &[LayerNode], wanted: i32) -> Option<(String, bool)> {
 }
 
 impl LayersPanel {
+    /// A árvore mudou: as linhas são refeitas no próximo desenho.
+    pub fn invalidate(&mut self) {
+        self.rows = None;
+    }
+
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -150,12 +175,14 @@ impl LayersPanel {
                 .clicked()
             {
                 self.closed.clear();
+                self.rows = None;
             }
             if ui
                 .small_button("⊟")
                 .on_hover_text("Recolher tudo")
                 .clicked()
             {
+                self.rows = None;
                 self.closed = rows(tree, &HashSet::new())
                     .into_iter()
                     .filter(|r| r.has_kids)
@@ -171,10 +198,16 @@ impl LayersPanel {
             }
         });
         ui.separator();
-        egui::ScrollArea::vertical()
-            .auto_shrink(false)
-            .show(ui, |ui| {
-                for row in rows(tree, &self.closed) {
+        // as linhas saem do cache durante o desenho e voltam se nada foi aberto ou fechado
+        let list = self.rows.take().unwrap_or_else(|| rows(tree, &self.closed));
+        let mut toggled = false;
+        let row_h = ui.spacing().interact_size.y;
+        egui::ScrollArea::vertical().auto_shrink(false).show_rows(
+            ui,
+            row_h,
+            list.len(),
+            |ui, range| {
+                for row in &list[range] {
                     ui.horizontal(|ui| {
                         ui.add_space(14.0 * row.depth as f32);
                         if row.has_kids {
@@ -189,6 +222,7 @@ impl LayersPanel {
                                 } else {
                                     self.closed.remove(&row.key);
                                 }
+                                toggled = true;
                             }
                         } else {
                             ui.add_space(16.0);
@@ -221,7 +255,11 @@ impl LayersPanel {
                         });
                     });
                 }
-            });
+            },
+        );
+        if !toggled && self.rows.is_none() {
+            self.rows = Some(list);
+        }
         self.props_window(ui.ctx(), &mut out);
         out
     }

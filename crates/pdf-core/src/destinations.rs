@@ -53,50 +53,6 @@ enum Source {
     OldDict,
 }
 
-/// Pares (nome, valor) da árvore de nomes, uma vez cada nó.
-fn read_tree(
-    node: &PdfObject,
-    depth: usize,
-    visited: &mut HashSet<i32>,
-    out: &mut Vec<(String, PdfObject)>,
-) {
-    if depth > MAX_DEPTH || out.len() >= MAX_NAMES {
-        return;
-    }
-    if let Ok(id) = node.as_indirect() {
-        if id != 0 && !visited.insert(id) {
-            return;
-        }
-    }
-    if let Some(names) = get(node, "Names").filter(|n| n.is_array().unwrap_or(false)) {
-        let len = names.len().unwrap_or(0).min(2 * MAX_NAMES) as i32;
-        for k in 0..len / 2 {
-            if out.len() >= MAX_NAMES {
-                return;
-            }
-            let key = names
-                .get_array(2 * k)
-                .ok()
-                .flatten()
-                .and_then(|n| n.as_string().ok());
-            let value = names.get_array(2 * k + 1).ok().flatten();
-            if let (Some(key), Some(value)) = (key, value) {
-                out.push((key, value));
-            }
-        }
-    }
-    if let Some(kids) = get(node, "Kids").filter(|k| k.is_array().unwrap_or(false)) {
-        for k in 0..kids.len().unwrap_or(0).min(MAX_NAMES) as i32 {
-            if out.len() >= MAX_NAMES {
-                return;
-            }
-            if let Ok(Some(kid)) = kids.get_array(k) {
-                read_tree(&kid, depth + 1, visited, out);
-            }
-        }
-    }
-}
-
 /// O destino em si: o valor pode ser o array ou um dicionário com `/D`.
 fn dest_of(value: &PdfObject) -> PdfObject {
     if value.is_dict().unwrap_or(false) {
@@ -105,17 +61,6 @@ fn dest_of(value: &PdfObject) -> PdfObject {
         }
     }
     value.clone()
-}
-
-/// "nome", "nome (2)", "nome (3)"… sem repetir os de `taken`.
-fn unique(wanted: &str, taken: &[String]) -> String {
-    if !taken.iter().any(|t| t == wanted) {
-        return wanted.to_owned();
-    }
-    (2..)
-        .map(|n| format!("{wanted} ({n})"))
-        .find(|c| !taken.iter().any(|t| t == c))
-        .unwrap_or_else(|| wanted.to_owned())
 }
 
 fn valid_name(name: &str) -> Result<String> {
@@ -134,7 +79,10 @@ impl PdfDoc {
         };
         let mut tree = Vec::new();
         if let Some(root) = get(&catalog, "Names").and_then(|n| get(&n, "Dests")) {
-            read_tree(&root, 0, &mut HashSet::new(), &mut tree);
+            tree = crate::pdf_obj::tree_pairs(&root, "Names", MAX_NAMES, MAX_DEPTH)
+                .into_iter()
+                .filter_map(|(k, v)| Some((k.as_string().ok()?, v)))
+                .collect();
         }
         let mut seen: HashSet<String> = tree.iter().map(|(n, _)| n.clone()).collect();
         let mut out: Vec<_> = tree
@@ -208,17 +156,22 @@ impl PdfDoc {
             .map(|(n, v, _)| (n.clone(), v.clone()))
             .collect();
         let taken: Vec<String> = existing.iter().map(|(n, _, _)| n.clone()).collect();
-        let old_dict = |name: &str| {
-            existing
+        // o destino editado sai de onde estava (do dicionário antigo, passa para a árvore)
+        let mut drop_old = None;
+        let mut take_out = |tree: &mut Vec<(String, PdfObject)>, name: &str| {
+            tree.retain(|(n, _)| n != name);
+            let old = existing
                 .iter()
-                .any(|(n, _, s)| n == name && *s == Source::OldDict)
+                .any(|(n, _, s)| n == name && *s == Source::OldDict);
+            if old {
+                drop_old = Some(name.to_owned());
+            }
         };
         let mut created = None;
-        // o que sai do dicionário antigo (editado lá: passa para a árvore)
-        let mut drop_old = None;
         match op {
             DestOp::Add { name, page, at } => {
-                let name = unique(&valid_name(&name)?, &taken);
+                let wanted = valid_name(&name)?;
+                let name = crate::attachments::numbered(&wanted, &wanted, "", &taken);
                 tree.push((name.clone(), self.dest_array(page, at)?));
                 created = Some(name);
             }
@@ -227,31 +180,20 @@ impl PdfDoc {
                 if to != name && taken.contains(&to) {
                     return Err(refused("já existe um destino com esse nome"));
                 }
+                // edit_destination já conferiu que o nome existe
                 let value = existing
                     .iter()
                     .find(|(n, _, _)| *n == name)
-                    .map(|(_, v, _)| v.clone())
-                    .ok_or_else(|| refused("destino não encontrado"))?;
-                tree.retain(|(n, _)| *n != name);
-                if old_dict(&name) {
-                    drop_old = Some(name);
-                }
-                tree.push((to, value));
+                    .map(|(_, v, _)| v.clone());
+                take_out(&mut tree, &name);
+                tree.extend(value.map(|v| (to, v)));
             }
             DestOp::Set { name, page, at } => {
                 let dest = self.dest_array(page, at)?;
-                tree.retain(|(n, _)| *n != name);
-                if old_dict(&name) {
-                    drop_old = Some(name.clone());
-                }
+                take_out(&mut tree, &name);
                 tree.push((name, dest));
             }
-            DestOp::Remove { name } => {
-                tree.retain(|(n, _)| *n != name);
-                if old_dict(&name) {
-                    drop_old = Some(name);
-                }
-            }
+            DestOp::Remove { name } => take_out(&mut tree, &name),
         }
         let mut catalog = self.inner.catalog()?;
         if let Some(name) = drop_old {
@@ -283,12 +225,10 @@ impl PdfDoc {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
-    fn unique_names() {
-        let taken = vec!["a".to_string(), "a (2)".to_string()];
-        assert_eq!(unique("a", &taken), "a (3)");
-        assert_eq!(unique("b", &taken), "b");
+    fn unique_names_keep_dots_in_the_name() {
+        let taken = vec!["cap.1".to_string()];
+        let n = crate::attachments::numbered("cap.1", "cap.1", "", &taken);
+        assert_eq!(n, "cap.1 (2)");
     }
 }

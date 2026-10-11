@@ -153,6 +153,8 @@ pub struct DocTab {
     pub(crate) attachments: Vec<pdf_core::AttachmentInfo>,
     /// Destinos nomeados (painel Destinos).
     pub(crate) destinations: Vec<pdf_core::DestInfo>,
+    /// A lista acima vale para o documento como está (senão o painel pede de novo).
+    destinations_loaded: bool,
     /// Camadas (painel Camadas).
     pub(crate) layers: Vec<pdf_core::LayerNode>,
     /// Rótulo de cada página (vazio sem rótulos).
@@ -358,6 +360,7 @@ impl DocTab {
             attach_warning: None,
             attachments: Vec::new(),
             destinations: Vec::new(),
+            destinations_loaded: false,
             thumbs: Default::default(),
             copy_pending: None,
             labels_dialog: None,
@@ -1140,8 +1143,10 @@ impl DocTab {
         self.outline = summary.outline;
         self.links = summary.links;
         self.attachments = summary.attachments;
-        self.destinations = summary.destinations;
+        // documento mudou: a lista de destinos é pedida de novo quando o painel aparecer
+        self.destinations_loaded = false;
         self.layers = summary.layers;
+        self.layers_panel.invalidate();
         self.labels = summary.labels;
         self.display_title = summary.display_title;
         (summary.path, summary.sizes)
@@ -1380,6 +1385,7 @@ impl DocTab {
                 }
                 Response::LayersChanged { layers, history } => {
                     self.layers = layers;
+                    self.layers_panel.invalidate();
                     self.history = history;
                     // a página desenha diferente: as imagens em cache valem para a vista antiga
                     if let Some(view) = self.view.as_mut() {
@@ -1392,6 +1398,8 @@ impl DocTab {
                     history,
                 } => {
                     self.destinations = destinations;
+                    self.destinations_panel.invalidate();
+                    self.destinations_loaded = true;
                     self.history = history;
                     // destino novo: o nome vem pronto para editar (como no Acrobat)
                     if let Some(name) = created {
@@ -2329,16 +2337,15 @@ impl DocTab {
                 }
             }
         }
-        if let Some(answer) = self.labels_dialog.as_mut().and_then(|d| d.show(ui.ctx())) {
-            if let (true, Some(d)) = (answer, self.labels_dialog.as_ref()) {
+        if let Some(ok) = self.labels_dialog.as_mut().and_then(|d| d.show(ui.ctx())) {
+            if let Some(d) = self.labels_dialog.take().filter(|_| ok) {
                 let (from, to, new) = d.request();
-                if self.bookmarks_editable() {
+                if self.can_modify_file() {
                     self.worker.send(Request::PageLabels { from, to, new });
                 } else {
                     self.deny("alterar os rótulos de página");
                 }
             }
-            self.labels_dialog = None;
         }
         if let (Some(rx), Some(dialog)) = (&self.printers_rx, self.print_dialog.as_mut()) {
             if let Ok((list, default)) = rx.try_recv() {
@@ -2413,7 +2420,7 @@ impl DocTab {
     /// Conteúdo do painel esquerdo; clicar leva à página.
     pub fn side_panel(&mut self, ui: &mut egui::Ui, panel: LeftPanel) {
         if panel == LeftPanel::Outline {
-            let can_edit = self.bookmarks_editable();
+            let can_edit = self.can_modify_file();
             let nodes = outline_shown(&self.outline, &self.bookmarks_open);
             let actions = ui
                 .push_id(self.id, |ui| {
@@ -2450,7 +2457,10 @@ impl DocTab {
             return;
         }
         if panel == LeftPanel::Destinations {
-            let can_edit = self.bookmarks_editable();
+            if !std::mem::replace(&mut self.destinations_loaded, true) {
+                self.worker.send(Request::ListDestinations);
+            }
+            let can_edit = self.can_modify_file();
             let actions = ui
                 .push_id(self.id, |ui| {
                     ui.strong(panel.label());
@@ -2464,7 +2474,7 @@ impl DocTab {
             return;
         }
         if panel == LeftPanel::Layers {
-            let can_edit = self.bookmarks_editable();
+            let can_edit = self.can_modify_file();
             let actions = ui
                 .push_id(self.id, |ui| {
                     ui.strong(panel.label());
@@ -2472,20 +2482,7 @@ impl DocTab {
                 })
                 .inner;
             for action in actions {
-                use crate::layers_panel::LayerAction;
-                self.worker.send(match action {
-                    LayerAction::View { id, on } => Request::LayerView { id, on },
-                    LayerAction::Reset => Request::ResetLayers,
-                    LayerAction::Edit {
-                        id,
-                        name,
-                        default_on,
-                    } => Request::EditLayer {
-                        id,
-                        name,
-                        default_on,
-                    },
-                });
+                self.worker.send(action.into());
             }
             return;
         }
@@ -2546,7 +2543,7 @@ impl DocTab {
 
     /// Copiar páginas para outra aba: grava-as numa cópia na pasta privada; a aba de destino
     /// insere quando ficar pronta (`DocEvent::CopyPages`).
-    pub(crate) fn copy_pages(&mut self, _ctx: &egui::Context, pages: Vec<i32>, target: PathBuf) {
+    pub(crate) fn copy_pages(&mut self, pages: Vec<i32>, target: PathBuf) {
         if !self.security.permissions.copy {
             return self.deny("copiar páginas");
         }
@@ -2566,7 +2563,7 @@ impl DocTab {
 
     /// Insere no fim as páginas copiadas de outra aba (o temporário some depois).
     pub(crate) fn insert_copied(&mut self, file: PathBuf) -> Result<(), String> {
-        if !self.bookmarks_editable() {
+        if !self.can_modify_file() {
             return Err("o documento de destino não permite alterar as páginas".into());
         }
         let at = self.view.as_ref().map_or(0, |v| v.sizes.len() as i32);
@@ -2607,7 +2604,7 @@ impl DocTab {
             DestAction::Rename { name, to } => DestOp::Rename { name, to },
             DestAction::Remove(name) => DestOp::Remove { name },
         };
-        if self.bookmarks_editable() {
+        if self.can_modify_file() {
             self.worker.send(Request::Destination(op));
         } else {
             self.deny("alterar os destinos");
@@ -2628,7 +2625,7 @@ impl DocTab {
                     }
                 }
                 ThumbAction::Zoom(width) => self.events.push(DocEvent::ThumbWidth(width)),
-                ThumbAction::CopyTo { pages, target } => self.copy_pages(ctx, pages, target),
+                ThumbAction::CopyTo { pages, target } => self.copy_pages(pages, target),
                 ThumbAction::DragOut(pages) => self.events.push(DocEvent::DragPagesOut(pages)),
                 ThumbAction::Labels(pages) => {
                     let total = self.view.as_ref().map_or(0, |v| v.sizes.len());
@@ -2742,15 +2739,16 @@ impl DocTab {
         self.outline_op(op);
     }
 
-    /// Os marcadores podem ser alterados no arquivo? Não num documento protegido contra alteração
-    /// nem num assinado (mudar o arquivo alteraria as assinaturas).
-    fn bookmarks_editable(&self) -> bool {
+    /// O arquivo pode ser alterado (marcadores, destinos, camadas, rótulos, páginas recebidas)?
+    /// Não num documento protegido contra alteração nem num assinado (mudar o arquivo alteraria
+    /// as assinaturas).
+    fn can_modify_file(&self) -> bool {
         self.security.permissions.modify && self.cert.signatures.is_empty()
     }
 
     fn outline_op(&mut self, op: pdf_core::OutlineOp) {
         use pdf_core::OutlineOp;
-        if !self.bookmarks_editable() {
+        if !self.can_modify_file() {
             // expandir e recolher continuam, só na tela
             match op {
                 OutlineOp::SetOpen { id, open } => {
@@ -2785,31 +2783,8 @@ impl DocTab {
                 ui.label(commands::hover(&Command::Doc(DocCommand::PrevPage)));
             })
             .clicked();
-        let labeled = self.logical_pages && !self.labels.is_empty();
-        if labeled {
-            // números lógicos: o campo mostra o rótulo e aceita rótulo ou número
-            let (label, suffix) =
-                app_state::page_input::page_box_text(&self.labels, page - 1, count, true);
-            let mut text = self.page_input.clone().unwrap_or(label);
-            let edit = ui
-                .add(egui::TextEdit::singleline(&mut text).desired_width(56.0))
-                .on_hover_ui(|ui| {
-                    ui.label(commands::hover(&Command::Doc(DocCommand::GoToPage)));
-                });
-            if std::mem::take(&mut self.focus_page) {
-                edit.request_focus();
-            }
-            self.page_input = edit.has_focus().then(|| text.clone());
-            if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                match app_state::page_input::page_for_input(&text, &self.labels, count) {
-                    Some(p) => self.page_field(p + 1, PageField::Typed),
-                    None => self.status = format!("Não há página \"{}\".", text.trim()),
-                }
-                self.page_input = None;
-            }
-            ui.label(suffix);
-        }
-        let go = if labeled {
+        let field = if self.logical_pages && !self.labels.is_empty() {
+            self.page_label_box(ui, page - 1, count);
             None
         } else {
             let go = ui
@@ -2821,7 +2796,17 @@ impl DocTab {
                 go.request_focus(); // Ir para página: digita o número e Enter
             }
             ui.label(format!("/ {count}"));
-            Some(go)
+            if go.drag_started() {
+                Some(PageField::DragStart)
+            } else if go.changed() {
+                Some(if go.dragged() {
+                    PageField::Dragging
+                } else {
+                    PageField::Typed
+                })
+            } else {
+                None
+            }
         };
         let next = ui
             .button("▶")
@@ -2835,18 +2820,33 @@ impl DocTab {
             } else {
                 DocCommand::PrevPage
             });
-        } else if let Some(go) = go {
-            if go.drag_started() {
-                self.page_field(page, PageField::DragStart);
-            } else if go.changed() {
-                let how = if go.dragged() {
-                    PageField::Dragging
-                } else {
-                    PageField::Typed
-                };
-                self.page_field(page, how);
-            }
+        } else if let Some(how) = field {
+            self.page_field(page, how);
         }
+    }
+
+    /// Números lógicos: o campo mostra o rótulo ("iii", com "(3 de 10)" ao lado) e aceita rótulo
+    /// ou número.
+    fn page_label_box(&mut self, ui: &mut egui::Ui, page: usize, count: usize) {
+        let (label, suffix) = app_state::page_input::page_box_text(&self.labels, page, count);
+        let mut text = self.page_input.clone().unwrap_or(label);
+        let edit = ui
+            .add(egui::TextEdit::singleline(&mut text).desired_width(56.0))
+            .on_hover_ui(|ui| {
+                ui.label(commands::hover(&Command::Doc(DocCommand::GoToPage)));
+            });
+        if std::mem::take(&mut self.focus_page) {
+            edit.request_focus();
+        }
+        self.page_input = edit.has_focus().then(|| text.clone());
+        if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            match app_state::page_input::page_for_input(&text, &self.labels, count) {
+                Some(p) => self.page_field(p + 1, PageField::Typed),
+                None => self.status = format!("Não há página \"{}\".", text.trim()),
+            }
+            self.page_input = None;
+        }
+        ui.label(suffix);
     }
 
     /// Campo de busca, resumo e ▲▼ (o foco vem de `DocCommand::Find`).
@@ -3978,7 +3978,7 @@ mod tests {
         }];
         tab.outline_op(pdf_core::OutlineOp::SetOpen { id: 4, open: true });
         assert_eq!(tab.bookmarks_open.get(&4), Some(&true), "só na tela");
-        assert!(!tab.bookmarks_editable(), "assinado: o painel não edita");
+        assert!(!tab.can_modify_file(), "assinado: o painel não edita");
     }
 
     #[test]
@@ -3994,10 +3994,9 @@ mod tests {
 
     #[test]
     fn copy_from_protected_document_is_refused() {
-        let ctx = egui::Context::default();
         let mut tab = tab_with_pages(3);
         tab.security.permissions.copy = false;
-        tab.copy_pages(&ctx, vec![0], PathBuf::from("/outro.pdf"));
+        tab.copy_pages(vec![0], PathBuf::from("/outro.pdf"));
         assert!(tab.copy_pending.is_none(), "nada foi exportado");
         assert!(tab.status.contains("não permite"), "{}", tab.status);
     }

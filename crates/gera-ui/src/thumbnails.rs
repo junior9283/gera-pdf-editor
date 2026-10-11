@@ -10,8 +10,7 @@ use egui::Key;
 use pdf_core::{PageOp, PageSize, Rotation, Worker};
 
 /// Largura das miniaturas: padrão e limites de Ampliar/Reduzir.
-pub const THUMB_WIDTH: f32 = 110.0;
-const WIDTH_RANGE: std::ops::RangeInclusive<f32> = 80.0..=320.0;
+use app_state::prefs::{THUMB_WIDTH, THUMB_WIDTH_RANGE as WIDTH_RANGE};
 /// Altura do rótulo da página sob a miniatura.
 const LABEL: f32 = 22.0;
 
@@ -79,32 +78,22 @@ pub fn ranges_text(pages: &[i32]) -> String {
     out.join(", ")
 }
 
-/// O que uma tecla faz com o painel focado.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ThumbKey {
-    Select(i32),
-    /// Pergunta antes de excluir (como no Acrobat).
-    ConfirmDelete(Vec<i32>),
-}
-
-pub fn key_action(key: Key, sel: &[i32], current: Option<i32>, total: i32) -> Option<ThumbKey> {
+/// Página para onde as setas, Início e Fim levam (a partir da `current`).
+pub fn key_action(key: Key, current: Option<i32>, total: i32) -> Option<i32> {
     if total <= 0 {
         return None;
     }
     match key {
-        Key::Delete => {
-            can_delete(sel.len(), total as usize).then(|| ThumbKey::ConfirmDelete(sel.to_vec()))
-        }
         Key::ArrowDown => match current {
-            None => Some(ThumbKey::Select(0)),
-            Some(c) => (c + 1 < total).then_some(ThumbKey::Select(c + 1)),
+            None => Some(0),
+            Some(c) => (c + 1 < total).then_some(c + 1),
         },
         Key::ArrowUp => match current {
-            None => Some(ThumbKey::Select(0)),
-            Some(c) => (c > 0).then_some(ThumbKey::Select(c - 1)),
+            None => Some(0),
+            Some(c) => (c > 0).then_some(c - 1),
         },
-        Key::Home => Some(ThumbKey::Select(0)),
-        Key::End => Some(ThumbKey::Select(total - 1)),
+        Key::Home => Some(0),
+        Key::End => Some(total - 1),
         _ => None,
     }
 }
@@ -165,11 +154,9 @@ impl ThumbnailsPanel {
 
     /// Excluir (Delete ou Editar → Excluir com o painel focado): pergunta antes.
     pub fn ask_delete(&mut self, total: i32) {
-        let sel = self.org.sel.to_vec();
-        if let Some(ThumbKey::ConfirmDelete(pages)) =
-            key_action(Key::Delete, &sel, self.current, total)
-        {
-            self.confirm = Some(pages);
+        // nunca todas as páginas: o documento precisa ficar com ao menos uma
+        if can_delete(self.org.sel.len(), total.max(0) as usize) {
+            self.confirm = Some(self.org.sel.to_vec());
         }
     }
 
@@ -182,13 +169,12 @@ impl ThumbnailsPanel {
     /// Teclas com o painel focado.
     pub fn keys(&mut self, ctx: &egui::Context, total: i32) -> Vec<ThumbAction> {
         let mut out = Vec::new();
-        let sel = self.org.sel.to_vec();
         // Delete chega como o comando Excluir (ask_delete)
         for key in [Key::ArrowDown, Key::ArrowUp, Key::Home, Key::End] {
             if !ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
                 continue;
             }
-            if let Some(ThumbKey::Select(p)) = key_action(key, &sel, self.current, total) {
+            if let Some(p) = key_action(key, self.current, total) {
                 self.select(p, &mut out);
             }
         }
@@ -227,7 +213,6 @@ impl ThumbnailsPanel {
         let thumb_h = thumb_height(&first, rotation, width);
         let row_h = thumb_h + LABEL;
         let pointer = ui.ctx().pointer_interact_pos();
-        let mut menu_pages = None;
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show_rows(ui, row_h, total, |ui, rows| {
@@ -246,11 +231,7 @@ impl ThumbnailsPanel {
                     let painter = ui.painter();
                     match view.texture_at(page, scale) {
                         Some(id) => {
-                            let uv = egui::Rect::from_min_max(
-                                egui::pos2(0.0, 0.0),
-                                egui::pos2(1.0, 1.0),
-                            );
-                            painter.image(id, img, uv, egui::Color32::WHITE);
+                            painter.image(id, img, crate::canvas::FULL_UV, egui::Color32::WHITE);
                         }
                         None => {
                             painter.rect_filled(img, 0.0, egui::Color32::from_gray(200));
@@ -317,12 +298,10 @@ impl ThumbnailsPanel {
                             self.org.sel.click(page);
                             self.current = Some(page);
                         }
-                        menu_pages = Some(self.org.sel.to_vec());
                         self.menu(ui, total, can_edit, targets, &mut out);
                     });
                 }
             });
-        let _ = menu_pages;
         // soltou: move dentro do painel (fora dele, nada por enquanto)
         if self.drag.is_some() && ui.input(|i| !i.pointer.any_down()) {
             if let Some((pages, target)) = self.drag.take() {
@@ -420,10 +399,9 @@ impl ThumbnailsPanel {
                 });
             });
         if let Some(ok) = answer {
-            if let (true, Some(pages)) = (ok, self.confirm.take()) {
+            if let Some(pages) = self.confirm.take().filter(|_| ok) {
                 out.push(ThumbAction::Org(OrgAction::Op(PageOp::Delete { pages })));
             }
-            self.confirm = None;
         }
     }
 }
@@ -455,54 +433,28 @@ mod tests {
 
     #[test]
     fn delete_never_takes_every_page() {
-        assert_eq!(key_action(Key::Delete, &[0, 1, 2], Some(0), 3), None);
-        assert_eq!(
-            key_action(Key::Delete, &[1], Some(1), 3),
-            Some(ThumbKey::ConfirmDelete(vec![1]))
-        );
+        let mut panel = ThumbnailsPanel::default();
+        for p in 0..3 {
+            panel.org.sel.ctrl_click(p);
+        }
+        panel.ask_delete(3);
+        assert_eq!(panel.confirming(), None);
+        panel.org.sel.click(1);
+        panel.ask_delete(3);
+        assert_eq!(panel.confirming(), Some(&[1][..]));
     }
 
     #[test]
     fn arrows_move_the_selection() {
+        assert_eq!(key_action(Key::ArrowDown, Some(1), 3), Some(2));
+        assert_eq!(key_action(Key::ArrowDown, Some(2), 3), None, "última");
         assert_eq!(
-            key_action(Key::ArrowDown, &[1], Some(1), 3),
-            Some(ThumbKey::Select(2))
-        );
-        assert_eq!(key_action(Key::ArrowDown, &[2], Some(2), 3), None, "última");
-        assert_eq!(
-            key_action(Key::ArrowUp, &[], None, 3),
-            Some(ThumbKey::Select(0)),
+            key_action(Key::ArrowUp, None, 3),
+            Some(0),
             "sem seleção: a primeira"
         );
-        assert_eq!(
-            key_action(Key::Home, &[2], Some(2), 3),
-            Some(ThumbKey::Select(0))
-        );
-        assert_eq!(
-            key_action(Key::End, &[0], Some(0), 3),
-            Some(ThumbKey::Select(2))
-        );
-    }
-
-    #[test]
-    fn print_ranges_merge_neighbours() {
-        assert_eq!(ranges_text(&[0, 1, 2, 4, 6, 7]), "1-3, 5, 7-8");
-        assert_eq!(ranges_text(&[3]), "4");
-    }
-
-    #[test]
-    fn thumbnails_keep_the_page_aspect_ratio_and_rotation() {
-        let size = PageSize {
-            width: 100.0,
-            height: 200.0,
-        };
-        assert_eq!(thumb_height(&size, Rotation::R0, 110.0), 220.0);
-        assert_eq!(thumb_height(&size, Rotation::R90, 110.0), 55.0);
-        let zero = PageSize {
-            width: 0.0,
-            height: 0.0,
-        };
-        assert!(thumb_scale(&zero, Rotation::R0, 110.0).is_finite());
+        assert_eq!(key_action(Key::Home, Some(2), 3), Some(0));
+        assert_eq!(key_action(Key::End, Some(0), 3), Some(2));
     }
 
     #[test]

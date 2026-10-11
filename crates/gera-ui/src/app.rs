@@ -371,7 +371,7 @@ impl GeraApp {
                             .and_then(|p| tab_bar::drop_target(&self.tab_rects, p, tab))
                             .and_then(|t| self.tabs.doc_path(t).map(Path::to_path_buf));
                         if let Some(target) = target {
-                            self.docs[i].copy_pages(ctx, pages, target);
+                            self.docs[i].copy_pages(pages, target);
                         }
                     }
                     DocEvent::CopyPages { target, file } => copies.push((i, target, file)),

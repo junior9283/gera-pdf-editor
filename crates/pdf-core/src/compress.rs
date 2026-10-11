@@ -251,8 +251,11 @@ impl PdfDoc {
         let before = std::fs::metadata(&self.path)?.len();
         let mut keep = PdfWriteOptions::default();
         keep.set_encryption(Encryption::Keep);
-        let mut bytes = Vec::new();
-        self.inner.write_to_with_options(&mut bytes, keep)?;
+        let bytes = self.with_file_layers(|d| {
+            let mut bytes = Vec::new();
+            d.inner.write_to_with_options(&mut bytes, keep)?;
+            Ok(bytes)
+        })?;
         let mut copy = PdfDocument::from_bytes(&bytes)?;
         if let Some(p) = self.password.as_deref() {
             copy.authenticate(p)?;

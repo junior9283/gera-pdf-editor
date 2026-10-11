@@ -62,6 +62,9 @@ pub enum Request {
         name: String,
         default_on: bool,
     },
+    /// Lista os destinos (o painel Destinos pede ao abrir: em PDFs com milhares de destinos a
+    /// lista custa, e não entra na abertura).
+    ListDestinations,
     /// Cria, renomeia, redefine ou exclui um destino nomeado.
     Destination(crate::DestOp),
     /// Diálogo Rótulos de página: `from..=to` começam uma seção nova (`new`) ou estendem a
@@ -546,6 +549,15 @@ impl State {
                 d.edit_layer(id, &name, default_on)?;
                 Ok(Changed::Layers)
             }),
+            Request::ListDestinations => {
+                if let Some(d) = self.doc.as_ref() {
+                    send(Response::DestinationsChanged {
+                        destinations: d.destinations(),
+                        created: None,
+                        history: d.history_state(),
+                    });
+                }
+            }
             Request::Destination(op) => {
                 self.edit(send, |d| Ok(Changed::Destinations(d.edit_destination(op)?)))
             }

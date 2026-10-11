@@ -244,8 +244,8 @@ impl PrintDialog {
             ui.allocate_exact_size(egui::vec2(PREVIEW_WIDTH, height), egui::Sense::hover());
         match view.texture_at(self.preview as i32, scale) {
             Some(id) => {
-                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                ui.painter().image(id, rect, uv, egui::Color32::WHITE);
+                ui.painter()
+                    .image(id, rect, crate::canvas::FULL_UV, egui::Color32::WHITE);
             }
             None => {
                 ui.painter()

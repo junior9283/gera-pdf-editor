@@ -73,6 +73,10 @@ pub enum DefaultZoom {
 
 /// Maior número de recentes que dá para escolher (o que a lista guarda).
 pub const MAX_RECENT_SETTING: usize = crate::recents::MAX_RECENTS;
+/// Largura padrão das miniaturas de página e os limites de Ampliar/Reduzir (também os da grade
+/// do Organizar páginas).
+pub const THUMB_WIDTH: f32 = 110.0;
+pub const THUMB_WIDTH_RANGE: std::ops::RangeInclusive<f32> = 80.0..=320.0;
 /// Arquivos com a última vista lembrada.
 pub const MAX_LAST_VIEWS: usize = 200;
 
@@ -127,7 +131,7 @@ impl Default for Prefs {
             restore_views: true,
             max_recents: 20,
             last_views: Vec::new(),
-            thumb_width: 110.0,
+            thumb_width: THUMB_WIDTH,
             logical_page_numbers: true,
         }
     }
@@ -183,7 +187,8 @@ impl Prefs {
             .collect();
         self.max_recents = self.max_recents.clamp(1, MAX_RECENT_SETTING);
         self.thumb_width = if self.thumb_width.is_finite() {
-            self.thumb_width.clamp(80.0, 320.0)
+            self.thumb_width
+                .clamp(*THUMB_WIDTH_RANGE.start(), *THUMB_WIDTH_RANGE.end())
         } else {
             defaults.thumb_width
         };

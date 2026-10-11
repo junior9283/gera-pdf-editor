@@ -85,15 +85,24 @@ fn range_at(ranges: &[PageLabelRange], page: i32) -> Option<&PageLabelRange> {
     ranges.iter().rev().find(|r| r.start_page <= page)
 }
 
-/// Rótulo de cada uma das `total` páginas (vazio se não houver faixas).
+/// Rótulo de cada uma das `total` páginas (vazio se não houver faixas). As faixas vêm em ordem:
+/// páginas e faixas andam juntas (sem buscar a faixa de cada página).
 pub fn label_list(ranges: &[PageLabelRange], total: i32) -> Vec<String> {
     if ranges.is_empty() {
         return Vec::new();
     }
+    let mut next = 0;
+    let mut current: Option<&PageLabelRange> = None;
     (0..total.max(0))
-        .map(|p| match range_at(ranges, p) {
-            Some(r) => format_label(r.style, &r.prefix, r.first + (p - r.start_page)),
-            None => (p + 1).to_string(),
+        .map(|p| {
+            while ranges.get(next).is_some_and(|r| r.start_page <= p) {
+                current = ranges.get(next);
+                next += 1;
+            }
+            match current {
+                Some(r) => format_label(r.style, &r.prefix, r.first + (p - r.start_page)),
+                None => (p + 1).to_string(),
+            }
         })
         .collect()
 }
@@ -173,7 +182,6 @@ use crate::doc::PdfDoc;
 use crate::error::Result;
 use crate::pdf_obj::{get, name_of, text};
 use mupdf::pdf::PdfObject;
-use std::collections::HashSet;
 
 /// Tetos da leitura da árvore numérica.
 const MAX_RANGES: usize = 10_000;
@@ -201,59 +209,6 @@ fn style_name(style: PageLabelStyle) -> Option<&'static str> {
     }
 }
 
-/// Entradas `/Nums` do nó e dos filhos (`/Kids`), uma vez cada nó.
-fn read_node(
-    node: &PdfObject,
-    depth: usize,
-    visited: &mut HashSet<i32>,
-    out: &mut Vec<PageLabelRange>,
-) {
-    if depth > MAX_DEPTH || out.len() >= MAX_RANGES {
-        return;
-    }
-    if let Ok(id) = node.as_indirect() {
-        if id != 0 && !visited.insert(id) {
-            return;
-        }
-    }
-    if let Some(nums) = get(node, "Nums").filter(|n| n.is_array().unwrap_or(false)) {
-        let len = nums.len().unwrap_or(0).min(2 * MAX_RANGES) as i32;
-        for k in 0..len / 2 {
-            if out.len() >= MAX_RANGES {
-                return;
-            }
-            let Some(page) = nums
-                .get_array(2 * k)
-                .ok()
-                .flatten()
-                .and_then(|n| n.as_int().ok())
-            else {
-                continue;
-            };
-            let Some(dict) = nums.get_array(2 * k + 1).ok().flatten() else {
-                continue;
-            };
-            let first = get(&dict, "St")
-                .and_then(|v| v.as_int().ok())
-                .filter(|v| *v >= 1)
-                .unwrap_or(1);
-            out.push(PageLabelRange {
-                start_page: page,
-                style: style_of(&dict),
-                prefix: text(&dict, "P").chars().take(MAX_LABEL_CHARS).collect(),
-                first,
-            });
-        }
-    }
-    if let Some(kids) = get(node, "Kids").filter(|k| k.is_array().unwrap_or(false)) {
-        for k in 0..kids.len().unwrap_or(0) as i32 {
-            if let Ok(Some(kid)) = kids.get_array(k) {
-                read_node(&kid, depth + 1, visited, out);
-            }
-        }
-    }
-}
-
 impl PdfDoc {
     /// Faixas de rótulos do documento, em ordem (vazio sem `/PageLabels`).
     pub fn page_labels(&self) -> Vec<PageLabelRange> {
@@ -265,8 +220,21 @@ impl PdfDoc {
         else {
             return Vec::new();
         };
-        let mut out = Vec::new();
-        read_node(&root, 0, &mut HashSet::new(), &mut out);
+        let out = crate::pdf_obj::tree_pairs(&root, "Nums", MAX_RANGES, MAX_DEPTH)
+            .into_iter()
+            .filter_map(|(page, dict)| {
+                let first = get(&dict, "St")
+                    .and_then(|v| v.as_int().ok())
+                    .filter(|v| *v >= 1)
+                    .unwrap_or(1);
+                Some(PageLabelRange {
+                    start_page: page.as_int().ok()?,
+                    style: style_of(&dict),
+                    prefix: text(&dict, "P").chars().take(MAX_LABEL_CHARS).collect(),
+                    first,
+                })
+            })
+            .collect();
         normalized(out, self.page_count().unwrap_or(0))
     }
 

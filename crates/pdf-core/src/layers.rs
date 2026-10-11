@@ -9,7 +9,7 @@
 use crate::doc::{reopen, PdfDoc};
 use crate::error::{refused, Result};
 use crate::pdf_obj::{get, name_of, text};
-use mupdf::pdf::{Encryption, PdfObject, PdfWriteOptions};
+use mupdf::pdf::PdfObject;
 use std::collections::HashSet;
 
 /// Tetos da leitura.
@@ -44,12 +44,13 @@ pub(crate) struct LayerDefault {
 }
 
 impl LayerDefault {
-    fn is_on(&self, id: i32) -> bool {
-        let has = |list: &Option<Vec<i32>>| list.as_ref().is_some_and(|l| l.contains(&id));
-        if self.base.as_deref() == Some("OFF") {
-            has(&self.on)
-        } else {
-            !has(&self.off)
+    /// Consulta rápida (conjuntos) do estado padrão de cada camada.
+    fn lookup(&self) -> DefaultLookup {
+        let set = |l: &Option<Vec<i32>>| l.iter().flatten().copied().collect();
+        DefaultLookup {
+            base_off: self.base.as_deref() == Some("OFF"),
+            on: set(&self.on),
+            off: set(&self.off),
         }
     }
 
@@ -66,6 +67,23 @@ impl LayerDefault {
         list.retain(|&x| x != id);
         if on == base_off {
             list.push(id);
+        }
+    }
+}
+
+/// O estado padrão em conjuntos (milhares de camadas sem custo quadrático).
+struct DefaultLookup {
+    base_off: bool,
+    on: HashSet<i32>,
+    off: HashSet<i32>,
+}
+
+impl DefaultLookup {
+    fn is_on(&self, id: i32) -> bool {
+        if self.base_off {
+            self.on.contains(&id)
+        } else {
+            !self.off.contains(&id)
         }
     }
 }
@@ -102,6 +120,15 @@ impl PdfDoc {
         ids(self.oc_properties().and_then(|p| get(&p, "OCGs"))).unwrap_or_default()
     }
 
+    /// Camadas travadas (`/D /Locked`).
+    fn locked(&self) -> HashSet<i32> {
+        self.oc_config()
+            .and_then(|d| ids(get(&d, "Locked")))
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    }
+
     /// Estado padrão lido do `/D` como está agora no documento.
     fn read_default(&self) -> LayerDefault {
         let Some(d) = self.oc_config() else {
@@ -121,7 +148,7 @@ impl PdfDoc {
             .unwrap_or_else(|| self.read_default())
     }
 
-    fn visible(&self, def: &LayerDefault, id: i32) -> bool {
+    fn visible(&self, def: &DefaultLookup, id: i32) -> bool {
         self.layer_view
             .get(&id)
             .copied()
@@ -154,7 +181,7 @@ impl PdfDoc {
 
     /// O `/D` com o que o olho mostra agora.
     fn effective_config(&self) -> LayerDefault {
-        let def = self.file_default();
+        let def = self.file_default().lookup();
         let (on, off) = self
             .ocgs()
             .into_iter()
@@ -168,11 +195,7 @@ impl PdfDoc {
 
     /// Reabre o documento dos próprios bytes (o MuPDF relê as camadas).
     fn reopen_current(&mut self) -> Result<()> {
-        let mut bytes = Vec::new();
-        let mut keep = PdfWriteOptions::default();
-        keep.set_encryption(Encryption::Keep);
-        keep.set_incremental(self.signed_on_disk);
-        self.inner.write_to_with_options(&mut bytes, keep)?;
+        let bytes = self.memory_bytes()?;
         self.inner = reopen(&bytes, self.password.as_deref())?;
         Ok(())
     }
@@ -204,20 +227,17 @@ impl PdfDoc {
         self.apply_layer_view()
     }
 
-    /// Antes de gravar (arquivo ou instantâneo): o `/D` do arquivo. Devolve se trocou (e então o
-    /// efetivo volta com `layer_view_after_write`).
-    pub(crate) fn layer_config_for_write(&self) -> Result<bool> {
-        match &self.layer_default {
-            Some(def) => {
-                self.write_layer_config(def)?;
-                Ok(true)
-            }
-            None => Ok(false),
-        }
-    }
-
-    pub(crate) fn layer_view_after_write(&self) -> Result<()> {
-        self.write_layer_config(&self.effective_config())
+    /// Grava com o `/D` das camadas do arquivo e depois volta ao do olho: o olho nunca chega a um
+    /// arquivo, a um instantâneo do desfazer ou a uma cópia (Comprimir, Assinar). A impressão
+    /// não passa por aqui: imprime o que se vê, como no Acrobat.
+    pub(crate) fn with_file_layers<T>(&self, write: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        let Some(def) = &self.layer_default else {
+            return write(self);
+        };
+        self.write_layer_config(def)?;
+        let result = write(self);
+        self.write_layer_config(&self.effective_config())?;
+        result
     }
 
     /// Árvore do painel Camadas (como o `/Order`; sem ele, a lista das camadas).
@@ -226,13 +246,8 @@ impl PdfDoc {
         if ocgs.is_empty() {
             return Vec::new();
         }
-        let def = self.file_default();
-        let locked: HashSet<i32> = self
-            .oc_config()
-            .and_then(|d| ids(get(&d, "Locked")))
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
+        let def = self.file_default().lookup();
+        let locked = self.locked();
         let all: HashSet<i32> = ocgs.iter().copied().collect();
         let node = |id: i32| -> Option<LayerNode> {
             let obj = self.inner.new_indirect(id, 0).ok()?;
@@ -263,11 +278,7 @@ impl PdfDoc {
         if !self.ocgs().contains(&id) {
             return Err(refused("camada não encontrada"));
         }
-        let locked = self
-            .oc_config()
-            .and_then(|d| ids(get(&d, "Locked")))
-            .is_some_and(|l| l.contains(&id));
-        if locked {
+        if self.locked().contains(&id) {
             return Err(refused("a camada está travada"));
         }
         self.layer_view.insert(id, on);

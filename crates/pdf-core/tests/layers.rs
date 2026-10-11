@@ -3,7 +3,9 @@ use pdf_core::{sample::pdf_from_objects, LayerNode, PdfDoc};
 /// Página com um retângulo vermelho na camada A (5), a camada B (6) dentro de A e escondida, e a
 /// camada C (7) num grupo "Grupo", travada.
 fn layered(dir: &tempfile::TempDir) -> (std::path::PathBuf, PdfDoc) {
-    let content = "/OC /a BDC 1 0 0 rg 100 100 200 200 re f EMC";
+    // comentários no fim: conteúdo sem compressão grande o bastante para Comprimir encolher
+    let padding = "% espaco\n".repeat(4000);
+    let content = format!("/OC /a BDC 1 0 0 rg 100 100 200 200 re f EMC\n{padding}");
     let objs = vec![
         "<</Type/Catalog/Pages 2 0 R/OCProperties<</OCGs[5 0 R 6 0 R 7 0 R]/D<</Order[5 0 R[6 0 R][(Grupo)7 0 R]]/OFF[6 0 R]/Locked[7 0 R]>>>>>>".to_string(),
         "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
@@ -193,4 +195,19 @@ fn an_order_that_points_to_itself_is_read_quickly() {
     let list = d.layers();
     assert_eq!(list.len(), 1);
     assert!(t.elapsed().as_secs() < 2, "{:?}", t.elapsed());
+}
+
+#[test]
+fn eye_state_never_reaches_a_compressed_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_p, mut d) = layered(&dir);
+    let a = id_of(&d, "A");
+    d.set_layer_view(a, false).unwrap();
+    let out = dir.path().join("comprimido.pdf");
+    d.compress_to(&out, pdf_core::CompressLevel::Low).unwrap();
+    let back = PdfDoc::open(&out, None).unwrap();
+    assert!(
+        red_shows(&back),
+        "a cópia comprimida guarda o estado inicial"
+    );
 }

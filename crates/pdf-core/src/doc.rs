@@ -886,15 +886,12 @@ impl PdfDoc {
     /// verdade; o histórico recomeça. Em erro, as edições continuam em memória (só o histórico se
     /// perde, porque as apagadas já saíram) e o documento segue com alterações a salvar.
     pub fn save(&mut self, dest: &Path) -> Result<()> {
-        // o olho das camadas não vai para o arquivo
-        self.layer_config_for_write()?;
         let result = self.purge_hidden().and_then(|()| self.write(dest));
         self.unsaved = result.is_err() && (self.unsaved || self.history.can_undo());
         self.history = History::default();
-        let result = result.and_then(|()| self.after_protection_saved());
-        // proteção nova: reabriu com a senha nova; em todo caso, a vista das camadas continua
-        let reapplied = self.reapply_layer_view();
-        result.and(reapplied)
+        result?;
+        // proteção nova: reabre com a senha nova (a gravação seguinte mantém a do arquivo)
+        self.after_protection_saved()
     }
 
     /// Arquivo → Reverter: também a proteção pedida e as fontes embutidas desde o último Salvar
@@ -926,13 +923,16 @@ impl PdfDoc {
             // documento assinado: só gravação incremental (como o Acrobat), senão a reescrita
             // mudaria os bytes assinados e quebraria as assinaturas
             opts.set_incremental(true);
-            let mut bytes = Vec::new();
-            self.inner.write_to_with_options(&mut bytes, opts)?;
+            let bytes = self.with_file_layers(|d| {
+                let mut bytes = Vec::new();
+                d.inner.write_to_with_options(&mut bytes, opts)?;
+                Ok(bytes)
+            })?;
             write_bytes_atomic(dest, &bytes)?;
             self.path = dest.to_path_buf();
             return Ok(());
         }
-        write_atomic(&self.inner, dest, opts)?;
+        self.with_file_layers(|d| write_atomic(&d.inner, dest, opts))?;
         self.path = dest.to_path_buf();
         Ok(())
     }
@@ -1253,21 +1253,21 @@ impl PdfDoc {
         }
     }
 
-    /// O documento em memória como está agora (com as apagadas pendentes), para desfazer.
-    pub(crate) fn snapshot(&self) -> Result<Snapshot> {
+    /// Bytes do documento em memória (criptografia mantida). Arquivo assinado: incremental, para
+    /// continuar começando pelos bytes assinados (restaurar e salvar depois não pode regravar o
+    /// arquivo).
+    pub(crate) fn memory_bytes(&self) -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
         let mut keep = PdfWriteOptions::default();
         keep.set_encryption(Encryption::Keep);
-        // arquivo assinado: o instantâneo é incremental, para continuar começando pelos bytes
-        // assinados (restaurar e salvar depois não pode regravar o arquivo)
         keep.set_incremental(self.signed_on_disk);
-        // o instantâneo guarda o /D das camadas do arquivo, não o do olho
-        let swapped = self.layer_config_for_write()?;
-        let written = self.inner.write_to_with_options(&mut bytes, keep);
-        if swapped {
-            self.layer_view_after_write()?;
-        }
-        written?;
+        self.inner.write_to_with_options(&mut bytes, keep)?;
+        Ok(bytes)
+    }
+
+    /// O documento em memória como está agora (com as apagadas pendentes), para desfazer.
+    pub(crate) fn snapshot(&self) -> Result<Snapshot> {
+        let bytes = self.with_file_layers(|d| d.memory_bytes())?;
         Ok(Snapshot {
             bytes,
             hidden: self.history.hidden.clone(),
@@ -1400,7 +1400,6 @@ impl PdfDoc {
             attachments,
             display_title: self.display_title(),
             labels: self.labels(),
-            destinations: self.destinations(),
             layers: self.layers(),
             fields: self.all_fields().unwrap_or_default(),
             form_notes: self.form_notes().unwrap_or_default(),

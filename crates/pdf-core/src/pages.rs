@@ -215,7 +215,10 @@ impl PdfDoc {
             self.history.hidden.clear();
             self.run_page_op(op)?;
             // os rótulos ficam como estavam (por índice), sem os que o MuPDF ajusta ou inventa
-            self.write_page_labels(labels)
+            if self.page_labels() != labels {
+                self.write_page_labels(labels)?;
+            }
+            Ok(())
         });
         match result {
             Ok(()) => {

@@ -543,8 +543,6 @@ pub struct DocSummary {
     pub display_title: Option<String>,
     /// Rótulo de cada página (vazio quando o documento não tem rótulos).
     pub labels: Vec<String>,
-    /// Destinos nomeados (painel Destinos).
-    pub destinations: Vec<crate::DestInfo>,
     /// Camadas (painel Camadas).
     pub layers: Vec<crate::LayerNode>,
     /// Campos de formulário de todas as páginas.

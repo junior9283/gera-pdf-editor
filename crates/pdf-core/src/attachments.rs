@@ -39,9 +39,6 @@ fn declared_size(stream: &PdfObject) -> usize {
 
 /// Nome único entre `taken`: "nota.txt", "nota (2).txt", "nota (3).txt"…
 fn unique_name(wanted: &str, taken: &[String]) -> String {
-    if !taken.iter().any(|t| t == wanted) {
-        return wanted.to_owned();
-    }
     let path = Path::new(wanted);
     let stem = path
         .file_stem()
@@ -50,9 +47,18 @@ fn unique_name(wanted: &str, taken: &[String]) -> String {
         .extension()
         .map(|e| format!(".{}", e.to_string_lossy()))
         .unwrap_or_default();
+    numbered(wanted, &stem, &ext, taken)
+}
+
+/// `wanted` se estiver livre; senão "stem (2)ext", "stem (3)ext"… (anexos e destinos).
+pub(crate) fn numbered(wanted: &str, stem: &str, ext: &str, taken: &[String]) -> String {
+    let free = |c: &str| !taken.iter().any(|t| t == c);
+    if free(wanted) {
+        return wanted.to_owned();
+    }
     (2..)
         .map(|n| format!("{stem} ({n}){ext}"))
-        .find(|c| !taken.iter().any(|t| t == c))
+        .find(|c| free(c))
         .unwrap_or_else(|| wanted.to_owned())
 }
 

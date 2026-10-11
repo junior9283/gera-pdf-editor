@@ -15,18 +15,14 @@ pub fn page_for_input(input: &str, labels: &[String], total: usize) -> Option<us
     (1..=total).contains(&n).then(|| n - 1)
 }
 
-/// Texto do campo e o que vem ao lado: com rótulos e números lógicos, "iii" e "(3 de 10)";
-/// senão, "3" e "/ 10".
-pub fn page_box_text(
-    labels: &[String],
-    page: usize,
-    total: usize,
-    logical: bool,
-) -> (String, String) {
-    match labels.get(page).filter(|_| logical) {
-        Some(label) => (label.clone(), format!("({} de {total})", page + 1)),
-        None => ((page + 1).to_string(), format!("/ {total}")),
-    }
+/// Texto do campo com números lógicos e o que vem ao lado: "iii" e "(3 de 10)" (sem rótulo
+/// para a página: o número).
+pub fn page_box_text(labels: &[String], page: usize, total: usize) -> (String, String) {
+    let label = labels
+        .get(page)
+        .cloned()
+        .unwrap_or_else(|| (page + 1).to_string());
+    (label, format!("({} de {total})", page + 1))
 }
 
 #[cfg(test)]
@@ -62,18 +58,15 @@ mod tests {
     }
 
     #[test]
-    fn box_text_with_and_without_labels() {
+    fn box_text_shows_the_label_and_the_position() {
         assert_eq!(
-            page_box_text(&labels(), 2, 6, true),
+            page_box_text(&labels(), 2, 6),
             ("iii".to_string(), "(3 de 6)".to_string())
         );
         assert_eq!(
-            page_box_text(&labels(), 2, 6, false),
-            ("3".to_string(), "/ 6".to_string())
-        );
-        assert_eq!(
-            page_box_text(&[], 2, 6, true),
-            ("3".to_string(), "/ 6".to_string())
+            page_box_text(&labels(), 9, 10).0,
+            "10",
+            "sem rótulo: o número"
         );
     }
 }

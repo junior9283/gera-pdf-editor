@@ -48,14 +48,17 @@ fn natural(a: &str, b: &str) -> Ordering {
     }
 }
 
-/// A lista na ordem escolhida (por página: as sem página no fim).
-pub fn sorted(list: &[DestInfo], sort: Sort) -> Vec<&DestInfo> {
-    let mut out: Vec<&DestInfo> = list.iter().collect();
+/// Índices da lista na ordem escolhida (por página: as sem página no fim).
+pub fn sorted(list: &[DestInfo], sort: Sort) -> Vec<usize> {
+    let mut out: Vec<usize> = (0..list.len()).collect();
+    let by_name = |a: &DestInfo, b: &DestInfo| natural(&a.name, &b.name);
     match sort {
-        Sort::Name => out.sort_by(|a, b| natural(&a.name, &b.name)),
-        Sort::Page => out.sort_by(|a, b| {
+        Sort::Name => out.sort_by(|&a, &b| by_name(&list[a], &list[b])),
+        Sort::Page => out.sort_by(|&a, &b| {
             let key = |d: &DestInfo| d.page.unwrap_or(i32::MAX);
-            key(a).cmp(&key(b)).then_with(|| natural(&a.name, &b.name))
+            key(&list[a])
+                .cmp(&key(&list[b]))
+                .then_with(|| by_name(&list[a], &list[b]))
         }),
     }
     out
@@ -83,11 +86,18 @@ pub enum DestAction {
 pub struct DestinationsPanel {
     pub sort: Sort,
     selected: Option<String>,
+    /// Ordem calculada (ordem, índices), refeita só quando a lista ou a ordem mudam.
+    order: Option<(Sort, Vec<usize>)>,
     /// Renomeando: (nome, texto).
     renaming: Option<(String, String)>,
 }
 
 impl DestinationsPanel {
+    /// A lista de destinos mudou: a ordem é refeita no próximo desenho.
+    pub fn invalidate(&mut self) {
+        self.order = None;
+    }
+
     /// Renomear o destino recém-criado (como no Acrobat, o nome vem selecionado para editar).
     pub fn rename(&mut self, name: String) {
         self.selected = Some(name.clone());
@@ -126,7 +136,18 @@ impl DestinationsPanel {
             ui.weak("Este documento não tem destinos.");
             return out;
         }
-        let shown = sorted(list, self.sort);
+        if self
+            .order
+            .as_ref()
+            .is_none_or(|(s, o)| *s != self.sort || o.len() != list.len())
+        {
+            self.order = Some((self.sort, sorted(list, self.sort)));
+        }
+        let shown: Vec<&DestInfo> = self
+            .order
+            .as_ref()
+            .map(|(_, o)| o.iter().filter_map(|&k| list.get(k)).collect())
+            .unwrap_or_default();
         let row_h = ui.spacing().interact_size.y;
         egui::ScrollArea::vertical().auto_shrink(false).show_rows(
             ui,
@@ -145,8 +166,7 @@ impl DestinationsPanel {
                             if esc {
                                 self.renaming = None;
                             } else if edit.lost_focus() || enter {
-                                let to = text.trim().to_owned();
-                                if !to.is_empty() && to != *name {
+                                if let Some(to) = crate::bookmarks::renamed(name, text) {
                                     self.selected = Some(to.clone());
                                     out.push(DestAction::Rename {
                                         name: name.clone(),
@@ -221,7 +241,7 @@ mod tests {
         let list = [d("cap10", Some(0)), d("cap2", Some(5)), d("Anexo", Some(1))];
         let names: Vec<_> = sorted(&list, Sort::Name)
             .iter()
-            .map(|x| x.name.clone())
+            .map(|&k| list[k].name.clone())
             .collect();
         assert_eq!(names, ["Anexo", "cap2", "cap10"]);
     }
@@ -231,7 +251,7 @@ mod tests {
         let list = [d("b", None), d("a", Some(3)), d("c", Some(1))];
         let names: Vec<_> = sorted(&list, Sort::Page)
             .iter()
-            .map(|x| x.name.clone())
+            .map(|&k| list[k].name.clone())
             .collect();
         assert_eq!(names, ["c", "a", "b"]);
     }

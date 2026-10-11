@@ -83,13 +83,15 @@ pub fn drop_op(nodes: &[OutlineNode], dragged: i32, target: i32, zone: Zone) -> 
     })
 }
 
-/// Renomear com Enter ou ao sair do campo: nada quando o nome não mudou ou ficou vazio.
-pub fn rename_op(id: i32, old: &str, typed: &str) -> Option<OutlineOp> {
+/// Nome novo ao renomear no lugar (Enter ou ao sair do campo): nada quando ficou vazio ou não
+/// mudou. Vale para marcadores e destinos.
+pub fn renamed(old: &str, typed: &str) -> Option<String> {
     let title = typed.trim();
-    (!title.is_empty() && title != old.trim()).then(|| OutlineOp::Rename {
-        id,
-        title: title.to_owned(),
-    })
+    (!title.is_empty() && title != old.trim()).then(|| title.to_owned())
+}
+
+pub fn rename_op(id: i32, old: &str, typed: &str) -> Option<OutlineOp> {
+    renamed(old, typed).map(|title| OutlineOp::Rename { id, title })
 }
 
 /// Os marcadores à mostra (os filhos de um recolhido ficam escondidos).
@@ -234,7 +236,7 @@ impl BookmarksPanel {
             Key::ArrowLeft,
             Key::ArrowRight,
             Key::Enter,
-            Key::Delete,
+            // Delete chega como o comando Excluir (DocTab::panel_delete)
             Key::F2,
         ];
         let pressed: Vec<Key> = ctx.input_mut(|i| {
