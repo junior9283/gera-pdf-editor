@@ -126,12 +126,10 @@ pub(crate) struct Snapshot {
 pub(crate) enum Step {
     Annot(Edit),
     Snapshot(Snapshot),
-    /// Valor de um campo de formulário (o que volta ao desfazer/refazer).
-    Field {
-        page: i32,
-        id: i32,
-        value: String,
-    },
+    /// Valores de campos de formulário (o que volta ao desfazer/refazer): (página, id, valor), na
+    /// ordem em que foram gravados; voltam na ordem inversa. Um preenchimento e os cálculos que ele
+    /// provoca são um passo só.
+    Fields(Vec<(i32, i32, String)>),
 }
 
 /// Memória máxima dos instantâneos; acima disso os passos mais antigos saem.
@@ -166,7 +164,7 @@ impl History {
         self.redo.clear();
         let size = |s: &Step| match s {
             Step::Snapshot(snap) => snap.bytes.len(),
-            Step::Annot(_) | Step::Field { .. } => 0,
+            Step::Annot(_) | Step::Fields(_) => 0,
         };
         let mut dropped = false;
         while self.undo.iter().map(size).sum::<usize>() > budget {

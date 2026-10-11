@@ -286,6 +286,10 @@ mod tests {
             readonly: false,
             required: false,
             tooltip: String::new(),
+            display: String::new(),
+            format: Default::default(),
+            validate: Default::default(),
+            calc: Default::default(),
         };
         let fields = [field(1, FieldKind::Signature)];
         assert_eq!(empty_sig_field(&fields, &[], 0, (10.0, 10.0)), Some(1));

@@ -1602,18 +1602,21 @@ impl PdfDoc {
                 self.restore(snap)?;
                 Ok((Step::Snapshot(now), Changed::Document))
             }),
-            Step::Field { page, id, value } => {
-                let (page, id) = (*page, *id);
-                self.write_field(page, id, value).map(|old| {
-                    (
-                        Step::Field {
-                            page,
-                            id,
-                            value: old,
-                        },
-                        Changed::Fields,
-                    )
-                })
+            Step::Fields(list) => {
+                // de trás para a frente; o contrário, aplicado também de trás para a frente,
+                // refaz na ordem original
+                let mut inverse = Vec::new();
+                let mut result = Ok(());
+                for (page, id, value) in list.iter().rev() {
+                    match self.write_field(*page, *id, value, true) {
+                        Ok(old) => inverse.push((*page, *id, old)),
+                        Err(e) => {
+                            result = Err(e);
+                            break;
+                        }
+                    }
+                }
+                result.map(|()| (Step::Fields(inverse), Changed::Fields))
             }
         };
         let (from, to) = if back {

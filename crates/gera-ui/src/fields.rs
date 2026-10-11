@@ -514,6 +514,10 @@ mod tests {
             readonly: false,
             required: false,
             tooltip: String::new(),
+            display: String::new(),
+            format: Default::default(),
+            validate: Default::default(),
+            calc: Default::default(),
         }
     }
 

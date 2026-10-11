@@ -956,8 +956,18 @@ pub fn parse_calc(js: &str) -> FieldCalc {
             };
             !t.is_empty() && e.sum().is_some() && e.at == t.len()
         });
-        return if ok {
-            FieldCalc::Sfn(expr.to_string())
+        // só vale se o código depois do comentário é a tradução que o Acrobat grava para a
+        // expressão: senão o comentário poderia dizer uma conta e o código fazer outra
+        let squash = |s: &str| -> String {
+            s.chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+                .trim_end_matches(';')
+                .to_string()
+        };
+        let sfn = FieldCalc::Sfn(expr.to_string());
+        return if ok && squash(js_t) == squash(&calc_script(&sfn)) {
+            sfn
         } else {
             FieldCalc::Custom
         };
@@ -1276,6 +1286,21 @@ mod tests {
         assert_eq!(
             parse_calc("this.getField('a').value = 1"),
             FieldCalc::Custom
+        );
+        // o comentário BVCALC diz uma coisa e o código faz outra: não confiar no comentário
+        assert_eq!(
+            parse_calc("/** BVCALC a + b EVCALC **/ event.value = 999;"),
+            FieldCalc::Custom
+        );
+        let sfn = calc_script(&FieldCalc::Sfn("a + b".into()));
+        assert_eq!(
+            parse_calc(&format!("{sfn} app.alert(1);")),
+            FieldCalc::Custom
+        );
+        // o mesmo texto com outros espaços continua sendo a notação simplificada
+        assert_eq!(
+            parse_calc(&sfn.replace(" = ", "=")),
+            FieldCalc::Sfn("a + b".into())
         );
     }
 }

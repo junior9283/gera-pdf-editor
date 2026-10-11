@@ -284,6 +284,10 @@ mod tests {
             readonly: false,
             required: false,
             tooltip: String::new(),
+            display: String::new(),
+            format: Default::default(),
+            validate: Default::default(),
+            calc: Default::default(),
         };
         st.on_fields(&[field(1, "Texto1"), field(7, "Texto2")]);
         assert_eq!(st.selected, Some((0, 7)));
