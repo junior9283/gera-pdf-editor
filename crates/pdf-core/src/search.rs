@@ -12,7 +12,15 @@ pub(crate) fn regex_for(needle: &str, opts: &SearchOptions) -> Option<Regex> {
     }
     let mut pattern = regex::escape(needle);
     if opts.whole_words {
-        pattern = format!(r"\b{pattern}\b");
+        // a fronteira de palavra só nas pontas que são letra ou algarismo: "(x)" e "C++" são
+        // palavras inteiras, e "\b(" exigiria uma letra antes do parêntese
+        let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+        let (start, end) = (word(needle.chars().next()), word(needle.chars().last()));
+        pattern = format!(
+            "{}{pattern}{}",
+            if start { r"\b" } else { "" },
+            if end { r"\b" } else { "" }
+        );
     }
     if !opts.match_case {
         pattern = format!("(?i){pattern}");

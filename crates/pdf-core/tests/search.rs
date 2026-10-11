@@ -1,4 +1,6 @@
-use pdf_core::{sample::pdf_from_objects, PdfDoc, SearchOptions};
+mod common;
+use common::write_sample;
+use pdf_core::{sample::pdf_from_objects, PdfDoc, PdfRect, SearchOptions};
 use std::path::{Path, PathBuf};
 
 /// Duas páginas: a 1 com uma linha de texto e uma nota; um marcador para a página 2.
@@ -104,4 +106,56 @@ fn bookmarks_are_found_when_asked() {
     let hits = d.search_bookmarks("SOBRE", &o);
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].0, 1, "a página do marcador");
+}
+
+// da main (busca básica do MuPDF)
+fn sample_doc() -> (tempfile::TempDir, PdfDoc) {
+    let dir = tempfile::tempdir().unwrap();
+    let doc = PdfDoc::open(&write_sample(&dir, "a.pdf", 2, 0), None).unwrap();
+    (dir, doc)
+}
+
+#[test]
+fn finds_text_with_a_sensible_rectangle() {
+    let (_d, doc) = sample_doc();
+    let hits = doc.search(0, "Hello").unwrap();
+    assert_eq!(hits.len(), 1);
+    let r = hits[0];
+    assert!((r.x0 - 72.0 - 70.0).abs() < 40.0, "x0 = {}", r.x0); // depois de "Page 1 "
+    assert!(r.y0 > 50.0 && r.y1 < 110.0, "y = {}..{}", r.y0, r.y1); // topo da página (origem no canto superior)
+    assert!(r.x1 > r.x0 && r.y1 > r.y0);
+}
+
+#[test]
+fn degenerate_needles_return_nothing_without_panicking() {
+    let (_d, doc) = sample_doc();
+    assert!(doc.search(0, "").unwrap().is_empty());
+    assert!(doc.search(0, "a\0b").unwrap().is_empty());
+    assert!(doc.search(0, "inexistente").unwrap().is_empty());
+    assert!(doc.search(0, &"x".repeat(100_000)).unwrap().is_empty());
+}
+
+#[test]
+fn words_in_rect_selects_by_intersection() {
+    let (_d, doc) = sample_doc();
+    let all = doc
+        .words_in_rect(0, PdfRect::new(0.0, 0.0, 612.0, 792.0))
+        .unwrap();
+    let texts: Vec<_> = all.iter().map(|w| w.text.as_str()).collect();
+    assert_eq!(texts, ["Page", "1", "Hello", "Gera"]);
+    let none = doc
+        .words_in_rect(0, PdfRect::new(400.0, 600.0, 600.0, 780.0))
+        .unwrap();
+    assert!(none.is_empty());
+}
+
+#[test]
+fn whole_words_work_with_punctuation_at_the_ends() {
+    let o = SearchOptions {
+        whole_words: true,
+        ..Default::default()
+    };
+    // "(x)" no texto: as pontas não são letra, e o Acrobat acha
+    assert_eq!(count(o, "(x)"), 1);
+    assert_eq!(count(o, "x"), 1, "o de (x), não o de axb");
 }
