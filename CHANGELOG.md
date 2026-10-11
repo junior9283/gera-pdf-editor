@@ -6,7 +6,43 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 ## [Não lançado]
 
-- v6b — ferramentas Mão e Zoom, Preferências, Recortar/Colar, busca com opções.
+- v6c — Propriedades editáveis e painéis laterais (miniaturas e marcadores editáveis, Anexos, Camadas).
+
+## [0.14.0] — 2026-10-11 · Ferramentas de tela, preferências, menus e busca (v6b)
+
+### Adicionado
+- **Mão** (arrastar move a página; `Espaço` segurado em qualquer ferramenta) e **Zoom com marca**
+  (arrastar um retângulo amplia até ele; clique amplia um nível, `Ctrl` + clique reduz), na barra.
+- **Preferências** (`Ctrl+K`), em categorias:
+  - **Geral:** aceleradores de tecla única (`V`, `H`, `Z`, `S`, `U`/`Shift+U`, `D`, `X`, `K`).
+  - **Exibição de página:** layout e zoom padrão.
+  - **Documentos:** restaurar a última vista ao reabrir e número de recentes.
+  - **Identidade**, **Segurança** (sites lembrados no aviso de links) e **Aparência**.
+- **Recortar, Copiar e Colar** comentários (`Ctrl+X`/`C`/`V`), com uma etapa só do desfazer.
+  - Colar texto cria uma caixa de texto.
+  - Editar → Colar com uma imagem cria um carimbo.
+  - **Desmarcar tudo** (`Ctrl+Shift+A`).
+- **Arquivo:** Reverter (pergunta antes), Criar PDF, Exportar PDF e Proteger PDF.
+- **Localizar:**
+  - opções Somente palavras inteiras, Diferenciar maiúsculas e minúsculas, Incluir marcadores e
+    Incluir comentários;
+  - `F3`/`Ctrl+G` e `Shift+F3`/`Ctrl+Shift+G`;
+  - `Enter` no campo vai ao próximo.
+- **Menu de contexto da página** (botão direito): ferramentas, navegação, girar, imprimir, localizar
+  e propriedades, com os atalhos.
+- **Ajuda** (`F1`).
+
+### Corrigido
+- Arrastar o número da página não enche mais o histórico de vistas.
+- Esc fecha primeiro as janelas abertas.
+- Na tela cheia, a aba que vem para a frente também é apresentada.
+- A pergunta de tela cheia pertence à aba que a fez.
+
+### Segurança
+- Copiar um comentário respeita a proibição de copiar.
+- A cópia colada não compartilha objetos com o original e tem teto de objetos.
+- Reverter descarta a senha pedida e ainda não salva.
+- A imagem colada é reduzida e gravada numa pasta privada.
 
 ## [0.13.0] — 2026-10-10 · Navegar e exibir (v6a)
 
