@@ -171,3 +171,26 @@ fn document_without_layers_lists_nothing() {
     std::fs::write(&path, pdf_from_objects(&objs)).unwrap();
     assert!(PdfDoc::open(&path, None).unwrap().layers().is_empty());
 }
+
+#[test]
+fn an_order_that_points_to_itself_is_read_quickly() {
+    let dir = tempfile::tempdir().unwrap();
+    let refs = "8 0 R ".repeat(100);
+    let objs = vec![
+        "<</Type/Catalog/Pages 2 0 R/OCProperties<</OCGs[5 0 R]/D<</Order 8 0 R>>>>>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 400 400]>>".to_string(),
+        "<</Length 0>>\nstream\n\nendstream".to_string(),
+        "<</Type/OCG/Name(A)>>".to_string(),
+        "<<>>".to_string(),
+        "<<>>".to_string(),
+        format!("[5 0 R {refs}]"),
+    ];
+    let path = dir.path().join("laco.pdf");
+    std::fs::write(&path, pdf_from_objects(&objs)).unwrap();
+    let d = PdfDoc::open(&path, None).unwrap();
+    let t = std::time::Instant::now();
+    let list = d.layers();
+    assert_eq!(list.len(), 1);
+    assert!(t.elapsed().as_secs() < 2, "{:?}", t.elapsed());
+}

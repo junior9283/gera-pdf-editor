@@ -249,8 +249,13 @@ impl PdfDoc {
         let Some(order) = order.filter(|o| o.is_array().unwrap_or(false)) else {
             return ocgs.into_iter().filter_map(node).collect();
         };
-        let mut seen = HashSet::new();
-        read_order(&order, 0, &all, &mut seen, &node)
+        let mut reading = OrderReading {
+            all: &all,
+            layers: HashSet::new(),
+            lists: HashSet::new(),
+            budget: 4 * MAX_LAYERS,
+        };
+        read_order(&order, 0, &mut reading, &node)
     }
 
     /// Olho de uma camada (só a vista).
@@ -301,21 +306,38 @@ impl PdfDoc {
     }
 }
 
+/// Estado da leitura do `/Order`: cada camada e cada lista indireta uma vez, e um teto de itens
+/// no total (listas que apontam para si mesmas não explodem).
+struct OrderReading<'a> {
+    all: &'a HashSet<i32>,
+    layers: HashSet<i32>,
+    lists: HashSet<i32>,
+    budget: usize,
+}
+
 /// Itens do `/Order`: camada; lista logo depois de uma camada = filhos dela; lista que começa com
 /// texto = grupo com rótulo. Cada camada aparece uma vez.
 fn read_order(
     list: &PdfObject,
     depth: usize,
-    all: &HashSet<i32>,
-    seen: &mut HashSet<i32>,
+    r: &mut OrderReading,
     node: &dyn Fn(i32) -> Option<LayerNode>,
 ) -> Vec<LayerNode> {
     let mut out: Vec<LayerNode> = Vec::new();
     if depth > MAX_ORDER_DEPTH {
         return out;
     }
+    if let Ok(id) = list.as_indirect() {
+        if id != 0 && !r.lists.insert(id) {
+            return out;
+        }
+    }
     let len = list.len().unwrap_or(0).min(MAX_LAYERS) as i32;
     for k in 0..len {
+        if r.budget == 0 {
+            break;
+        }
+        r.budget -= 1;
         let Ok(Some(item)) = list.get_array(k) else {
             continue;
         };
@@ -326,21 +348,17 @@ fn read_order(
                 .flatten()
                 .filter(|f| f.is_string().unwrap_or(false))
                 .and_then(|f| f.as_string().ok());
-            if let Some(text) = label {
-                // o rótulo (texto) é pulado na leitura dos itens; os demais são o grupo
-                let kids = read_order(&item, depth + 1, all, seen, node);
-                out.push(LayerNode::Label { text, kids });
-                continue;
-            }
-            let kids = read_order(&item, depth + 1, all, seen, node);
-            match out.last_mut() {
-                Some(LayerNode::Layer { kids: k, .. }) => k.extend(kids),
-                _ => out.extend(kids),
+            // o rótulo (texto) é pulado na leitura dos itens; os demais são o grupo
+            let kids = read_order(&item, depth + 1, r, node);
+            match (label, out.last_mut()) {
+                (Some(text), _) => out.push(LayerNode::Label { text, kids }),
+                (None, Some(LayerNode::Layer { kids: k, .. })) => k.extend(kids),
+                (None, _) => out.extend(kids),
             }
             continue;
         }
         let Ok(id) = item.as_indirect() else { continue };
-        if all.contains(&id) && seen.insert(id) {
+        if r.all.contains(&id) && r.layers.insert(id) {
             out.extend(node(id));
         }
     }
