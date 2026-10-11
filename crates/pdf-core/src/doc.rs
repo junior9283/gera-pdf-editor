@@ -825,13 +825,16 @@ impl PdfDoc {
     }
 
     /// Anotações e links de todas as páginas, numa passada (cada página é carregada uma vez).
-    /// Uma página ilegível perde só os próprios links.
+    /// Uma página ilegível perde só as próprias anotações e links.
     fn annotations_and_links(&self) -> Result<(Vec<AnnotInfo>, Vec<crate::LinkInfo>)> {
         let (mut annots, mut links) = (Vec::new(), Vec::new());
         let count = self.page_count()?;
         for p in 0..count {
-            let mut page_ref = self.inner.load_pdf_page(p)?;
-            annots.extend(self.annotations_in(&mut page_ref, p)?);
+            // página ilegível: perde só o que é dela
+            let Ok(mut page_ref) = self.inner.load_pdf_page(p) else {
+                continue;
+            };
+            annots.extend(self.annotations_in(&mut page_ref, p).unwrap_or_default());
             links.extend(self.links_in(&page_ref, p, count).unwrap_or_default());
         }
         Ok((annots, links))
@@ -1262,10 +1265,7 @@ impl PdfDoc {
         let sizes = (0..self.page_count()?)
             .map(|p| self.page_size(p))
             .collect::<Result<Vec<_>>>()?;
-        let (annots, links) = match self.annotations_and_links() {
-            Ok(both) => both,
-            Err(_) => (self.all_annotations().unwrap_or_default(), Vec::new()),
-        };
+        let (annots, links) = self.annotations_and_links().unwrap_or_default();
         Ok(DocSummary {
             path: self.path.clone(),
             sizes,

@@ -2574,6 +2574,30 @@ fn arrow_pressed(ctx: &egui::Context) -> Option<((i8, i8), bool)> {
     })
 }
 
+/// Com Selecionar, sobre um link sem comentário por cima: cursor de mão e dica com o destino.
+/// Devolve o alvo quando o link é clicado (sem arrastar).
+fn link_gesture(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    links: &[pdf_core::LinkInfo],
+    annots: &[AnnotInfo],
+    page: i32,
+    map: &PageMap,
+) -> Option<pdf_core::LinkTarget> {
+    let pt = map.to_page(response.hover_pos()?.into());
+    // o link primeiro: quase sempre não há, e é a busca mais barata
+    let link = crate::links::link_at(links, page, pt)?;
+    if crate::edit::hit_at(annots, page, pt, map).is_some() {
+        return None;
+    }
+    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    let clicked = response.clicked();
+    response
+        .clone()
+        .on_hover_text_at_pointer(crate::links::hint(&link.target));
+    clicked.then(|| link.target.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2759,28 +2783,4 @@ mod tests {
         let ids: Vec<_> = all.iter().map(|x| x.id).collect();
         assert_eq!(ids, [1, 3, 5, 4]);
     }
-}
-
-/// Com Selecionar, sobre um link sem comentário por cima: cursor de mão e dica com o destino.
-/// Devolve o alvo quando o link é clicado (sem arrastar).
-fn link_gesture(
-    ui: &egui::Ui,
-    response: &egui::Response,
-    links: &[pdf_core::LinkInfo],
-    annots: &[AnnotInfo],
-    page: i32,
-    map: &PageMap,
-) -> Option<pdf_core::LinkTarget> {
-    let pt = map.to_page(response.hover_pos()?.into());
-    // o link primeiro: quase sempre não há, e é a busca mais barata
-    let link = crate::links::link_at(links, page, pt)?;
-    if crate::edit::hit_at(annots, page, pt, map).is_some() {
-        return None;
-    }
-    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    let clicked = response.clicked();
-    response
-        .clone()
-        .on_hover_text_at_pointer(crate::links::hint(&link.target));
-    clicked.then(|| link.target.clone())
 }

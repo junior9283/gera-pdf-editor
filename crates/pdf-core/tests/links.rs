@@ -276,3 +276,23 @@ fn corrupt_annots_do_not_break_opening() {
         assert!(s.links.is_empty(), "{annots}");
     }
 }
+
+#[test]
+fn an_unreadable_page_loses_only_its_own_links() {
+    let dir = tempfile::tempdir().unwrap();
+    let objs = vec![
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R 5 0 R]/Count 2>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[4 0 R]>>".to_string(),
+        "<</Type/Annot/Subtype/Link/Rect[10 10 100 30]/A<</S/URI/URI(https://a.b)>>>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox 9/Annots[4 0 R]/Contents 77 0 R/Resources 3>>"
+            .to_string(),
+    ];
+    let path = raw_pdf(dir.path(), "q.pdf", &objs);
+    let doc = PdfDoc::open(&path, None).unwrap();
+    let s = doc.summary().unwrap();
+    assert!(
+        s.links.iter().any(|l| l.page == 0),
+        "a página boa mantém o link"
+    );
+}

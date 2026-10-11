@@ -27,12 +27,38 @@ fn shortened(text: &str, max: usize) -> String {
     out
 }
 
+/// Texto vindo do PDF pronto para a tela: controles, quebras e marcas de direção (que invertem ou
+/// escondem partes do endereço) viram "�".
+fn safe_display(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            let bidi = matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}');
+            if c.is_control() || bidi {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// Linha em destaque no aviso: o site para onde o endereço vai, ou um alerta quando o endereço é
+/// ambíguo (o navegador poderia ir a outro site que o texto sugere).
+fn site_line(url: &str) -> Option<String> {
+    Some(match link_policy::site_key(url) {
+        Some(site) => format!("Site: {site}"),
+        None => "Endereço fora do padrão: o destino real pode ser outro site. Só permita se \
+                 conferir com cuidado."
+            .into(),
+    })
+}
+
 /// Dica mostrada sobre o link.
 pub fn hint(target: &LinkTarget) -> String {
     match target {
         LinkTarget::Page { page, .. } => format!("Página {}", page + 1),
-        LinkTarget::Uri(url) => shortened(url, HINT_CHARS),
-        LinkTarget::File { path, .. } => app_state::tabs::tab_title(path, 80),
+        LinkTarget::Uri(url) => safe_display(&shortened(url, HINT_CHARS)),
+        LinkTarget::File { path, .. } => safe_display(&app_state::tabs::tab_title(path, 80)),
         LinkTarget::Blocked(_) => "Link bloqueado".into(),
     }
 }
@@ -109,17 +135,26 @@ impl LinkWarning {
                     // endereço ambíguo (sem site reconhecível): nada a lembrar, o aviso volta sempre
                     LinkTarget::Uri(url) => (
                         "se conectar a:",
-                        shortened(url, 2 * HINT_CHARS),
+                        safe_display(&shortened(url, 2 * HINT_CHARS)),
                         link_policy::site_key(url).is_some(),
                     ),
                     LinkTarget::File { path, .. } => {
                         let path = path.display().to_string();
-                        ("abrir o arquivo:", shortened(&path, 2 * HINT_CHARS), false)
+                        (
+                            "abrir o arquivo:",
+                            safe_display(&shortened(&path, 2 * HINT_CHARS)),
+                            false,
+                        )
                     }
                     _ => return,
                 };
                 ui.label(format!("O documento está tentando {what}"));
                 ui.add(egui::Label::new(egui::RichText::new(detail).monospace()).wrap());
+                if let LinkTarget::Uri(url) = &self.target {
+                    if let Some(line) = site_line(url) {
+                        ui.label(egui::RichText::new(line).strong());
+                    }
+                }
                 ui.add_space(4.0);
                 ui.label(
                     "Se você confia neste destino, escolha Permitir. Se não confia, escolha \
@@ -197,6 +232,28 @@ mod tests {
         assert!(shown.chars().count() <= HINT_CHARS + 1, "{}", shown.len());
         assert!(shown.starts_with("https://example.com/") && shown.ends_with('…'));
         assert_eq!(hint(&LinkTarget::Uri("https://a.b".into())), "https://a.b");
+    }
+
+    #[test]
+    fn the_warning_shows_the_real_site_and_no_invisible_tricks() {
+        // caracteres de direção invertem o texto na tela ("moc.live" parece "evil.com"); controle
+        // e quebras escondem o resto
+        let shown = safe_display("https://ex.com/\u{202E}fdp.exe\n\u{200F}x");
+        assert!(
+            !shown
+                .chars()
+                .any(|c| matches!(c, '\u{202E}' | '\u{200F}' | '\n')),
+            "{shown:?}"
+        );
+        assert_eq!(
+            site_line("https://Good.com/a").as_deref(),
+            Some("Site: https://good.com")
+        );
+        // ambíguo: não há site confiável para mostrar, então avisa
+        assert!(site_line("https://good.com@evil.com/")
+            .unwrap()
+            .contains("fora do padrão"));
+        assert_eq!(site_line("mailto:a@b.c").as_deref(), Some("Site: mailto:"));
     }
 
     #[test]

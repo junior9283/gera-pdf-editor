@@ -22,6 +22,13 @@ const CACHE_BUDGET_BYTES: usize = 96 * 1024 * 1024;
 /// os visíveis nunca se expulsarem, com folga para a borda entre duas páginas. Só é usado em zoom
 /// acima do teto da página inteira.
 const TILE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+// os ladrilhos de um quadro cabem no cache (senão se expulsam e o worker renderiza sem parar), e o
+// teto cobre uma tela 4K inteira (9 × 6 ladrilhos de 512 px)
+const _: () = assert!(
+    app_state::tiles::MAX_TILES * (pdf_core::TILE * pdf_core::TILE * 4) as usize
+        <= TILE_BUDGET_BYTES
+);
+const _: () = assert!(app_state::tiles::MAX_TILES >= 9 * 6);
 
 /// (página, escala quantizada, invertido, rotação, coluna, linha)
 pub type TileKey = (i32, u32, bool, Rotation, u32, u32);
@@ -606,14 +613,6 @@ mod tests {
         // a 90°, o y do PDF vira x na tela: o ponto (30, 50) fica 30pt abaixo do topo
         let m = v.page_map(0, (0.0, 0.0));
         assert_eq!(m.to_screen((30.0, 50.0)), (150.0, 30.0));
-    }
-
-    #[test]
-    fn every_tile_of_a_frame_fits_in_the_tile_cache() {
-        // senão os ladrilhos visíveis se expulsam e o worker renderiza sem parar (tela 4K: 9 × 6)
-        let tile_bytes = (pdf_core::TILE * pdf_core::TILE * 4) as usize;
-        assert!(app_state::tiles::MAX_TILES * tile_bytes <= TILE_BUDGET_BYTES);
-        assert!(app_state::tiles::MAX_TILES >= 9 * 6, "uma tela 4K inteira");
     }
 
     #[test]
