@@ -49,6 +49,8 @@ pub enum Request {
     RemoveAttachment {
         name: String,
     },
+    /// Grava os rótulos de página (diálogo Rótulos de página).
+    PageLabels(Vec<crate::PageLabelRange>),
     DescribeAttachment {
         name: String,
         text: String,
@@ -488,6 +490,10 @@ impl State {
             Request::AddAttachment { path } => self.edit(send, |d| {
                 d.add_attachment(&path, "")?;
                 Ok(Changed::Attachments)
+            }),
+            Request::PageLabels(ranges) => self.edit(send, |d| {
+                d.set_page_labels(ranges)?;
+                Ok(Changed::Document)
             }),
             Request::RemoveAttachment { name } => self.edit(send, |d| {
                 d.remove_attachment(&name)?;

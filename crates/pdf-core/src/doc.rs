@@ -1384,6 +1384,7 @@ impl PdfDoc {
             initial_view: self.initial_view(),
             attachments,
             display_title: self.display_title(),
+            labels: self.labels(),
             fields: self.all_fields().unwrap_or_default(),
             form_notes: self.form_notes().unwrap_or_default(),
             security: self.security()?,

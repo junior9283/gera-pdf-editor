@@ -18,6 +18,7 @@ mod ocr;
 mod outline;
 mod owner_password;
 mod page_content;
+mod page_labels;
 mod pages;
 mod pagination;
 mod pdf_obj;
@@ -48,6 +49,7 @@ pub use edit_text::{PageTextBlock, MIN_TEXT_WIDTH, NEW_TEXT_SIZE, TEXT_MARGIN};
 pub use error::{PdfError, Result};
 pub use forms::{FieldInfo, FieldKind, FormNotes};
 pub use ocr::{tessdata_dir, OcrLanguage, OcrReport};
+pub use page_labels::{apply_labels, format_label, label_list, PageLabelRange, PageLabelStyle};
 pub use pagination::{
     parse_ranges, Align, Bates, DateFormat, HeaderFooter, PageSet, Pagination, PaginationConfig,
     StdFont, TextLook, Watermark, WatermarkSource,
