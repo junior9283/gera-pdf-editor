@@ -17,6 +17,8 @@
 - **similar** (Armin Ronacher, diferenças de texto do Comparar arquivos) — Apache-2.0.
 - **arboard** (1Password e contribuidores, área de transferência ao colar imagens) — MIT ou Apache-2.0.
 - **png** (image-rs, imagem colada gravada em PNG) — MIT ou Apache-2.0.
+- **flate2** (Alex Crichton e contribuidores, leitura de anexos com teto de tamanho) — MIT ou
+  Apache-2.0.
 - **serde / serde_json** (Erick Tryzelaar, David Tolnay) — MIT ou Apache-2.0.
 
 As demais dependências transitivas e suas licenças são listadas por `cargo tree` e `Cargo.lock`.

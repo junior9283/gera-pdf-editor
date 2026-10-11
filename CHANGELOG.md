@@ -6,7 +6,38 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 ## [Não lançado]
 
-- v6c — Propriedades editáveis e painéis laterais (miniaturas e marcadores editáveis, Anexos, Camadas).
+- v6c2 — miniaturas com menu e arraste, Camadas, Destinos, rótulos de página.
+
+## [0.15.0] — 2026-10-11 · Propriedades, Marcadores e Anexos (v6c)
+
+### Adicionado
+- **Propriedades do documento** (`Ctrl+D`) editáveis, em abas:
+  - **Descrição:** título, autor, assunto e palavras-chave, com o XMP acompanhando (a
+    identificação PDF/A e PDF/UA continua).
+  - **Segurança** e **Fontes** (incorporada, subconjunto, tipo).
+  - **Visualização inicial:** painel, layout, ampliação, página e opções de janela, como
+    "Mostrar o título do documento" (a aba passa a mostrar o título).
+  - **Personalizado** e **Avançado** (idioma e preferências de impressão).
+- **Painel Marcadores** editável:
+  - novo marcador com `Ctrl+B` (o nome vem do texto selecionado);
+  - renomear no lugar, excluir e arrastar para reordenar ou aninhar;
+  - estilo (cor, negrito e itálico), definir destino na vista atual e Expandir/Recolher tudo;
+  - setas, `Enter`, `Delete` e `F2`.
+- **Painel Anexos:**
+  - abrir anexos PDF numa aba própria, depois de um aviso de segurança;
+  - salvar qualquer anexo, adicionar, excluir e descrever;
+  - lista também os anexos de comentários.
+- **Ícone novo** do app (janela, AppImage e tema do sistema).
+
+### Segurança
+- Anexos são lidos com teto real de tamanho, sem descomprimir uma "bomba" de compressão.
+- Só anexos PDF abrem no app. Os demais só podem ser salvos, com o nome saneado.
+- A cópia de um anexo aberto vai para uma pasta privada (só o usuário acessa).
+- Árvores de marcadores enormes ou com ciclos são lidas com limites e gravadas consertadas, sem perder
+  o que passa dos limites.
+
+### Mudado
+- A meta de tamanho do binário passou a < 50 MB.
 
 ## [0.14.0] — 2026-10-11 · Ferramentas de tela, preferências, menus e busca (v6b)
 
