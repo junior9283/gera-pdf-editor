@@ -148,6 +148,7 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
                 item(ui, &mut out, doc(DocCommand::ViewBack), has_doc);
                 item(ui, &mut out, doc(DocCommand::ViewForward), has_doc);
             });
+            item(ui, &mut out, Command::ReadMode, has_doc);
             item(ui, &mut out, Command::FullScreen, true);
             ui.menu_button("Painéis", |ui| {
                 for p in LeftPanel::ALL {

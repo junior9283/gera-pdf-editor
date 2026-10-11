@@ -17,6 +17,8 @@ pub enum Command {
     TogglePanel(app_state::prefs::LeftPanel),
     ToggleTools,
     FullScreen,
+    /// Modo leitura: esconde barras e painéis (Ctrl+H).
+    ReadMode,
     NextTab,
     PrevTab,
     ActivateTab(usize),
@@ -45,6 +47,7 @@ impl Command {
             Command::TogglePanel(p) => return p.label().into(),
             Command::ToggleTools => "Ferramentas",
             Command::FullScreen => "Tela cheia",
+            Command::ReadMode => "Modo leitura",
             Command::NextTab => "Próxima aba",
             Command::PrevTab => "Aba anterior",
             Command::ActivateTab(_) => "Ir para a aba",
@@ -151,6 +154,8 @@ pub fn shortcuts() -> Vec<(KeyboardShortcut, Command)> {
         (cmd(Key::Num2), doc(DocCommand::Fit(Fit::Width))),
         (cmd(Key::Num3), doc(DocCommand::Fit(Fit::Visible))),
         (cmd(Key::Y), doc(DocCommand::ZoomTo)),
+        (cmd(Key::L), Command::FullScreen),
+        (cmd(Key::H), Command::ReadMode),
         (
             KeyboardShortcut::new(Modifiers::NONE, Key::F11),
             Command::FullScreen,
@@ -355,6 +360,7 @@ mod tests {
         assert_eq!(text(Command::Doc(DocCommand::ZoomIn)), "Ctrl+=");
         assert_eq!(text(Command::Doc(DocCommand::ZoomOut)), "Ctrl+-");
         assert_eq!(text(Command::SaveAs), "Ctrl+Shift+S");
-        assert_eq!(text(Command::FullScreen), "F11");
+        assert_eq!(text(Command::FullScreen), "Ctrl+L");
+        assert_eq!(text(Command::ReadMode), "Ctrl+H");
     }
 }

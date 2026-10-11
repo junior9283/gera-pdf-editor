@@ -86,6 +86,8 @@ pub enum DocEvent {
     NeedSaveAs,
     /// Clique num link para fora do documento (endereço, outro arquivo ou bloqueado).
     OpenLink(pdf_core::LinkTarget),
+    /// O arquivo pede para abrir em tela cheia (`/PageMode /FullScreen`).
+    FullScreen,
 }
 
 /// Impressão esperando a cópia temporária: opções, página atual no clique e o arquivo pedido.
@@ -126,6 +128,8 @@ pub struct DocTab {
     links: Vec<pdf_core::LinkInfo>,
     /// Página a mostrar assim que o documento abrir (link de outro PDF).
     pending_page: Option<i32>,
+    /// Tela cheia: modo, capa, ajuste e zoom de antes, para voltar a eles ao sair.
+    presentation: Option<(ViewMode, bool, Fit, f32)>,
     pub(crate) search: SearchState,
     pub(crate) edit: EditState,
     /// Anotações visíveis do documento em memória (o worker manda a lista a cada mudança).
@@ -259,6 +263,7 @@ impl DocTab {
             focus_page: false,
             links: Vec::new(),
             pending_page: None,
+            presentation: None,
             search: SearchState::default(),
             edit: EditState::default(),
             annots: Vec::new(),
@@ -482,6 +487,69 @@ impl DocTab {
         }
     }
 
+    /// Visualização inicial pedida pelo arquivo: modo, zoom, página, painel e tela cheia.
+    pub(crate) fn apply_initial_view(&mut self, initial: pdf_core::InitialView) {
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        let page = initial
+            .page
+            .and_then(|p| usize::try_from(p).ok())
+            .filter(|&p| p < view.layout.page_count());
+        if let Some((mode, cover)) = initial.layout.map(app_state::layout::initial_layout) {
+            view.cover = cover;
+            view.set_mode(mode, page.unwrap_or(0));
+        }
+        if let Some((fit, factor)) = initial.zoom.map(zoom::initial_zoom) {
+            view.fit = fit;
+            if let Some(z) = factor {
+                view.set_zoom(z);
+            }
+        }
+        if let Some(y) = page.and_then(|p| view.go_to(p as i32, None)) {
+            self.jump_to = Some(y);
+        }
+        match initial.panel {
+            Some(pdf_core::InitialPanel::Bookmarks) => {
+                self.events.push(DocEvent::ShowPanel(LeftPanel::Outline))
+            }
+            Some(pdf_core::InitialPanel::Thumbnails) => {
+                self.events.push(DocEvent::ShowPanel(LeftPanel::Thumbnails))
+            }
+            None => {}
+        }
+        if initial.full_screen {
+            self.events.push(DocEvent::FullScreen);
+        }
+    }
+
+    /// Tela cheia: uma página por vez, inteira na tela (o modo de antes volta ao sair).
+    pub(crate) fn enter_presentation(&mut self) {
+        let page = self.last.current_page;
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        self.presentation
+            .get_or_insert((view.mode, view.cover, view.fit, view.zoom));
+        view.set_mode(ViewMode::Single, page);
+        view.fit = Fit::Page;
+        self.jump_to = Some(0.0);
+    }
+
+    pub(crate) fn exit_presentation(&mut self) {
+        let page = self.last.current_page;
+        let (Some((mode, cover, fit, zoom)), Some(view)) =
+            (self.presentation.take(), self.view.as_mut())
+        else {
+            return;
+        };
+        view.cover = cover;
+        view.set_mode(mode, page);
+        view.fit = fit;
+        view.set_zoom(zoom);
+        self.jump_to = view.go_to(page as i32, None);
+    }
+
     /// Vai à página `page` agora, ou assim que o documento abrir.
     pub(crate) fn show_page(&mut self, page: i32) {
         if self.view.is_some() {
@@ -616,6 +684,7 @@ impl DocTab {
 
     fn on_opened(&mut self, summary: DocSummary) {
         let comparison = summary.is_comparison;
+        let initial = summary.initial_view;
         let (path, sizes) = self.apply_summary(summary);
         self.history = HistoryState::default();
         self.password_prompt = None;
@@ -630,6 +699,7 @@ impl DocTab {
         self.last = CanvasFrame::default();
         self.jump_to = Some(0.0);
         self.events.push(DocEvent::Opened);
+        self.apply_initial_view(initial);
         if let Some(page) = self.pending_page.take() {
             self.jump(page, None);
         }
@@ -2366,6 +2436,24 @@ impl DocTab {
         match link_clicked {
             Some(pdf_core::LinkTarget::Page { page, at }) => self.jump(page, at),
             Some(target) => self.events.push(DocEvent::OpenLink(target)),
+            // tela cheia: clicar avança e o botão direito volta (fora da barra de navegação)
+            None if self.presentation.is_some()
+                && ui.rect_contains_pointer(ui.max_rect())
+                && on_this_layer(ui) =>
+            {
+                let (next, prev) =
+                    ui.input(|i| (i.pointer.primary_clicked(), i.pointer.secondary_clicked()));
+                if next || prev {
+                    self.run(
+                        ui.ctx(),
+                        if next {
+                            DocCommand::NextPage
+                        } else {
+                            DocCommand::PrevPage
+                        },
+                    );
+                }
+            }
             None => {}
         }
     }
@@ -2473,6 +2561,63 @@ fn arrow_pressed(ctx: &egui::Context) -> Option<((i8, i8), bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tab_with_pages(n: usize) -> DocTab {
+        let ctx = egui::Context::default();
+        let mut tab = DocTab::new(&ctx, PathBuf::from("/a.pdf"), false);
+        let size = pdf_core::PageSize {
+            width: 100.0,
+            height: 200.0,
+        };
+        tab.view = Some(DocView::new(PathBuf::from("/a.pdf"), vec![size; n]));
+        tab
+    }
+
+    #[test]
+    fn presentation_restores_mode_and_fit() {
+        let mut tab = tab_with_pages(4);
+        let v = tab.view.as_mut().unwrap();
+        v.cover = true;
+        v.set_mode(ViewMode::TwoUpContinuous, 0);
+        v.fit = Fit::Width;
+        tab.enter_presentation();
+        let v = tab.view.as_ref().unwrap();
+        assert_eq!((v.mode, v.fit), (ViewMode::Single, Fit::Page));
+        tab.enter_presentation(); // de novo: não perde o que guardou
+        tab.exit_presentation();
+        let v = tab.view.as_ref().unwrap();
+        assert_eq!(
+            (v.mode, v.cover, v.fit),
+            (ViewMode::TwoUpContinuous, true, Fit::Width)
+        );
+        tab.exit_presentation(); // sem apresentação: nada muda
+        assert_eq!(tab.view.as_ref().unwrap().mode, ViewMode::TwoUpContinuous);
+    }
+
+    #[test]
+    fn initial_view_sets_layout_zoom_page_panel_and_full_screen() {
+        let mut tab = tab_with_pages(4);
+        tab.apply_initial_view(pdf_core::InitialView {
+            panel: Some(pdf_core::InitialPanel::Bookmarks),
+            full_screen: true,
+            layout: Some(pdf_core::InitialLayout::TwoPage { cover: true }),
+            page: Some(2),
+            zoom: Some(pdf_core::InitialZoom::Factor(1.5)),
+        });
+        let v = tab.view.as_ref().unwrap();
+        assert_eq!((v.mode, v.cover, v.fit), (ViewMode::TwoUp, true, Fit::None));
+        assert!((v.zoom - 1.5).abs() < 1e-6);
+        assert_eq!(v.spread, v.layout.row_of(2), "abre na página pedida");
+        let events = tab.take_events();
+        assert!(events.contains(&DocEvent::ShowPanel(LeftPanel::Outline)));
+        assert!(events.contains(&DocEvent::FullScreen));
+        // sem nada pedido, nada muda
+        let mut tab = tab_with_pages(2);
+        tab.apply_initial_view(pdf_core::InitialView::default());
+        let v = tab.view.as_ref().unwrap();
+        assert_eq!((v.mode, v.fit), (ViewMode::Continuous, Fit::Width));
+        assert!(tab.take_events().is_empty());
+    }
 
     #[test]
     fn each_tab_has_its_own_scroll_state() {
@@ -2604,4 +2749,10 @@ fn link_gesture(
         .clone()
         .on_hover_text_at_pointer(crate::links::hint(&link.target));
     clicked.then(|| link.target.clone())
+}
+
+/// O ponteiro está nesta camada (e não numa janela ou barra flutuante por cima dela).
+fn on_this_layer(ui: &egui::Ui) -> bool {
+    let ctx = ui.ctx();
+    ctx.pointer_hover_pos().and_then(|p| ctx.layer_id_at(p)) == Some(ui.layer_id())
 }

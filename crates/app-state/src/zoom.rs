@@ -48,6 +48,15 @@ pub fn parse_zoom(text: &str) -> Option<f32> {
     (pct.is_finite() && pct > 0.0).then(|| clamp_zoom(pct / 100.0))
 }
 
+/// Ajuste e zoom pedidos pelo arquivo (`/OpenAction`): um ajuste, ou `Fit::None` e o fator.
+pub fn initial_zoom(z: pdf_core::InitialZoom) -> (Fit, Option<f32>) {
+    match z {
+        pdf_core::InitialZoom::FitPage => (Fit::Page, None),
+        pdf_core::InitialZoom::FitWidth => (Fit::Width, None),
+        pdf_core::InitialZoom::Factor(f) => (Fit::None, Some(clamp_zoom(f))),
+    }
+}
+
 /// Zoom escrito como no campo do Acrobat em português: "100%", "8,33%", "12,5%".
 pub fn percent_text(z: f32) -> String {
     let text = format!("{:.2}", z * 100.0);
@@ -138,6 +147,15 @@ mod tests {
         for bad in ["", "abc", "0", "-5", "NaN", "inf"] {
             assert_eq!(parse_zoom(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn initial_zoom_maps_open_action() {
+        use pdf_core::InitialZoom as Z;
+        assert_eq!(initial_zoom(Z::FitPage), (Fit::Page, None));
+        assert_eq!(initial_zoom(Z::FitWidth), (Fit::Width, None));
+        assert_eq!(initial_zoom(Z::Factor(1.5)), (Fit::None, Some(1.5)));
+        assert_eq!(initial_zoom(Z::Factor(500.0)), (Fit::None, Some(MAX_ZOOM)));
     }
 
     #[test]

@@ -38,6 +38,12 @@ pub struct GeraApp {
     /// Recentes mudaram e ainda não foram gravados.
     recents_dirty: bool,
     fullscreen: bool,
+    /// Documento que entrou na tela cheia (o modo dele volta ao sair).
+    presenting: Option<PathBuf>,
+    /// Modo leitura: só o menu, as abas e as páginas.
+    reading: bool,
+    /// Último movimento do mouse (a barra da tela cheia some 2 s depois).
+    last_motion: f64,
     /// Linha de ferramentas (Comentar ou Preencher e assinar) a abrir no próximo documento
     /// aberto pelo seletor.
     row_after_open: Option<&'static str>,
@@ -85,6 +91,9 @@ impl GeraApp {
             prefs_dirty: false,
             recents_dirty: false,
             fullscreen: false,
+            presenting: None,
+            reading: false,
+            last_motion: 0.0,
             row_after_open: None,
             create_after_pick: false,
             creating: None,
@@ -278,6 +287,7 @@ impl GeraApp {
         let active = self.tabs.active();
         // arquivos a abrir em abas novas (depois do laço: abrir mexe na lista de abas)
         let mut to_open = Vec::new();
+        let mut full_screen = false;
         for tab in (FIXED..self.tabs.len()).rev() {
             let Some(i) = self.tabs.doc_index(tab) else {
                 continue;
@@ -312,6 +322,7 @@ impl GeraApp {
                     }
                     DocEvent::OpenFile(path) => to_open.push(path),
                     DocEvent::NeedSaveAs => self.dialogs.save_as(ctx, self.docs[i].path.clone()),
+                    DocEvent::FullScreen => full_screen |= tab == active && !self.fullscreen,
                     DocEvent::OpenLink(target) => {
                         use crate::links::Outcome;
                         match crate::links::outcome(&target, &self.prefs.link_sites) {
@@ -328,6 +339,9 @@ impl GeraApp {
         }
         for path in to_open {
             self.open_path(ctx, path);
+        }
+        if full_screen {
+            self.run(ctx, Command::FullScreen); // o arquivo pediu (/PageMode /FullScreen)
         }
         self.poll_creating(ctx);
         if let Some(picked) = self.dialogs.poll() {
@@ -421,7 +435,19 @@ impl GeraApp {
             Command::FullScreen => {
                 self.fullscreen = !self.fullscreen;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+                if self.fullscreen {
+                    if let Some(doc) = self.active_doc() {
+                        doc.enter_presentation();
+                        self.presenting = Some(doc.path.clone());
+                    }
+                } else if let Some(path) = self.presenting.take() {
+                    // a aba que entrou, mesmo que outra esteja na frente agora
+                    if let Some(doc) = self.docs.iter_mut().find(|d| d.path == path) {
+                        doc.exit_presentation();
+                    }
+                }
             }
+            Command::ReadMode => self.reading = !self.reading,
             Command::NextTab => self.switch_tab(TabList::next),
             Command::PrevTab => self.switch_tab(TabList::prev),
             Command::ActivateTab(t) => self.activate(t),
@@ -511,6 +537,14 @@ impl GeraApp {
         let mut prefs = self.prefs.clone();
         let doc = &mut self.docs[i];
         doc.begin();
+        if self.reading {
+            // modo leitura: só as páginas e a barra flutuante
+            doc.show_canvas(ui);
+            if let Some(cmd) = crate::shell::reading::bar(ui.ctx(), doc, false) {
+                self.run(ui.ctx(), cmd);
+            }
+            return;
+        }
         let mut cmd = egui::Panel::top("ferramentas-doc")
             .show(ui, |ui| toolbar::show(ui, doc))
             .inner;
@@ -844,11 +878,17 @@ impl eframe::App for GeraApp {
             for cmd in commands::from_keyboard(ctx) {
                 self.run(ctx, cmd);
             }
-            if self.fullscreen
+            // Esc sai da tela cheia, depois do modo leitura
+            if (self.fullscreen || self.reading)
                 && !ctx.egui_wants_keyboard_input()
                 && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
             {
-                self.run(ctx, Command::FullScreen);
+                let exit = if self.fullscreen {
+                    Command::FullScreen
+                } else {
+                    Command::ReadMode
+                };
+                self.run(ctx, exit);
             }
             if let Some(doc) = self.active_doc() {
                 doc.handle_input(ctx);
@@ -902,9 +942,23 @@ impl eframe::App for GeraApp {
             }
             _ if !self.fullscreen => self.document_view(ui),
             _ => {
+                let now = ui.input(|i| i.time);
+                if ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
+                    self.last_motion = now;
+                }
+                let moving = now - self.last_motion < 2.0;
+                let mut cmd = None;
                 if let Some(doc) = self.active_doc() {
                     doc.begin(); // tela cheia: só as páginas
                     doc.show_canvas(ui);
+                    if moving {
+                        cmd = crate::shell::reading::bar(ui.ctx(), doc, true);
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_secs(2));
+                    }
+                }
+                if let Some(cmd) = cmd {
+                    self.run(ui.ctx(), cmd);
                 }
             }
         }
