@@ -82,6 +82,8 @@ pub enum DocEvent {
     OpenFile(PathBuf),
     /// Documento criado pelo app (sem lugar escolhido): Salvar pede o destino.
     NeedSaveAs,
+    /// Clique num link para fora do documento (endereço, outro arquivo ou bloqueado).
+    OpenLink(pdf_core::LinkTarget),
 }
 
 /// Impressão esperando a cópia temporária: opções, página atual no clique e o arquivo pedido.
@@ -113,6 +115,10 @@ pub struct DocTab {
     history_views: app_state::view_history::ViewHistory,
     /// Ir para página: o campo da página pede o foco no próximo quadro.
     focus_page: bool,
+    /// Links de todas as páginas.
+    links: Vec<pdf_core::LinkInfo>,
+    /// Página a mostrar assim que o documento abrir (link de outro PDF).
+    pending_page: Option<i32>,
     pub(crate) search: SearchState,
     pub(crate) edit: EditState,
     /// Anotações visíveis do documento em memória (o worker manda a lista a cada mudança).
@@ -241,6 +247,8 @@ impl DocTab {
             jump_to: None,
             history_views: Default::default(),
             focus_page: false,
+            links: Vec::new(),
+            pending_page: None,
             search: SearchState::default(),
             edit: EditState::default(),
             annots: Vec::new(),
@@ -458,6 +466,15 @@ impl DocTab {
         }
     }
 
+    /// Vai à página `page` agora, ou assim que o documento abrir.
+    pub(crate) fn show_page(&mut self, page: i32) {
+        if self.view.is_some() {
+            self.jump(page, None);
+        } else {
+            self.pending_page = Some(page);
+        }
+    }
+
     /// Salto (link, marcador, miniatura, busca, comentário, Ir para página…): guarda a vista atual
     /// para a Vista anterior e vai à página `page`, no ponto `at` dela.
     pub(crate) fn jump(&mut self, page: i32, at: Option<(f32, f32)>) {
@@ -577,6 +594,7 @@ impl DocTab {
         }
         self.form.notes = summary.form_notes;
         self.outline = summary.outline;
+        self.links = summary.links;
         (summary.path, summary.sizes)
     }
 
@@ -596,6 +614,9 @@ impl DocTab {
         self.last = CanvasFrame::default();
         self.jump_to = Some(0.0);
         self.events.push(DocEvent::Opened);
+        if let Some(page) = self.pending_page.take() {
+            self.jump(page, None);
+        }
         if comparison {
             self.show_row(app_state::tools_catalog::COMPARE);
         }
@@ -2136,6 +2157,8 @@ impl DocTab {
         let mut prepare_ops = Vec::new();
         let can_fill = self.security.permissions.forms;
         let mut open_props = None;
+        let links = &self.links;
+        let mut link_clicked = None;
         let jump_to = self.jump_to.take();
         // cada aba com seu id: a área de rolagem guarda a posição de cada documento
         self.last = ui
@@ -2185,7 +2208,13 @@ impl DocTab {
                             open_props = open_props.or(props);
                             return;
                         }
-                        edit.on_page(ui, worker, annots, page as i32, rect, map);
+                        let response = edit.on_page(ui, worker, annots, page as i32, rect, map);
+                        if edit.tool == app_state::tools::Tool::Select {
+                            let hit = link_gesture(ui, &response, links, annots, page as i32, map);
+                            if link_clicked.is_none() {
+                                link_clicked = hit;
+                            }
+                        }
                         // depois dos gestos da página: os campos ficam por cima (sem a permissão
                         // de preencher, ficam só visíveis)
                         if !can_fill {
@@ -2253,6 +2282,11 @@ impl DocTab {
         if self.last.turn != 0 && now - self.turned_at > 0.25 && view.turn(self.last.turn) {
             self.turned_at = now;
             self.jump_to = Some(0.0);
+        }
+        match link_clicked {
+            Some(pdf_core::LinkTarget::Page { page, at }) => self.jump(page, at),
+            Some(target) => self.events.push(DocEvent::OpenLink(target)),
+            None => {}
         }
     }
 }
@@ -2467,4 +2501,27 @@ mod tests {
         let ids: Vec<_> = all.iter().map(|x| x.id).collect();
         assert_eq!(ids, [1, 3, 5, 4]);
     }
+}
+
+/// Com Selecionar, sobre um link sem comentário por cima: cursor de mão e dica com o destino.
+/// Devolve o alvo quando o link é clicado (sem arrastar).
+fn link_gesture(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    links: &[pdf_core::LinkInfo],
+    annots: &[AnnotInfo],
+    page: i32,
+    map: &PageMap,
+) -> Option<pdf_core::LinkTarget> {
+    let pt = map.to_page(response.hover_pos()?.into());
+    if crate::edit::hit_at(annots, page, pt, map).is_some() {
+        return None;
+    }
+    let link = crate::links::link_at(links, page, pt)?;
+    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    let clicked = response.clicked();
+    response
+        .clone()
+        .on_hover_text_at_pointer(crate::links::hint(&link.target));
+    clicked.then(|| link.target.clone())
 }

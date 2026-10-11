@@ -54,6 +54,8 @@ pub struct GeraApp {
     /// Janela Combinar arquivos.
     combine: crate::shell::combine::CombineWindow,
     compare: crate::shell::compare::CompareWindow,
+    /// Aviso de segurança de um link (endereço ou outro arquivo) esperando resposta.
+    link_warning: Option<crate::links::LinkWarning>,
     bench: Option<Bench>,
 }
 
@@ -92,6 +94,7 @@ impl GeraApp {
             identity: None,
             combine: Default::default(),
             compare: Default::default(),
+            link_warning: None,
             bench,
         };
         app.refresh_recent_exists();
@@ -309,6 +312,17 @@ impl GeraApp {
                     }
                     DocEvent::OpenFile(path) => to_open.push(path),
                     DocEvent::NeedSaveAs => self.dialogs.save_as(ctx, self.docs[i].path.clone()),
+                    DocEvent::OpenLink(target) => {
+                        use crate::links::Outcome;
+                        match crate::links::outcome(&target, &self.prefs.link_sites) {
+                            Some(Outcome::OpenUrl(url)) => {
+                                ctx.open_url(egui::OpenUrl::new_tab(url))
+                            }
+                            Some(Outcome::Ask(warning)) => self.link_warning = Some(warning),
+                            Some(Outcome::Refuse(msg)) => self.docs[i].status = msg,
+                            None => {}
+                        }
+                    }
                 }
             }
         }
@@ -915,6 +929,55 @@ impl eframe::App for GeraApp {
             self.open_path(ui.ctx(), result);
         }
         self.identity_window(ui);
+        self.link_warning_window(ui.ctx());
+    }
+}
+
+impl GeraApp {
+    /// Aviso de segurança: Permitir abre o endereço (ou o arquivo); a escolha pode ficar lembrada
+    /// para o site.
+    fn link_warning_window(&mut self, ctx: &egui::Context) {
+        use crate::links::{Answer, Target};
+        use app_state::link_policy::{remember, LinkDecision};
+        let Some(answer) = self.link_warning.as_mut().and_then(|w| w.show(ctx)) else {
+            return;
+        };
+        let Some(warning) = self.link_warning.take() else {
+            return;
+        };
+        match warning.target {
+            Target::Url(url) => {
+                let decision = if answer == Answer::Allow {
+                    LinkDecision::Allow
+                } else {
+                    LinkDecision::Block
+                };
+                if warning.remember {
+                    remember(&mut self.prefs.link_sites, &url, decision);
+                    self.prefs_dirty = true;
+                }
+                if decision == LinkDecision::Allow {
+                    ctx.open_url(egui::OpenUrl::new_tab(url));
+                }
+            }
+            Target::File(path, page) if answer == Answer::Allow => {
+                if !path.is_file() {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    if let Some(doc) = self.active_doc() {
+                        doc.status = format!("Arquivo não encontrado: {name}");
+                    }
+                    return;
+                }
+                let path = canonical(&path);
+                self.open_path(ctx, path.clone());
+                if let (Some(page), Some(doc)) =
+                    (page, self.docs.iter_mut().find(|d| d.path == path))
+                {
+                    doc.show_page(page);
+                }
+            }
+            Target::File(..) => {}
+        }
     }
 }
 
