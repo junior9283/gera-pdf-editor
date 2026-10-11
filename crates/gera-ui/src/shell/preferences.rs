@@ -69,7 +69,10 @@ impl PrefsDraft {
             .resizable(false)
             .default_width(560.0)
             .show(ctx, |ui| {
+                // altura fixa: o separador vertical se esticaria até a borda da tela
+                ui.set_max_height(340.0);
                 ui.horizontal_top(|ui| {
+                    ui.set_min_height(300.0);
                     ui.vertical(|ui| {
                         ui.set_width(150.0);
                         for c in Category::ALL {
