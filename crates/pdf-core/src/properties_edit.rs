@@ -92,6 +92,15 @@ impl PdfDoc {
         }
     }
 
+    /// O título, quando o arquivo pede para mostrá-lo no lugar do nome (`DisplayDocTitle`).
+    pub(crate) fn display_title(&self) -> Option<String> {
+        if !self.window_options().display_title {
+            return None;
+        }
+        let title = self.inner.metadata(mupdf::MetadataName::Title).ok()?;
+        (!title.trim().is_empty()).then(|| title.trim().to_owned())
+    }
+
     pub(crate) fn print_prefs(&self) -> PrintPrefs {
         let Some(vp) = self.viewer_prefs() else {
             return PrintPrefs::default();

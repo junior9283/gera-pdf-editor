@@ -536,6 +536,8 @@ pub struct DocSummary {
     pub links: Vec<LinkInfo>,
     pub initial_view: InitialView,
     pub attachments: Vec<AttachmentInfo>,
+    /// Título a mostrar no lugar do nome do arquivo ("Mostrar o título do documento").
+    pub display_title: Option<String>,
     /// Campos de formulário de todas as páginas.
     pub fields: Vec<crate::FieldInfo>,
     pub form_notes: crate::FormNotes,

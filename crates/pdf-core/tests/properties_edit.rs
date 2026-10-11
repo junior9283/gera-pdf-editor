@@ -164,3 +164,17 @@ fn fonts_are_listed_with_embedding() {
         "sem repetir"
     );
 }
+
+#[test]
+fn display_title_reaches_the_summary() {
+    let (_t, _p, mut d) = doc();
+    assert_eq!(d.summary().unwrap().display_title, None);
+    let mut e = edit_from(&d);
+    e.title = "Manual do Usuário".into();
+    e.window.display_title = true;
+    d.set_properties(&e).unwrap();
+    assert_eq!(
+        d.summary().unwrap().display_title.as_deref(),
+        Some("Manual do Usuário")
+    );
+}

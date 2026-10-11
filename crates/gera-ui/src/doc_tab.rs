@@ -14,9 +14,7 @@ use app_state::prefs::LeftPanel;
 use app_state::print::{any_oversized, lp_args, PrintOptions};
 use app_state::transform::PageMap;
 use app_state::zoom::{self, Fit};
-use pdf_core::{
-    AnnotInfo, DocProperties, DocSummary, HistoryState, PdfError, Request, Response, Worker,
-};
+use pdf_core::{AnnotInfo, DocSummary, HistoryState, PdfError, Request, Response, Worker};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -136,6 +134,8 @@ pub struct DocTab {
     paste_rx: Option<std::sync::mpsc::Receiver<crate::clipboard::SystemClip>>,
     /// Imagens coladas gravadas na pasta temporária (apagadas ao fechar a aba).
     pasted_files: Vec<std::path::PathBuf>,
+    /// Título a mostrar na aba (Propriedades → Visualização inicial → Mostrar o título).
+    pub(crate) display_title: Option<String>,
     /// Anexos do documento e dos comentários (painel Anexos).
     pub(crate) attachments: Vec<pdf_core::AttachmentInfo>,
     /// Marcador recém-criado (o painel o seleciona e abre a renomeação).
@@ -221,7 +221,7 @@ pub struct DocTab {
     /// Pedido de foco no campo de busca (Ctrl+F ou menu).
     pub(crate) focus_search: bool,
     /// Propriedades mostradas na janela (aberta enquanto houver).
-    properties: Option<DocProperties>,
+    properties: Option<crate::shell::properties::PropertiesDialog>,
     /// Diálogo "Imprimir" aberto.
     print_dialog: Option<PrintDialog>,
     /// Impressão esperando a cópia temporária ficar pronta: opções e a página atual no clique.
@@ -304,6 +304,7 @@ impl DocTab {
             revert_ask: false,
             bookmark_created: None,
             attachments: Vec::new(),
+            display_title: None,
             marquee: None,
             focus_zoom: false,
             zoom_text: None,
@@ -1004,8 +1005,19 @@ impl DocTab {
         self.id
     }
 
+    /// Rótulo da aba: o nome do arquivo, ou o título do documento quando ele pede.
     pub fn title(&self) -> String {
-        app_state::tabs::tab_title(&self.path, 28)
+        match &self.display_title {
+            Some(t) => {
+                let short: String = t.chars().take(28).collect();
+                if short.len() < t.len() {
+                    format!("{short}…")
+                } else {
+                    short
+                }
+            }
+            None => app_state::tabs::tab_title(&self.path, 28),
+        }
     }
 
     pub fn open(&mut self, path: PathBuf) {
@@ -1036,6 +1048,7 @@ impl DocTab {
         self.outline = summary.outline;
         self.links = summary.links;
         self.attachments = summary.attachments;
+        self.display_title = summary.display_title;
         (summary.path, summary.sizes)
     }
 
@@ -1361,7 +1374,10 @@ impl DocTab {
                     self.status = format!("Não foi possível salvar: {error}");
                 }
                 Response::Properties(p) => {
-                    self.properties = Some(p);
+                    self.properties = Some(crate::shell::properties::PropertiesDialog::new(
+                        p,
+                        self.security,
+                    ));
                 }
                 Response::PropertiesFailed(msg) => {
                     self.status = format!("Não foi possível ler as propriedades: {msg}");
@@ -2156,11 +2172,15 @@ impl DocTab {
 
     /// Páginas, janelas (propriedades, imprimir, nota, senha) e fim do quadro, depois dos painéis.
     pub fn show_canvas(&mut self, ui: &mut egui::Ui) {
-        if let Some(p) = &self.properties {
-            let mut open = true;
-            crate::shell::properties::window(ui, p, &mut open);
-            if !open {
-                self.properties = None;
+        let answer = self.properties.as_mut().and_then(|d| d.show(ui.ctx()));
+        if let Some(ok) = answer {
+            let edit = self.properties.take().and_then(|d| d.finish(ok));
+            if let Some(e) = edit {
+                if self.security.permissions.modify {
+                    self.worker.send(Request::SetProperties(e));
+                } else {
+                    self.deny("alterar as propriedades");
+                }
             }
         }
         if let (Some(rx), Some(dialog)) = (&self.printers_rx, self.print_dialog.as_mut()) {
@@ -3358,6 +3378,14 @@ mod tests {
             tab.history_views.back(e).is_none(),
             "só uma vista no histórico"
         );
+    }
+
+    #[test]
+    fn display_title_changes_the_tab_title() {
+        let mut tab = tab_with_pages(1);
+        assert_eq!(tab.title(), "a.pdf");
+        tab.display_title = Some("Manual do Usuário".into());
+        assert_eq!(tab.title(), "Manual do Usuário");
     }
 
     #[test]
