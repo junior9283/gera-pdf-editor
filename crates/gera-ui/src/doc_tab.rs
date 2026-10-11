@@ -115,6 +115,8 @@ pub struct DocTab {
     /// Último quadro do canvas (rolagem e página atual).
     pub(crate) last: CanvasFrame,
     pub(crate) jump_to: Option<f32>,
+    /// Página e ponto do último salto ainda não mostrado (refeito se o zoom mudar antes).
+    pending_target: Option<(i32, Option<(f32, f32)>)>,
     /// Rolagem horizontal pedida (Ajustar ao conteúdo visível).
     jump_x: Option<f32>,
     /// Zoom para… (Ctrl+Y): o campo de zoom pede o foco; `zoom_text` é o que está sendo digitado.
@@ -257,6 +259,7 @@ impl DocTab {
             last: CanvasFrame::default(),
             jump_to: None,
             jump_x: None,
+            pending_target: None,
             focus_zoom: false,
             zoom_text: None,
             history_views: Default::default(),
@@ -570,7 +573,16 @@ impl DocTab {
                 self.history_views.push(current);
             }
             self.jump_to = Some(y);
+            self.pending_target = Some((page, at));
         }
+    }
+
+    /// O zoom mudou pela razão `ratio` (ajuste à janela): um salto ainda não mostrado é refeito na
+    /// mesma página e ponto (o vão entre as páginas não escala); senão a rolagem acompanha o zoom.
+    fn after_zoom_change(&mut self, ratio: f32) {
+        let target = self.pending_target;
+        let redone = target.and_then(|(page, at)| self.view.as_mut()?.go_to(page, at));
+        self.jump_to = redone.or(Some(self.last.scroll_y * ratio));
     }
 
     /// Zoom escolhido pelo usuário, mantendo o mesmo ponto do documento na tela.
@@ -2285,19 +2297,19 @@ impl DocTab {
     }
 
     fn canvas(&mut self, ui: &mut egui::Ui) {
+        let (avail_w, avail_h) = (ui.available_width() - 24.0, ui.available_height() - 24.0);
+        if let Some(ratio) = self.view.as_mut().and_then(|v| v.apply_fit(avail_w, avail_h)) {
+            self.after_zoom_change(ratio);
+            if let Some(view) = self.view.as_ref().filter(|v| v.fit == Fit::Visible) {
+                self.jump_x = view.visible_left(avail_w);
+            }
+        }
         let Some(view) = self.view.as_mut() else {
             ui.centered_and_justified(|ui| {
                 ui.label(&self.status);
             });
             return;
         };
-        let avail_w = ui.available_width() - 24.0;
-        if let Some(ratio) = view.apply_fit(avail_w, ui.available_height() - 24.0) {
-            self.jump_to = Some(rescaled_scroll(self.jump_to, self.last.scroll_y, ratio));
-            if view.fit == Fit::Visible {
-                self.jump_x = view.visible_left(avail_w);
-            }
-        }
         let (worker, edit, search, annots) =
             (&self.worker, &mut self.edit, &self.search, &self.annots);
         let (form, fields) = (&mut self.form, &self.fields);
@@ -2316,6 +2328,7 @@ impl DocTab {
         let presenting = self.presentation.is_some();
         let mut turn = None;
         let jump_to = self.jump_to.take();
+        self.pending_target = None; // a rolagem pedida vai para a tela agora
         let jump_x = self.jump_x.take();
         // cada aba com seu id: a área de rolagem guarda a posição de cada documento
         self.last = ui
@@ -2574,10 +2587,19 @@ mod tests {
 
     #[test]
     fn a_pending_jump_survives_the_zoom_change() {
-        // o salto pedido antes do primeiro ajuste (link para outro PDF, página inicial do arquivo)
-        // não pode virar "topo" quando o zoom se ajusta à janela
-        assert_eq!(rescaled_scroll(Some(500.0), 0.0, 2.0), 1000.0);
-        assert_eq!(rescaled_scroll(None, 300.0, 0.5), 150.0);
+        // salto pedido antes do primeiro ajuste (página inicial do arquivo, link para outro PDF):
+        // depois que o zoom se ajusta à janela, cai na mesma página (o vão entre páginas não escala)
+        let mut tab = tab_with_pages(400);
+        tab.jump(300, None);
+        let ratio = tab.view.as_mut().unwrap().set_zoom(1.6);
+        tab.after_zoom_change(ratio);
+        let expected = tab.view.as_mut().unwrap().go_to(300, None);
+        assert_eq!(tab.jump_to, expected);
+        // sem salto pendente, a rolagem atual acompanha o zoom
+        let mut tab = tab_with_pages(4);
+        tab.last.scroll_y = 300.0;
+        tab.after_zoom_change(0.5);
+        assert_eq!(tab.jump_to, Some(150.0));
     }
 
     #[test]
@@ -2733,12 +2755,6 @@ mod tests {
         let ids: Vec<_> = all.iter().map(|x| x.id).collect();
         assert_eq!(ids, [1, 3, 5, 4]);
     }
-}
-
-/// Rolagem depois de o zoom mudar pela razão `ratio`: a de um salto ainda pendente (pedido no zoom
-/// antigo), ou a atual.
-fn rescaled_scroll(pending: Option<f32>, scroll_y: f32, ratio: f32) -> f32 {
-    pending.unwrap_or(scroll_y) * ratio
 }
 
 /// Com Selecionar, sobre um link sem comentário por cima: cursor de mão e dica com o destino.
