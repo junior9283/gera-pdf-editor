@@ -85,6 +85,8 @@ pub(crate) enum Edit {
         size: f32,
         color: [f32; 3],
     },
+    /// Intensidade da borda de nuvem (/BE /I).
+    Cloud { page: i32, id: i32, intensity: f32 },
     /// Várias mudanças da mesma anotação num passo só do desfazer (ex.: texto e tamanho da caixa).
     Batch(Vec<Edit>),
 }
@@ -100,6 +102,7 @@ impl Edit {
             | Self::Vertices { page, .. }
             | Self::Callout { page, .. }
             | Self::Fill { page, .. }
+            | Self::Cloud { page, .. }
             | Self::Font { page, .. } => *page,
             Self::Batch(edits) => edits.first().map_or(0, Edit::page),
         }
@@ -548,6 +551,7 @@ pub(crate) fn apply_edit(
         | Edit::Vertices { page, id, .. }
         | Edit::Callout { page, id, .. }
         | Edit::Fill { page, id, .. }
+        | Edit::Cloud { page, id, .. }
         | Edit::Font { page, id, .. } => (*page, *id),
     };
     let (mut page_ref, mut a) = find(doc, page, id)?;
@@ -661,6 +665,18 @@ pub(crate) fn apply_edit(
                 page,
                 id,
                 color: old,
+            }
+        }
+        Edit::Cloud { intensity, .. } => {
+            if !is_cloudy(&a)? {
+                return Err(PdfError::InvalidAnnotation("não é uma nuvem".into()));
+            }
+            let old = a.border_effect_intensity()?;
+            a.set_border_effect_intensity(intensity)?;
+            Edit::Cloud {
+                page,
+                id,
+                intensity: old,
             }
         }
         Edit::Font { size, color, .. } => {

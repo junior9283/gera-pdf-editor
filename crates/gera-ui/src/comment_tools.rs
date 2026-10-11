@@ -33,14 +33,26 @@ impl PolyBuilder {
         min: usize,
         tolerance: f32,
     ) -> Option<Vec<(f32, f32)>> {
-        let finish = double || (closable && close_polygon(&self.points, p, tolerance));
-        if finish {
-            return (self.points.len() >= min).then(|| std::mem::take(&mut self.points));
+        if closable && close_polygon(&self.points, p, tolerance) {
+            return self.finish(min);
         }
-        if self.points.len() < MAX_POINTS {
+        // o primeiro clique do duplo já pôs o vértice, a menos que os dois tenham chegado juntos
+        let repeated = self
+            .points
+            .last()
+            .is_some_and(|&(x, y)| (p.0 - x).hypot(p.1 - y) <= tolerance);
+        if !(double && repeated) && self.points.len() < MAX_POINTS {
             self.points.push(p);
         }
+        if double {
+            return self.finish(min);
+        }
         None
+    }
+
+    /// Termina com ao menos `min` vértices; senão a construção continua.
+    fn finish(&mut self, min: usize) -> Option<Vec<(f32, f32)>> {
+        (self.points.len() >= min).then(|| std::mem::take(&mut self.points))
     }
 
     /// Backspace: tira o último vértice.
@@ -91,6 +103,18 @@ mod tests {
             line.click((100.0, 0.0), true, false, 2, 6.0),
             Some(vec![(0.0, 0.0), (100.0, 0.0)]),
             "linhas conectadas terminam com 2"
+        );
+    }
+
+    #[test]
+    fn double_click_on_a_new_spot_is_the_last_vertex() {
+        // os dois cliques do duplo chegam no mesmo quadro: só o duplo é visto
+        let mut b = PolyBuilder::new(0);
+        b.click((0.0, 0.0), false, true, 3, 6.0);
+        b.click((100.0, 0.0), false, true, 3, 6.0);
+        assert_eq!(
+            b.click((50.0, 80.0), true, true, 3, 6.0),
+            Some(vec![(0.0, 0.0), (100.0, 0.0), (50.0, 80.0)])
         );
     }
 

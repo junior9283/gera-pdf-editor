@@ -360,3 +360,31 @@ fn editing_a_callout_text_keeps_box_and_line() {
         b.rect
     );
 }
+
+#[test]
+fn resizing_a_callout_box_keeps_the_tip_and_undoes() {
+    let (_d, _p, mut d) = blank();
+    d.apply(AnnotOp::Create(NewAnnot::Callout {
+        page: 0,
+        rect: pdf_core::PdfRect::new(200.0, 100.0, 320.0, 140.0),
+        knee: (150.0, 160.0),
+        tip: (100.0, 200.0),
+        text: "veja".into(),
+        size: 12.0,
+        color: [0.0; 3],
+    }))
+    .unwrap();
+    let a = d.annotations(0).unwrap().remove(0);
+    assert!(a.resizable(), "a caixa do texto explicativo redimensiona");
+    d.apply(AnnotOp::Resize {
+        page: 0,
+        id: a.id,
+        rect: pdf_core::PdfRect::new(200.0, 100.0, 400.0, 180.0),
+    })
+    .unwrap();
+    let b = d.annotations(0).unwrap().remove(0);
+    assert!((b.rect.x1 - 400.0).abs() < 0.5, "{:?}", b.rect);
+    assert_eq!(b.callout.unwrap()[0], a.callout.unwrap()[0], "ponta parada");
+    d.undo().unwrap();
+    assert_eq!(d.annotations(0).unwrap()[0].rect, a.rect);
+}

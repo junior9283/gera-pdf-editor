@@ -40,6 +40,19 @@ enum Grab {
         end: LineEnd,
         fixed: (f32, f32),
     },
+    /// Um vértice (polígono, linhas conectadas, nuvem) e os vizinhos (para a pré-visualização).
+    Vertex {
+        index: usize,
+        prev: Option<(f32, f32)>,
+        next: Option<(f32, f32)>,
+    },
+    /// Texto explicativo: a ponta (o joelho fica) ou o joelho (a ponta fica).
+    CalloutTip {
+        knee: (f32, f32),
+    },
+    CalloutKnee {
+        tip: (f32, f32),
+    },
 }
 
 /// Arrasto de anotação em andamento (mover ou redimensionar pela alça).
@@ -83,7 +96,22 @@ impl AnnotDrag {
                     resized(r, h, to, MIN_SIZE)
                 }
             }
-            Grab::LinePoint { .. } => r,
+            Grab::LinePoint { .. }
+            | Grab::Vertex { .. }
+            | Grab::CalloutTip { .. }
+            | Grab::CalloutKnee { .. } => r,
+        }
+    }
+
+    /// Trecho a mostrar tracejado durante o arrasto de vértice ou da linha de chamada.
+    fn preview_path(&self) -> Option<Vec<(f32, f32)>> {
+        match self.grab {
+            Grab::Vertex { prev, next, .. } => {
+                Some(prev.into_iter().chain([self.to]).chain(next).collect())
+            }
+            Grab::CalloutTip { knee } => Some(vec![self.to, knee]),
+            Grab::CalloutKnee { tip } => Some(vec![tip, self.to]),
+            _ => None,
         }
     }
 
@@ -116,6 +144,24 @@ impl AnnotDrag {
                 id,
                 end,
                 to: self.to,
+            },
+            Grab::Vertex { index, .. } => AnnotOp::MoveVertex {
+                page,
+                id,
+                index,
+                to: self.to,
+            },
+            Grab::CalloutTip { knee } => AnnotOp::MoveCallout {
+                page,
+                id,
+                knee,
+                tip: self.to,
+            },
+            Grab::CalloutKnee { tip } => AnnotOp::MoveCallout {
+                page,
+                id,
+                knee: self.to,
+                tip,
             },
         })
     }
@@ -226,6 +272,8 @@ pub struct EditState {
     pub(crate) attach_at: Option<(i32, (f32, f32))>,
     /// A janela de nota acabou de abrir: o campo recebe o foco (já dá para digitar).
     note_focus: bool,
+    /// Ferramenta dos gestos em andamento: trocar de ferramenta os descarta.
+    gesture_tool: Tool,
 }
 
 /// O que a caixa de texto em digitação vai virar.
@@ -365,6 +413,18 @@ impl EditState {
     pub fn open_props(&mut self, annots: &[AnnotInfo], target: (i32, i32)) {
         self.selected = Some(target);
         self.props = find(annots, target).map(PropsDraft::new);
+    }
+
+    /// Polígono, texto explicativo ou borracha começados com outra ferramenta não continuam
+    /// (o Acrobat também cancela o desenho ao trocar de ferramenta).
+    fn forget_other_tool_gestures(&mut self) {
+        if self.gesture_tool != self.tool {
+            self.gesture_tool = self.tool;
+            self.poly = None;
+            self.callout_drag = None;
+            self.callout_box = None;
+            self.eraser = None;
+        }
     }
 
     /// Esc (como no Acrobat): volta para Selecionar, tira a seleção e cancela gestos em andamento.
@@ -512,6 +572,7 @@ impl EditState {
         let pointer = response
             .interact_pointer_pos()
             .map(|p| map.to_page(p.into()));
+        self.forget_other_tool_gestures();
         match self.tool {
             Tool::Select
             | Tool::Highlight
@@ -643,10 +704,35 @@ impl EditState {
                 let fixed = if end == LineEnd::Start { e } else { s };
                 Some((a, Grab::LinePoint { end, fixed }))
             });
+            let vertex = selected.and_then(|a| {
+                let v = &a.vertices;
+                let index = app_state::annot_geom::vertex_at(v, p, size)?;
+                let closed = a.kind != AnnotKind::PolyLine;
+                let prev = index
+                    .checked_sub(1)
+                    .or(closed.then(|| v.len().saturating_sub(1)))
+                    .and_then(|k| v.get(k).copied());
+                let next = v
+                    .get(index + 1)
+                    .copied()
+                    .or_else(|| closed.then(|| v.first().copied()).flatten());
+                Some((a, Grab::Vertex { index, prev, next }))
+            });
+            let callout_point = selected.and_then(|a| {
+                let [tip, knee, _] = a.callout?;
+                let near = |q: (f32, f32)| (q.0 - p.0).hypot(q.1 - p.1) <= size;
+                if near(tip) {
+                    Some((a, Grab::CalloutTip { knee }))
+                } else if near(knee) {
+                    Some((a, Grab::CalloutKnee { tip }))
+                } else {
+                    None
+                }
+            });
             let handle = selected
-                .filter(|a| a.resizable())
+                .filter(|a| a.resizable() && a.vertices.is_empty())
                 .and_then(|a| Some((a, Grab::Resize(handle_at(a.rect, p, size)?))));
-            let grab = match line_end.or(handle) {
+            let grab = match line_end.or(vertex).or(callout_point).or(handle) {
                 Some(found) => Some(found),
                 None => hit(p)
                     .and_then(|s| find(annots, s))
@@ -780,6 +866,15 @@ impl EditState {
         map: &PageMap,
     ) {
         let dashed = egui::Stroke::new(1.5, SELECTED);
+        if let Some(path) = self
+            .annot_drag
+            .filter(|d| d.page == page)
+            .and_then(|d| d.preview_path())
+        {
+            let pts: Vec<egui::Pos2> = path.iter().map(|&p| map.to_screen(p).into()).collect();
+            painter.extend(egui::Shape::dashed_line(&pts, dashed, 6.0, 4.0));
+            return;
+        }
         if let Some((a, b)) = self
             .annot_drag
             .filter(|d| d.page == page)
@@ -819,6 +914,17 @@ impl EditState {
             handle(s);
             handle(e);
             return;
+        }
+        if !a.vertices.is_empty() {
+            // polígono, linhas conectadas e nuvem: uma alça em cada vértice, como no Acrobat
+            for &v in &a.vertices {
+                handle(v);
+            }
+            return;
+        }
+        if let Some([tip, knee, _]) = a.callout {
+            handle(tip);
+            handle(knee);
         }
         let r = screen_rect(&a.rect, map).expand(2.0);
         painter.rect_stroke(
@@ -924,7 +1030,8 @@ impl EditState {
                 *builder = PolyBuilder::new(page);
             }
             let min = if closable { 3 } else { 2 };
-            let double = response.double_clicked();
+            // o egui conta como triplo o duplo que vem logo depois do vértice anterior
+            let double = response.double_clicked() || response.triple_clicked();
             if let Some(vertices) = builder.click(p, double, closable, min, 6.0 / map.zoom) {
                 self.poly = None;
                 self.add(NewAnnot::Polygon {
@@ -1184,6 +1291,26 @@ mod tests {
             (r.min, r.max),
             (egui::pos2(120.0, 90.0), egui::pos2(160.0, 130.0))
         );
+    }
+
+    #[test]
+    fn switching_tools_drops_a_polygon_in_progress() {
+        let mut edit = EditState {
+            tool: Tool::Polygon,
+            ..Default::default()
+        };
+        edit.forget_other_tool_gestures();
+        let mut b = crate::comment_tools::PolyBuilder::new(0);
+        b.points = vec![(0.0, 0.0), (10.0, 0.0)];
+        edit.poly = Some(b);
+        edit.callout_box = Some((0, PdfRect::new(0.0, 0.0, 1.0, 1.0)));
+        edit.forget_other_tool_gestures();
+        assert!(edit.poly.is_some(), "mesma ferramenta: continua");
+        edit.tool = Tool::Ink;
+        edit.forget_other_tool_gestures();
+        edit.tool = Tool::Polygon;
+        edit.forget_other_tool_gestures();
+        assert!(edit.poly.is_none() && edit.callout_box.is_none());
     }
 
     #[test]

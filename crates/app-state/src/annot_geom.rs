@@ -127,6 +127,17 @@ pub fn line_handle_at(a: (f32, f32), b: (f32, f32), p: (f32, f32), size: f32) ->
     }
 }
 
+/// O vértice (polígono, linhas conectadas, nuvem) mais perto de `p`, a até `size`.
+pub fn vertex_at(points: &[(f32, f32)], p: (f32, f32), size: f32) -> Option<usize> {
+    points
+        .iter()
+        .enumerate()
+        .map(|(k, &(x, y))| (k, (x - p.0).hypot(y - p.1)))
+        .filter(|&(_, d)| d <= size)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(k, _)| k)
+}
+
 /// Clicar perto do primeiro ponto fecha o polígono (a partir de 3 pontos), como no Acrobat.
 pub fn close_polygon(points: &[(f32, f32)], click: (f32, f32), tolerance: f32) -> bool {
     match points.first() {
@@ -137,6 +148,14 @@ pub fn close_polygon(points: &[(f32, f32)], click: (f32, f32), tolerance: f32) -
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_vertex_under_the_pointer_is_the_nearest_one() {
+        let pts = [(0.0, 0.0), (10.0, 0.0), (100.0, 100.0)];
+        assert_eq!(vertex_at(&pts, (9.0, 1.0), 5.0), Some(1));
+        assert_eq!(vertex_at(&pts, (4.0, 0.0), 5.0), Some(0), "o mais perto");
+        assert_eq!(vertex_at(&pts, (50.0, 50.0), 5.0), None);
+    }
 
     #[test]
     fn a_click_near_the_first_point_closes_the_polygon() {

@@ -512,3 +512,31 @@ fn odd_or_huge_vertices_are_read_safely() {
     );
     assert_eq!(a[1].vertices.len(), 1000, "teto de vértices");
 }
+
+#[test]
+fn cloud_intensity_changes_survives_save_and_undoes() {
+    let (_d, path, mut d) = doc();
+    let a = created(&mut d, polygon(true, true));
+    assert_eq!(a.cloud, Some(2.0), "nuvem nova com intensidade 2");
+    d.apply(AnnotOp::Cloud {
+        page: 0,
+        id: a.id,
+        intensity: 1.0,
+    })
+    .unwrap();
+    assert_eq!(d.annotations(0).unwrap()[0].cloud, Some(1.0));
+    d.undo().unwrap();
+    assert_eq!(d.annotations(0).unwrap()[0].cloud, Some(2.0));
+    d.redo().unwrap();
+    d.save(&path).unwrap();
+    assert_eq!(reopen_only(&path).cloud, Some(1.0));
+    let plain = created(&mut d, polygon(true, false));
+    assert_eq!(plain.cloud, None, "polígono comum não é nuvem");
+    assert!(d
+        .apply(AnnotOp::Cloud {
+            page: 0,
+            id: plain.id,
+            intensity: 1.0,
+        })
+        .is_err());
+}

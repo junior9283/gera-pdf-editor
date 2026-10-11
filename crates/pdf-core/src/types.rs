@@ -204,6 +204,8 @@ pub struct AnnotInfo {
     pub line: Option<Segment>,
     /// Vértices (polígono, linhas conectadas e nuvem).
     pub vertices: Vec<(f32, f32)>,
+    /// Intensidade da borda de nuvem (1 ou 2, como "Nuvem 1" e "Nuvem 2" do Acrobat).
+    pub cloud: Option<f32>,
     /// Texto explicativo: ponta da seta, joelho e ponto na caixa.
     pub callout: Option<[(f32, f32); 3]>,
     /// Anotação agrupada a outra (Substituir texto: o riscado aponta para o cursor).
@@ -248,6 +250,7 @@ impl AnnotInfo {
             self.kind,
             AnnotKind::Ink
                 | AnnotKind::TextBox
+                | AnnotKind::Callout
                 | AnnotKind::Rect
                 | AnnotKind::Ellipse
                 | AnnotKind::Stamp
@@ -785,6 +788,12 @@ pub enum AnnotOp {
         id: i32,
         size: f32,
         color: [f32; 3],
+    },
+    /// Intensidade da borda de nuvem (só nuvens; 0 a 2).
+    Cloud {
+        page: i32,
+        id: i32,
+        intensity: f32,
     },
 }
 

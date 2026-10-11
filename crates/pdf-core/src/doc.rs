@@ -826,6 +826,9 @@ pub(crate) fn annot_info(annot: &PdfAnnotation, page: i32, ctm: &Matrix) -> Resu
             _ => None,
         },
         vertices: annot_edit::vertices(annot)?,
+        cloud: (kind == AnnotKind::Cloud)
+            .then(|| annot.border_effect_intensity())
+            .transpose()?,
         callout: callout.map(|(_, line)| line),
         group: annot_edit::group_of(annot)?,
         line: (kind == AnnotKind::Line)
@@ -1227,6 +1230,19 @@ impl PdfDoc {
                 };
                 Edit::LinePoints { page, id, a, b }
             }
+            AnnotOp::Cloud {
+                page,
+                id,
+                intensity,
+            } => Edit::Cloud {
+                page,
+                id,
+                intensity: if intensity.is_finite() {
+                    intensity.clamp(0.0, 2.0)
+                } else {
+                    return Err(refused("intensidade inválida"));
+                },
+            },
             AnnotOp::Fill { page, id, color } => Edit::Fill {
                 page,
                 id,
