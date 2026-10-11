@@ -1,4 +1,5 @@
 mod app;
+mod attachments_panel;
 mod bench;
 mod bookmarks;
 mod canvas;

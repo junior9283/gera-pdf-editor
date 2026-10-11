@@ -18,14 +18,16 @@ pub enum LeftPanel {
     Outline,
     Annotations,
     Signatures,
+    Attachments,
 }
 
 impl LeftPanel {
-    pub const ALL: [LeftPanel; 4] = [
+    pub const ALL: [LeftPanel; 5] = [
         LeftPanel::Thumbnails,
         LeftPanel::Outline,
         LeftPanel::Annotations,
         LeftPanel::Signatures,
+        LeftPanel::Attachments,
     ];
 
     pub fn label(self) -> &'static str {
@@ -34,6 +36,7 @@ impl LeftPanel {
             LeftPanel::Outline => "Marcadores",
             LeftPanel::Annotations => "Anotações",
             LeftPanel::Signatures => "Assinaturas",
+            LeftPanel::Attachments => "Anexos",
         }
     }
 
@@ -43,6 +46,7 @@ impl LeftPanel {
             LeftPanel::Outline => "☰",
             LeftPanel::Annotations => "💬",
             LeftPanel::Signatures => "✒",
+            LeftPanel::Attachments => "📎",
         }
     }
 }

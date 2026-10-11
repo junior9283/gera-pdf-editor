@@ -101,6 +101,8 @@ pub enum DocEvent {
     OpenLink(pdf_core::LinkTarget),
     /// O arquivo pede para abrir em tela cheia (`/PageMode /FullScreen`).
     FullScreen,
+    /// Anexo PDF gravado na pasta privada: abrir numa aba, sem lugar escolhido (Salvar pergunta).
+    OpenAttachment(PathBuf),
     /// Um comando da casca escolhido na página (menu de contexto: Imprimir, Propriedades).
     Run(Command),
 }
@@ -142,6 +144,10 @@ pub struct DocTab {
     pub(crate) attachments: Vec<pdf_core::AttachmentInfo>,
     /// Painel Marcadores (seleção, renomeação, arraste, foco do teclado).
     pub(crate) bookmarks: crate::bookmarks::BookmarksPanel,
+    /// Painel Anexos (seleção e descrição em edição).
+    attachments_panel: crate::attachments_panel::AttachmentsPanel,
+    /// Aviso antes de abrir um anexo (o anexo e quando o aviso apareceu).
+    attach_warning: Option<(pdf_core::AttachmentInfo, Option<f64>)>,
     /// Documento que não permite alterar: expandir e recolher só na tela (marcador → aberto).
     bookmarks_open: std::collections::HashMap<i32, bool>,
     /// Arquivo → Reverter: a pergunta está aberta.
@@ -222,6 +228,9 @@ pub struct DocTab {
     pub(crate) ocr: Option<OcrWindow>,
     /// Criado pelo app (Criar PDF): ainda sem lugar escolhido, conta como não salvo.
     pub(crate) created: bool,
+    /// Anexo aberto (cópia na pasta privada), com o nome original: dá o título da aba, e Salvar
+    /// pede o destino (mas fechar sem mudanças não pergunta nada).
+    pub(crate) attachment_name: Option<String>,
     /// Pedido de foco no campo de busca (Ctrl+F ou menu).
     pub(crate) focus_search: bool,
     /// Propriedades mostradas na janela (aberta enquanto houver).
@@ -266,6 +275,10 @@ enum PickFor {
         separate: bool,
         delete_after: bool,
     },
+    /// Anexos → Adicionar arquivo.
+    Attachment,
+    /// Anexos → Salvar: onde gravar este anexo.
+    SaveAttachment(pdf_core::AttachmentInfo),
 }
 
 /// Diálogo Dividir documento.
@@ -308,6 +321,8 @@ impl DocTab {
             revert_ask: false,
             bookmarks: Default::default(),
             bookmarks_open: Default::default(),
+            attachments_panel: Default::default(),
+            attach_warning: None,
             attachments: Vec::new(),
             display_title: None,
             marquee: None,
@@ -345,6 +360,7 @@ impl DocTab {
             compress: None,
             export: None,
             created: false,
+            attachment_name: None,
             ocr: None,
             focus_search: false,
             properties: None,
@@ -470,7 +486,10 @@ impl DocTab {
         }
         match cmd {
             // PDF criado pelo app: o primeiro Salvar escolhe onde guardar (como o Acrobat)
-            DocCommand::Save if self.created => self.events.push(DocEvent::NeedSaveAs),
+            // criado pelo app, ou anexo aberto da pasta privada: o primeiro Salvar escolhe onde
+            DocCommand::Save if self.created || self.attachment_name.is_some() => {
+                self.events.push(DocEvent::NeedSaveAs)
+            }
             DocCommand::Save => self.save(),
             DocCommand::Undo if self.history.can_undo => self.worker.send(Request::Undo),
             DocCommand::Redo if self.history.can_redo => self.worker.send(Request::Redo),
@@ -819,8 +838,10 @@ impl DocTab {
             Some(pdf_core::InitialPanel::Thumbnails) => {
                 self.events.push(DocEvent::ShowPanel(LeftPanel::Thumbnails))
             }
-            // o painel Anexos chega na Tarefa 6
-            Some(pdf_core::InitialPanel::Attachments) | None => {}
+            Some(pdf_core::InitialPanel::Attachments) => self
+                .events
+                .push(DocEvent::ShowPanel(LeftPanel::Attachments)),
+            None => {}
         }
         if initial.full_screen {
             self.events.push(DocEvent::FullScreen);
@@ -1014,7 +1035,7 @@ impl DocTab {
 
     /// Rótulo da aba: o nome do arquivo, ou o título do documento quando ele pede.
     pub fn title(&self) -> String {
-        match &self.display_title {
+        match self.display_title.as_ref().or(self.attachment_name.as_ref()) {
             Some(t) => {
                 let short: String = t.chars().take(28).collect();
                 if short.len() < t.len() {
@@ -1024,6 +1045,15 @@ impl DocTab {
                 }
             }
             None => app_state::tabs::tab_title(&self.path, 28),
+        }
+    }
+
+    /// Caminho sugerido no Salvar como: o próprio arquivo, ou, para um anexo aberto, o nome dele
+    /// na pasta pessoal (a cópia na pasta privada não é lugar para guardar).
+    pub fn save_suggestion(&self) -> PathBuf {
+        match (&self.attachment_name, std::env::var_os("HOME")) {
+            (Some(name), Some(home)) => PathBuf::from(home).join(name),
+            _ => self.path.clone(),
         }
     }
 
@@ -1288,7 +1318,7 @@ impl DocTab {
                     self.history = history;
                 }
                 Response::AttachmentWritten { dest, open: true } => {
-                    self.events.push(DocEvent::OpenFile(dest))
+                    self.events.push(DocEvent::OpenAttachment(dest))
                 }
                 Response::AttachmentWritten { dest, open: false } => {
                     self.status = format!("Anexo salvo em {}", dest.display());
@@ -2250,6 +2280,7 @@ impl DocTab {
         }
         self.field_props_window(ui.ctx());
         self.revert_window(ui.ctx());
+        self.attach_warning_window(ui.ctx());
         self.protect_windows(ui.ctx());
         self.pagination_windows(ui.ctx());
         self.redact_windows(ui.ctx());
@@ -2279,6 +2310,19 @@ impl DocTab {
                 })
                 .inner;
             self.bookmark_actions(actions);
+            return;
+        }
+        if panel == LeftPanel::Attachments {
+            let can_edit = self.security.permissions.modify;
+            let actions = ui
+                .push_id(self.id, |ui| {
+                    ui.strong(panel.label());
+                    self.attachments_panel.show(ui, &self.attachments, can_edit)
+                })
+                .inner;
+            for action in actions {
+                self.attachment_action(ui.ctx(), action);
+            }
             return;
         }
         if panel == LeftPanel::Signatures {
@@ -2311,6 +2355,93 @@ impl DocTab {
             }
         };
         self.jump(target.0, target.1);
+    }
+
+    fn attachment_action(
+        &mut self,
+        ctx: &egui::Context,
+        action: crate::attachments_panel::AttachmentAction,
+    ) {
+        use crate::attachments_panel::{save_name, AttachmentAction};
+        match action {
+            AttachmentAction::Open(a) => self.attach_warning = Some((a, None)),
+            AttachmentAction::Save(a) => {
+                let dir = self.path.parent().map(PathBuf::from).unwrap_or_default();
+                let suggested = dir.join(save_name(&a.name));
+                self.picking = Some(PickFor::SaveAttachment(a));
+                self.files.save_any(ctx, suggested);
+            }
+            AttachmentAction::Add => {
+                self.picking = Some(PickFor::Attachment);
+                self.files.pick_any_file(ctx, "Adicionar anexo");
+            }
+            AttachmentAction::Remove(name) => self.worker.send(Request::RemoveAttachment { name }),
+            AttachmentAction::Describe { name, text } => {
+                self.worker.send(Request::DescribeAttachment { name, text })
+            }
+            AttachmentAction::Go { page } => self.jump(page, None),
+        }
+    }
+
+    /// Aviso antes de abrir um anexo PDF (como no Acrobat); Permitir grava uma cópia na pasta
+    /// privada do app e a abre numa aba.
+    fn attach_warning_window(&mut self, ctx: &egui::Context) {
+        let Some((a, opened)) = self.attach_warning.as_mut() else {
+            return;
+        };
+        let now = ctx.input(|i| i.time);
+        let ready = crate::links::armed(*opened.get_or_insert(now), now);
+        if !ready {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(crate::links::ARM_DELAY));
+        }
+        let mut answer = None;
+        egui::Window::new("Aviso de segurança")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label("O documento está tentando abrir o anexo:");
+                ui.monospace(crate::links::safe_display(&a.name));
+                ui.label("Se você confia neste anexo, escolha Permitir.");
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(ready, egui::Button::new("Permitir"))
+                        .clicked()
+                    {
+                        answer = Some(true);
+                    }
+                    if ui
+                        .add_enabled(ready, egui::Button::new("Bloquear"))
+                        .clicked()
+                    {
+                        answer = Some(false);
+                    }
+                });
+            });
+        let Some(allow) = answer else { return };
+        let Some((a, _)) = self.attach_warning.take() else {
+            return;
+        };
+        if !allow {
+            return;
+        }
+        match crate::print_job::spool_dir() {
+            Ok(dir) => {
+                use std::sync::atomic::{AtomicU32, Ordering};
+                static N: AtomicU32 = AtomicU32::new(0);
+                let n = N.fetch_add(1, Ordering::Relaxed);
+                let name = crate::attachments_panel::save_name(&a.name);
+                let prefix = crate::attachments_panel::SPOOL_PREFIX;
+                let dest = dir.join(format!("{prefix}{}-{n}-{name}", std::process::id()));
+                self.worker.send(Request::WriteAttachment {
+                    origin: a.origin,
+                    name: a.name,
+                    dest,
+                    open: true,
+                });
+            }
+            Err(e) => self.status = format!("Não foi possível abrir o anexo: {e}"),
+        }
     }
 
     /// Marcadores como aparecem: com expandir e recolher locais quando o documento não permite
@@ -2695,7 +2826,7 @@ impl DocTab {
                         separate,
                         delete_after,
                     });
-                    self.files.save_as(ui.ctx(), suggested);
+                    self.files.save_as(ui.ctx(), suggested.clone(), suggested);
                 }
             }
         }
@@ -2771,6 +2902,22 @@ impl DocTab {
                 {
                     d.path = files.into_iter().next().or(d.path.take());
                 }
+            }
+            (Some(PickFor::Attachment), Picked::Open(files)) => {
+                if let Some(path) = files.into_iter().next() {
+                    self.worker.send(Request::AddAttachment {
+                        path,
+                        description: String::new(),
+                    });
+                }
+            }
+            (Some(PickFor::SaveAttachment(a)), Picked::SaveTo(dest)) => {
+                self.worker.send(Request::WriteAttachment {
+                    origin: a.origin,
+                    name: a.name,
+                    dest,
+                    open: false,
+                });
             }
             (Some(PickFor::Folder), Picked::Folder(dir)) => {
                 if let Some(split) = self.split.as_mut() {
@@ -3484,6 +3631,17 @@ mod tests {
         assert_eq!(tab.title(), "a.pdf");
         tab.display_title = Some("Manual do Usuário".into());
         assert_eq!(tab.title(), "Manual do Usuário");
+    }
+
+    #[test]
+    fn an_opened_attachment_shows_its_own_name() {
+        let mut tab = tab_with_pages(1);
+        tab.path = "/run/user/1000/gera-pdf-editor/gera-anexo-77-0-outro.pdf".into();
+        tab.attachment_name = Some("outro.pdf".into());
+        assert_eq!(tab.title(), "outro.pdf");
+        assert!(!tab.is_dirty(), "abrir um anexo não é uma alteração");
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        assert_eq!(tab.save_suggestion(), home.join("outro.pdf"));
     }
 
     #[test]

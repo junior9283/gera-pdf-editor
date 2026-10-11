@@ -315,6 +315,7 @@ impl GeraApp {
         let mut to_open = Vec::new();
         let mut full_screen = None;
         let mut to_run = Vec::new();
+        let mut attachments = Vec::new();
         for tab in (FIXED..self.tabs.len()).rev() {
             let Some(i) = self.tabs.doc_index(tab) else {
                 continue;
@@ -330,6 +331,7 @@ impl GeraApp {
                     DocEvent::Opened => self.remember(self.docs[i].path.clone()),
                     DocEvent::Renamed(dest) => {
                         self.docs[i].created = false;
+                        self.docs[i].attachment_name = None;
                         let dest = canonical(&dest);
                         self.tabs.rename(tab, dest.clone());
                         self.docs[i].path = dest.clone();
@@ -348,12 +350,16 @@ impl GeraApp {
                         break;
                     }
                     DocEvent::OpenFile(path) => to_open.push(path),
-                    DocEvent::NeedSaveAs => self.dialogs.save_as(ctx, self.docs[i].path.clone()),
+                    DocEvent::NeedSaveAs => {
+                        let doc = self.docs[i].path.clone();
+                        self.dialogs.save_as(ctx, doc, self.docs[i].save_suggestion())
+                    }
                     DocEvent::FullScreen if tab == active && !self.fullscreen => {
                         full_screen = Some(tab)
                     }
                     DocEvent::FullScreen => {}
                     DocEvent::Run(cmd) => to_run.push(cmd),
+                    DocEvent::OpenAttachment(path) => attachments.push(path),
                     DocEvent::OpenLink(target) => {
                         use crate::links::Outcome;
                         match crate::links::outcome(&target, &self.prefs.link_sites) {
@@ -370,6 +376,13 @@ impl GeraApp {
         }
         for path in to_open {
             self.open_path(ctx, path);
+        }
+        // anexo aberto: a cópia na pasta privada não é um lugar para salvar (Salvar pergunta onde)
+        for path in attachments {
+            self.open_path(ctx, path.clone());
+            if let Some(doc) = self.docs.iter_mut().find(|d| d.path == canonical(&path)) {
+                doc.attachment_name = crate::attachments_panel::spool_name(&path);
+            }
         }
         for cmd in to_run {
             self.run(ctx, cmd);
@@ -438,8 +451,9 @@ impl GeraApp {
                 }
             }
             Command::SaveAs => {
-                if let Some(path) = self.active_path() {
-                    self.dialogs.save_as(ctx, path);
+                if let Some(doc) = self.active_doc() {
+                    let (path, suggested) = (doc.path.clone(), doc.save_suggestion());
+                    self.dialogs.save_as(ctx, path, suggested);
                 }
             }
             Command::CloseTab => {

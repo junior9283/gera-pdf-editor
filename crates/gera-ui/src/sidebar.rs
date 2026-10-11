@@ -80,7 +80,8 @@ pub fn show(
         LeftPanel::Outline => SidebarAction::None,
         LeftPanel::Annotations => annotation_list(ui, annots),
         // desenhado pela aba (precisa das assinaturas validadas)
-        LeftPanel::Signatures => SidebarAction::None,
+        // assinaturas e anexos têm painel próprio
+        LeftPanel::Signatures | LeftPanel::Attachments => SidebarAction::None,
     }
 }
 

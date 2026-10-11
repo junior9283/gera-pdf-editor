@@ -106,10 +106,11 @@ fn sweep_stale(dir: &Path) {
         let name = entry.file_name();
         let pid = name
             .to_str()
-            // cópias de impressão e imagens coladas (clipboard.rs)
+            // cópias de impressão, imagens coladas (clipboard.rs) e anexos abertos
             .and_then(|n| {
-                n.strip_prefix("imprimir-")
-                    .or_else(|| n.strip_prefix("gera-colar-"))
+                ["imprimir-", "gera-colar-", "gera-anexo-"]
+                    .iter()
+                    .find_map(|p| n.strip_prefix(p))
             })
             .and_then(|n| n.split('-').next())
             .and_then(|p| p.parse::<u32>().ok());
