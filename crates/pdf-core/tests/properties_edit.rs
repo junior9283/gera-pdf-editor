@@ -178,3 +178,71 @@ fn display_title_reaches_the_summary() {
         Some("Manual do Usuário")
     );
 }
+
+/// PDF de 1 página com o catálogo `catalog_extra` e os objetos `more` (numerados a partir de 4).
+fn pdf_with(dir: &tempfile::TempDir, catalog_extra: &str, more: &[String]) -> PdfDoc {
+    let mut objs = vec![
+        format!("<</Type/Catalog/Pages 2 0 R{catalog_extra}>>"),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>".to_string(),
+    ];
+    objs.extend_from_slice(more);
+    let path = dir.path().join("in.pdf");
+    std::fs::write(&path, pdf_from_objects(&objs)).unwrap();
+    PdfDoc::open(&path, None).unwrap()
+}
+
+/// Valor de um elemento do XMP.
+fn element<'a>(xmp: &'a str, tag: &str) -> Option<&'a str> {
+    let start = xmp.find(&format!("<{tag}>"))? + tag.len() + 2;
+    Some(&xmp[start..start + xmp[start..].find(&format!("</{tag}>"))?])
+}
+
+#[test]
+fn pdfa_id_in_attribute_form_survives_and_xmp_matches_info() {
+    let dir = tempfile::tempdir().unwrap();
+    let xmp = r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/" pdfaid:part="2" pdfaid:conformance='B'/></rdf:RDF></x:xmpmeta><?xpacket end="w"?>"#;
+    let meta = format!(
+        "<</Type/Metadata/Subtype/XML/Length {}>>\nstream\n{xmp}\nendstream",
+        xmp.len()
+    );
+    let mut d = pdf_with(&dir, "/Metadata 4 0 R", &[meta]);
+    let mut e = edit_from(&d);
+    e.title = "Novo".into();
+    d.set_properties(&e).unwrap();
+    let out = dir.path().join("depois.pdf");
+    d.save(&out).unwrap();
+    let saved = PdfDoc::open(&out, None).unwrap();
+    let x = saved.xmp().unwrap();
+    assert_eq!(element(&x, "pdfaid:part"), Some("2"), "{x}");
+    assert_eq!(element(&x, "pdfaid:conformance"), Some("B"), "{x}");
+    // PDF/A exige o XMP igual ao /Info: o produtor e o aplicativo são os do /Info
+    let p = saved.properties().unwrap();
+    let producer = element(&x, "pdf:Producer").unwrap_or("");
+    assert_eq!(producer, p.producer, "{x}");
+    assert_eq!(element(&x, "xmp:CreatorTool").unwrap_or(""), p.creator, "{x}");
+    // datas com fuso, como no /Info
+    let modified = element(&x, "xmp:ModifyDate").unwrap();
+    let tz = &modified[19..];
+    assert!(
+        tz == "Z" || (tz.len() == 6 && tz.as_bytes()[3] == b':'),
+        "{modified}"
+    );
+}
+
+#[test]
+fn changing_only_the_title_keeps_the_initial_view_as_it_was() {
+    let dir = tempfile::tempdir().unwrap();
+    let js = "<</S/JavaScript/JS(app.alert\\(1\\))>>".to_string();
+    let mut d = pdf_with(&dir, "/OpenAction 4 0 R/PageMode/UseOC/PageLayout/OneColumn", &[js]);
+    let mut e = edit_from(&d);
+    e.title = "Só o título".into();
+    d.set_properties(&e).unwrap();
+    let out = dir.path().join("depois.pdf");
+    d.save(&out).unwrap();
+    let bytes = String::from_utf8_lossy(&std::fs::read(&out).unwrap()).into_owned();
+    assert!(bytes.contains("/OpenAction"), "a ação de abertura continua");
+    assert!(bytes.contains("JavaScript"), "a ação de abertura continua");
+    assert!(bytes.contains("/UseOC"), "o modo de página continua");
+    assert!(bytes.contains("/OneColumn"));
+}

@@ -207,13 +207,26 @@ impl PdfDoc {
         for (name, value) in &e.custom {
             put_text(&mut info, name, value)?;
         }
-        info.dict_put("ModDate", PdfObject::new_string(&pdf_now())?)?;
+        let now = pdf_now();
+        info.dict_put("ModDate", PdfObject::new_string(&now)?)?;
+        // a visualização inicial só é regravada quando muda: o que o app não representa (ação
+        // JavaScript, /UseOC, destino FitV…) continua como estava
+        let unchanged = self.initial_view() == e.initial;
         let mut catalog = self.inner.catalog()?;
-        write_initial_view(&self.inner, &mut catalog, &e.initial)?;
+        if !unchanged {
+            write_initial_view(&self.inner, &mut catalog, &e.initial)?;
+        }
         put_text(&mut catalog, "Lang", &e.lang)?;
         write_viewer_prefs(&self.inner, &mut catalog, &e.window, &e.print)?;
         let old_xmp = self.xmp();
-        let xmp = xmp_packet(e, old_xmp.as_deref(), &self.creation_date());
+        let text = |k: &str| crate::pdf_obj::text(&info, k);
+        let stamps = XmpStamps {
+            producer: text("Producer"),
+            creator: text("Creator"),
+            created: text("CreationDate"),
+            modified: now,
+        };
+        let xmp = xmp_packet(e, old_xmp.as_deref(), &stamps);
         let mut dict = self.inner.new_dict()?;
         dict.dict_put("Type", PdfObject::new_name("Metadata")?)?;
         dict.dict_put("Subtype", PdfObject::new_name("XML")?)?;
@@ -223,12 +236,14 @@ impl PdfDoc {
         Ok(())
     }
 
-    fn creation_date(&self) -> String {
-        self.info_dict()
-            .and_then(|i| get(&i, "CreationDate"))
-            .and_then(|d| d.as_string().ok())
-            .unwrap_or_default()
-    }
+}
+
+/// O que o XMP repete do `/Info` (o PDF/A exige os dois iguais).
+struct XmpStamps {
+    producer: String,
+    creator: String,
+    created: String,
+    modified: String,
 }
 
 /// Texto no dicionário; vazio apaga a chave.
@@ -431,12 +446,23 @@ fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Valor de um elemento simples no XMP antigo (ex.: `pdfaid:part`).
+/// Valor simples no XMP antigo (ex.: `pdfaid:part`), como elemento (`<pdfaid:part>2</…>`) ou
+/// como atributo (`pdfaid:part="2"` ou com aspas simples).
 fn xmp_value(xmp: &str, element: &str) -> Option<String> {
-    let open = format!("<{element}>");
-    let start = xmp.find(&open)? + open.len();
-    let end = start + xmp[start..].find(&format!("</{element}>"))?;
-    let v = xmp[start..end].trim();
+    let as_element = || {
+        let open = format!("<{element}>");
+        let start = xmp.find(&open)? + open.len();
+        let end = start + xmp[start..].find(&format!("</{element}>"))?;
+        Some(&xmp[start..end])
+    };
+    let as_attribute = || {
+        ['"', '\''].into_iter().find_map(|q| {
+            let open = format!("{element}={q}");
+            let start = xmp.find(&open)? + open.len();
+            Some(&xmp[start..start + xmp[start..].find(q)?])
+        })
+    };
+    let v = as_element().or_else(as_attribute)?.trim();
     (!v.is_empty() && v.len() < 16 && v.chars().all(|c| c.is_ascii_alphanumeric()))
         .then(|| v.to_owned())
 }
@@ -452,8 +478,19 @@ fn iso_date(pdf: &str) -> String {
         return String::new();
     }
     let part = |a: usize, b: usize, default: &str| d.get(a..b).unwrap_or(default).to_owned();
+    // fuso depois dos dígitos: "Z" ou "+HH'mm'"/"-HH'mm'" → "Z" ou "+HH:mm"
+    let rest = pdf.trim_start_matches("D:").get(d.len()..).unwrap_or("");
+    let digits: String = rest.chars().filter(char::is_ascii_digit).take(4).collect();
+    let zone = match rest.chars().next() {
+        Some('Z') => "Z".to_owned(),
+        Some(sign @ ('+' | '-')) if digits.len() >= 2 => {
+            let minutes = digits.get(2..4).unwrap_or("00");
+            format!("{sign}{}:{minutes}", &digits[..2])
+        }
+        _ => String::new(),
+    };
     format!(
-        "{}-{}-{}T{}:{}:{}",
+        "{}-{}-{}T{}:{}:{}{zone}",
         &d[0..4],
         &d[4..6],
         &d[6..8],
@@ -464,7 +501,7 @@ fn iso_date(pdf: &str) -> String {
 }
 
 /// Pacote XMP com a descrição. As declarações de PDF/A e PDF/UA do XMP antigo continuam.
-fn xmp_packet(e: &PropertiesEdit, old: Option<&str>, created: &str) -> String {
+fn xmp_packet(e: &PropertiesEdit, old: Option<&str>, stamps: &XmpStamps) -> String {
     let old = old.unwrap_or("");
     let mut ids = String::new();
     for (prefix, ns, elements) in [
@@ -489,35 +526,47 @@ fn xmp_packet(e: &PropertiesEdit, old: Option<&str>, created: &str) -> String {
             ));
         }
     }
-    let alt = |v: &str| {
-        format!(
-            "<rdf:Alt><rdf:li xml:lang=\"x-default\">{}</rdf:li></rdf:Alt>",
-            xml_escape(v)
-        )
+    // cada valor só aparece quando existe no /Info (o PDF/A compara os dois)
+    let tag = |name: &str, v: &str| {
+        if v.trim().is_empty() {
+            String::new()
+        } else {
+            format!("<{name}>{}</{name}>", xml_escape(v))
+        }
     };
-    let now = iso_date(&pdf_now());
-    let created = iso_date(created);
-    let created = if created.is_empty() {
-        now.clone()
+    let alt = |name: &str, v: &str| {
+        if v.trim().is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<{name}><rdf:Alt><rdf:li xml:lang=\"x-default\">{}</rdf:li></rdf:Alt></{name}>",
+                xml_escape(v)
+            )
+        }
+    };
+    let creator = if e.author.trim().is_empty() {
+        String::new()
     } else {
-        created
+        format!(
+            "<dc:creator><rdf:Seq><rdf:li>{}</rdf:li></rdf:Seq></dc:creator>",
+            xml_escape(&e.author)
+        )
     };
     format!(
         "<?xpacket begin=\"\u{feff}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\
 <x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
 <rdf:Description rdf:about=\"\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\
-<dc:format>application/pdf</dc:format><dc:title>{}</dc:title>\
-<dc:creator><rdf:Seq><rdf:li>{}</rdf:li></rdf:Seq></dc:creator><dc:description>{}</dc:description>\
-</rdf:Description>\
-<rdf:Description rdf:about=\"\" xmlns:pdf=\"http://ns.adobe.com/pdf/1.3/\"><pdf:Keywords>{}</pdf:Keywords>\
-<pdf:Producer>Gera PDF Editor</pdf:Producer></rdf:Description>\
-<rdf:Description rdf:about=\"\" xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\"><xmp:CreatorTool>Gera PDF Editor</xmp:CreatorTool>\
-<xmp:CreateDate>{created}</xmp:CreateDate><xmp:ModifyDate>{now}</xmp:ModifyDate></rdf:Description>\
+<dc:format>application/pdf</dc:format>{}{creator}{}</rdf:Description>\
+<rdf:Description rdf:about=\"\" xmlns:pdf=\"http://ns.adobe.com/pdf/1.3/\">{}{}</rdf:Description>\
+<rdf:Description rdf:about=\"\" xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\">{}{}{}</rdf:Description>\
 {ids}</rdf:RDF></x:xmpmeta><?xpacket end=\"w\"?>",
-        alt(&e.title),
-        xml_escape(&e.author),
-        alt(&e.subject),
-        xml_escape(&e.keywords),
+        alt("dc:title", &e.title),
+        alt("dc:description", &e.subject),
+        tag("pdf:Keywords", &e.keywords),
+        tag("pdf:Producer", &stamps.producer),
+        tag("xmp:CreatorTool", &stamps.creator),
+        tag("xmp:CreateDate", &iso_date(&stamps.created)),
+        tag("xmp:ModifyDate", &iso_date(&stamps.modified)),
     )
 }
 
@@ -527,7 +576,13 @@ mod tests {
 
     #[test]
     fn dates_and_escaping() {
-        assert_eq!(iso_date("D:20261011093005-03'00'"), "2026-10-11T09:30:05");
+        assert_eq!(
+            iso_date("D:20261011093005-03'00'"),
+            "2026-10-11T09:30:05-03:00",
+            "o fuso acompanha (o PDF/A compara com o /Info)"
+        );
+        assert_eq!(iso_date("D:20261011093005Z"), "2026-10-11T09:30:05Z");
+        assert_eq!(iso_date("D:20261011"), "2026-10-11T00:00:00");
         assert_eq!(iso_date("D:2026"), "");
         assert_eq!(xml_escape("a<b>&\"c\""), "a&lt;b&gt;&amp;&quot;c&quot;");
         assert_eq!(xmp_value("<x:a>1</x:a>", "x:a").as_deref(), Some("1"));
