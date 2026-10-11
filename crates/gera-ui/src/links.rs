@@ -15,11 +15,23 @@ pub fn link_at(links: &[LinkInfo], page: i32, pt: (f32, f32)) -> Option<&LinkInf
         .find(|l| l.rect.contains(pt.0, pt.1))
 }
 
+/// Tamanho máximo do endereço na dica e no aviso (o resto vira "…").
+const HINT_CHARS: usize = 200;
+
+/// Começo de `text` com no máximo `max` caracteres, com "…" se foi cortado.
+fn shortened(text: &str, max: usize) -> String {
+    let mut out: String = text.chars().take(max).collect();
+    if out.len() < text.len() {
+        out.push('…');
+    }
+    out
+}
+
 /// Dica mostrada sobre o link.
 pub fn hint(target: &LinkTarget) -> String {
     match target {
         LinkTarget::Page { page, .. } => format!("Página {}", page + 1),
-        LinkTarget::Uri(url) => url.clone(),
+        LinkTarget::Uri(url) => shortened(url, HINT_CHARS),
         LinkTarget::File { path, .. } => app_state::tabs::tab_title(path, 80),
         LinkTarget::Blocked(_) => "Link bloqueado".into(),
     }
@@ -97,11 +109,12 @@ impl LinkWarning {
                     // endereço ambíguo (sem site reconhecível): nada a lembrar, o aviso volta sempre
                     LinkTarget::Uri(url) => (
                         "se conectar a:",
-                        url.clone(),
+                        shortened(url, 2 * HINT_CHARS),
                         link_policy::site_key(url).is_some(),
                     ),
                     LinkTarget::File { path, .. } => {
-                        ("abrir o arquivo:", path.display().to_string(), false)
+                        let path = path.display().to_string();
+                        ("abrir o arquivo:", shortened(&path, 2 * HINT_CHARS), false)
                     }
                     _ => return,
                 };
@@ -175,6 +188,15 @@ mod tests {
         assert!(!armed(10.0, 10.0));
         assert!(!armed(10.0, 10.0 + ARM_DELAY - 0.01));
         assert!(armed(10.0, 10.0 + ARM_DELAY));
+    }
+
+    #[test]
+    fn long_addresses_are_shortened_on_screen() {
+        let url = format!("https://example.com/{}", "a".repeat(5000));
+        let shown = hint(&LinkTarget::Uri(url.clone()));
+        assert!(shown.chars().count() <= HINT_CHARS + 1, "{}", shown.len());
+        assert!(shown.starts_with("https://example.com/") && shown.ends_with('…'));
+        assert_eq!(hint(&LinkTarget::Uri("https://a.b".into())), "https://a.b");
     }
 
     #[test]

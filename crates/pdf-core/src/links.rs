@@ -10,6 +10,10 @@ use std::path::{Component, Path, PathBuf};
 
 /// Esquemas que podem abrir (depois do aviso de segurança), como no Acrobat.
 const ALLOWED_SCHEMES: [&str; 3] = ["http", "https", "mailto"];
+/// Endereço maior que isso é recusado (um PDF malicioso poderia travar a dica e o aviso).
+const MAX_URI_BYTES: usize = 8 * 1024;
+/// O alvo recusado guarda só o começo, para a mensagem.
+const BLOCKED_SHOWN_CHARS: usize = 200;
 
 impl PdfDoc {
     /// Links da página `page`. Os que não se resolvem (malformados, destino inexistente) ficam de
@@ -149,7 +153,7 @@ fn target_of(action: LinkAction, page_count: i32, dir: &Path) -> Option<LinkTarg
                     path: absolute(dir, &p),
                     page,
                 },
-                FileSpec::Path(p) => LinkTarget::Blocked(p),
+                FileSpec::Path(p) => blocked(p),
                 FileSpec::Url(u) => web(u),
             })
         }
@@ -157,7 +161,7 @@ fn target_of(action: LinkAction, page_count: i32, dir: &Path) -> Option<LinkTarg
             path: absolute(dir, &p),
             page: None,
         }),
-        PdfAction::Launch(FileSpec::Path(p) | FileSpec::Url(p)) => Some(LinkTarget::Blocked(p)),
+        PdfAction::Launch(FileSpec::Path(p) | FileSpec::Url(p)) => Some(blocked(p)),
         PdfAction::Uri(u) => Some(web(u)),
     }
 }
@@ -183,17 +187,28 @@ fn web(uri: String) -> LinkTarget {
     let scheme = uri
         .split_once(':')
         .map(|(s, _)| s.trim().to_ascii_lowercase());
-    if scheme.is_some_and(|s| ALLOWED_SCHEMES.contains(&s.as_str())) {
+    if uri.len() <= MAX_URI_BYTES && scheme.is_some_and(|s| ALLOWED_SCHEMES.contains(&s.as_str())) {
         LinkTarget::Uri(uri)
     } else {
-        LinkTarget::Blocked(uri)
+        blocked(uri)
     }
 }
 
+/// Alvo recusado, com só o começo do texto (que vem do PDF e pode ser enorme).
+fn blocked(target: String) -> LinkTarget {
+    let mut shown: String = target.chars().take(BLOCKED_SHOWN_CHARS).collect();
+    if shown.len() < target.len() {
+        shown.push('…');
+    }
+    LinkTarget::Blocked(shown)
+}
+
+/// PDF de nome razoável (um caminho enorme vindo do PDF é recusado).
 fn is_pdf(path: &str) -> bool {
-    Path::new(path)
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+    path.len() <= 4096
+        && Path::new(path)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
 }
 
 /// Caminho relativo ao documento vira absoluto, sem `.` e `..`.

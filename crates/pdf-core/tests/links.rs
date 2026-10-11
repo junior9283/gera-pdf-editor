@@ -231,3 +231,48 @@ fn initial_view_ignores_junk() {
         pdf_core::InitialView::default()
     );
 }
+
+#[test]
+fn giant_uri_is_blocked_and_not_kept_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let huge = format!("https://example.com/{}", "a".repeat(100_000));
+    let path = links_pdf(dir.path(), &[&format!("/A<</S/URI/URI({huge})>>")], "");
+    match &targets(&path)[..] {
+        [LinkTarget::Blocked(shown)] => assert!(shown.len() <= 300, "{}", shown.len()),
+        t => panic!(
+            "{} alvos, o primeiro com {:?} bytes",
+            t.len(),
+            t.first().map(|x| format!("{x:?}").len())
+        ),
+    }
+}
+
+#[test]
+fn thousands_of_links_open_quickly() {
+    let dir = tempfile::tempdir().unwrap();
+    let many: Vec<String> = (0..5000)
+        .map(|i| format!("/A<</S/URI/URI(https://e.com/{i})>>"))
+        .collect();
+    let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+    let path = links_pdf(dir.path(), &refs, "");
+    let t = std::time::Instant::now();
+    let s = PdfDoc::open(&path, None).unwrap().summary().unwrap();
+    assert_eq!(s.links.len(), 5000);
+    assert!(t.elapsed().as_secs_f32() < 5.0, "{:?}", t.elapsed());
+}
+
+#[test]
+fn corrupt_annots_do_not_break_opening() {
+    // /Annots como dicionário, número ou em ciclo: a abertura segue, sem links
+    for annots in ["/Annots<</A 1>>", "/Annots 7", "/Annots 3 0 R"] {
+        let dir = tempfile::tempdir().unwrap();
+        let objs = vec![
+            "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+            format!("<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]{annots}>>"),
+        ];
+        let path = raw_pdf(dir.path(), "c.pdf", &objs);
+        let s = PdfDoc::open(&path, None).unwrap().summary().unwrap();
+        assert!(s.links.is_empty(), "{annots}");
+    }
+}

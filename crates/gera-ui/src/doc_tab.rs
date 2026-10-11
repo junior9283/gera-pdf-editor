@@ -2298,7 +2298,11 @@ impl DocTab {
 
     fn canvas(&mut self, ui: &mut egui::Ui) {
         let (avail_w, avail_h) = (ui.available_width() - 24.0, ui.available_height() - 24.0);
-        if let Some(ratio) = self.view.as_mut().and_then(|v| v.apply_fit(avail_w, avail_h)) {
+        if let Some(ratio) = self
+            .view
+            .as_mut()
+            .and_then(|v| v.apply_fit(avail_w, avail_h))
+        {
             self.after_zoom_change(ratio);
             if let Some(view) = self.view.as_ref().filter(|v| v.fit == Fit::Visible) {
                 self.jump_x = view.visible_left(avail_w);
