@@ -16,9 +16,9 @@ const MAX_DEPTH: usize = 64;
 const MAX_TITLE_CHARS: usize = 512;
 
 /// Página e ponto de um destino.
-type Target = (Option<i32>, Option<(f32, f32)>);
+pub(crate) type Target = (Option<i32>, Option<(f32, f32)>);
 /// Matriz e altura de cada página já carregada (destinos dos marcadores).
-type PageCache = std::collections::HashMap<i32, (Matrix, f32)>;
+pub(crate) type PageCache = std::collections::HashMap<i32, (Matrix, f32)>;
 
 /// Item da árvore em memória.
 struct Item {
@@ -281,7 +281,12 @@ impl PdfDoc {
                 get(&action, "D")?
             }
         };
-        let (page, array) = self.resolve_dest(&dest)?;
+        self.dest_target(&dest, pages)
+    }
+
+    /// Página e ponto (coordenadas do MuPDF) de um destino (nome, string ou array).
+    pub(crate) fn dest_target(&self, dest: &PdfObject, pages: &mut PageCache) -> Option<Target> {
+        let (page, array) = self.resolve_dest(dest)?;
         let (Some(page), Some(dest)) = (page, array) else {
             return Some((page, None));
         };
@@ -424,7 +429,7 @@ impl PdfDoc {
     }
 
     /// `[página /XYZ x y null]` (o ponto vem em coordenadas do MuPDF), ou `[página /Fit]`.
-    fn dest_array(&self, page: i32, at: Option<(f32, f32)>) -> Result<PdfObject> {
+    pub(crate) fn dest_array(&self, page: i32, at: Option<(f32, f32)>) -> Result<PdfObject> {
         self.check_page(page)?;
         let mut dest = self.inner.new_array()?;
         dest.array_push(self.inner.find_page(page)?)?;

@@ -142,6 +142,10 @@ pub struct DocTab {
     pub(crate) display_title: Option<String>,
     /// Anexos do documento e dos comentários (painel Anexos).
     pub(crate) attachments: Vec<pdf_core::AttachmentInfo>,
+    /// Destinos nomeados (painel Destinos).
+    pub(crate) destinations: Vec<pdf_core::DestInfo>,
+    /// Rótulo de cada página (vazio sem rótulos).
+    pub(crate) labels: Vec<String>,
     /// Painel Marcadores (seleção, renomeação, arraste, foco do teclado).
     pub(crate) bookmarks: crate::bookmarks::BookmarksPanel,
     /// Painel Anexos (seleção e descrição em edição).
@@ -324,6 +328,8 @@ impl DocTab {
             attachments_panel: Default::default(),
             attach_warning: None,
             attachments: Vec::new(),
+            destinations: Vec::new(),
+            labels: Vec::new(),
             display_title: None,
             marquee: None,
             focus_zoom: false,
@@ -1082,6 +1088,8 @@ impl DocTab {
         self.outline = summary.outline;
         self.links = summary.links;
         self.attachments = summary.attachments;
+        self.destinations = summary.destinations;
+        self.labels = summary.labels;
         self.display_title = summary.display_title;
         (summary.path, summary.sizes)
     }
@@ -1312,6 +1320,14 @@ impl DocTab {
                     history,
                 } => {
                     self.attachments = attachments;
+                    self.history = history;
+                }
+                Response::DestinationsChanged {
+                    destinations,
+                    created: _,
+                    history,
+                } => {
+                    self.destinations = destinations;
                     self.history = history;
                 }
                 Response::AttachmentWritten { dest, open: true } => {

@@ -543,6 +543,8 @@ pub struct DocSummary {
     pub display_title: Option<String>,
     /// Rótulo de cada página (vazio quando o documento não tem rótulos).
     pub labels: Vec<String>,
+    /// Destinos nomeados (painel Destinos).
+    pub destinations: Vec<crate::DestInfo>,
     /// Campos de formulário de todas as páginas.
     pub fields: Vec<crate::FieldInfo>,
     pub form_notes: crate::FormNotes,
@@ -853,4 +855,6 @@ pub enum Changed {
     /// Marcadores (com o id do criado, se houver).
     Outline(Option<i32>),
     Attachments,
+    /// Destinos nomeados (com o nome do criado, se houver).
+    Destinations(Option<String>),
 }

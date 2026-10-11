@@ -49,6 +49,8 @@ pub enum Request {
     RemoveAttachment {
         name: String,
     },
+    /// Cria, renomeia, redefine ou exclui um destino nomeado.
+    Destination(crate::DestOp),
     /// Grava os rótulos de página (diálogo Rótulos de página).
     PageLabels(Vec<crate::PageLabelRange>),
     DescribeAttachment {
@@ -250,6 +252,11 @@ pub enum Response {
     },
     AttachmentsChanged {
         attachments: Vec<crate::types::AttachmentInfo>,
+        history: HistoryState,
+    },
+    DestinationsChanged {
+        destinations: Vec<crate::DestInfo>,
+        created: Option<String>,
         history: HistoryState,
     },
     /// O anexo foi gravado em `dest` (`open`: abrir numa aba).
@@ -490,6 +497,9 @@ impl State {
             Request::AddAttachment { path } => self.edit(send, |d| {
                 d.add_attachment(&path, "")?;
                 Ok(Changed::Attachments)
+            }),
+            Request::Destination(op) => self.edit(send, |d| {
+                Ok(Changed::Destinations(d.edit_destination(op)?))
             }),
             Request::PageLabels(ranges) => self.edit(send, |d| {
                 d.set_page_labels(ranges)?;
@@ -783,6 +793,11 @@ impl State {
             }),
             Ok(Changed::Outline(created)) => send(Response::OutlineChanged {
                 outline: d.outline_tree().unwrap_or_default(),
+                created,
+                history: d.history_state(),
+            }),
+            Ok(Changed::Destinations(created)) => send(Response::DestinationsChanged {
+                destinations: d.destinations(),
                 created,
                 history: d.history_state(),
             }),

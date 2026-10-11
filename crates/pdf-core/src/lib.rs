@@ -7,6 +7,7 @@ mod compare;
 mod compare_report;
 mod compress;
 mod create_export;
+mod destinations;
 mod digital_id;
 mod doc;
 mod edit_images;
@@ -42,6 +43,7 @@ pub use compare::{
 pub use compare_report::{compare_files, COMPARE_AUTHOR};
 pub use compress::{CompressLevel, CompressReport};
 pub use create_export::{create_pdf_from_images, ExportFormat};
+pub use destinations::{DestInfo, DestOp};
 pub use digital_id::{fingerprint, DigitalId};
 pub use doc::{max_render_scale, PdfDoc};
 pub use edit_images::{ImageEdit, PageImage};
