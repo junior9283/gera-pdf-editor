@@ -1,6 +1,8 @@
 //! Preferências da interface, guardadas entre sessões.
 use crate::link_policy::{site_key, LinkDecision, MAX_SITES};
+use crate::layout::ViewMode;
 use crate::store;
+use crate::view_history::ViewEntry;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -45,6 +47,23 @@ impl LeftPanel {
     }
 }
 
+/// Zoom dos documentos novos (Preferências → Exibição de página).
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub enum DefaultZoom {
+    /// Ajustar à largura (o que o app sempre fez).
+    #[default]
+    Auto,
+    FitPage,
+    FitWidth,
+    FitHeight,
+    Level(f32),
+}
+
+/// Maior número de recentes que dá para escolher.
+pub const MAX_RECENT_SETTING: usize = 50;
+/// Arquivos com a última vista lembrada.
+pub const MAX_LAST_VIEWS: usize = 200;
+
 /// Clicar no painel aberto o fecha; em outro, troca para ele.
 pub fn toggled(open: Option<LeftPanel>, p: LeftPanel) -> Option<LeftPanel> {
     (open != Some(p)).then_some(p)
@@ -63,6 +82,17 @@ pub struct Prefs {
     pub author: Option<String>,
     /// Escolhas lembradas no aviso de segurança dos links (site → permitir/bloquear).
     pub link_sites: BTreeMap<String, LinkDecision>,
+    /// Usar aceleradores de tecla única (V, H, Z, S, U, D, X, K).
+    pub single_key: bool,
+    /// Layout dos documentos novos; `None`: o do app (rolagem contínua).
+    pub default_mode: Option<ViewMode>,
+    pub default_zoom: DefaultZoom,
+    /// Restaurar a última vista ao reabrir documentos.
+    pub restore_views: bool,
+    /// Quantos recentes mostrar.
+    pub max_recents: usize,
+    /// Última vista de cada arquivo (o mais recente no fim).
+    pub last_views: Vec<(String, ViewEntry)>,
 }
 
 impl Default for Prefs {
@@ -75,6 +105,12 @@ impl Default for Prefs {
             tools_width: 200.0,
             author: None,
             link_sites: BTreeMap::new(),
+            single_key: false,
+            default_mode: None,
+            default_zoom: DefaultZoom::Auto,
+            restore_views: true,
+            max_recents: 20,
+            last_views: Vec::new(),
         }
     }
 }
@@ -86,6 +122,22 @@ impl Prefs {
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         store::save_json(path, self)
+    }
+
+    /// Guarda a vista do arquivo `path` (o mais antigo sai depois de `MAX_LAST_VIEWS`).
+    pub fn remember_view(&mut self, path: &str, view: ViewEntry) {
+        self.last_views.retain(|(p, _)| p != path);
+        if self.last_views.len() >= MAX_LAST_VIEWS {
+            self.last_views.remove(0);
+        }
+        self.last_views.push((path.to_owned(), view));
+    }
+
+    pub fn last_view(&self, path: &str) -> Option<ViewEntry> {
+        self.last_views
+            .iter()
+            .find(|(p, _)| p == path)
+            .map(|&(_, v)| v)
     }
 
     /// Abre o painel `p`, ou fecha se ele já estiver aberto.
@@ -111,6 +163,14 @@ impl Prefs {
             .filter(|(k, _)| site_key(k).as_deref() == Some(k.as_str()))
             .take(MAX_SITES)
             .collect();
+        self.max_recents = self.max_recents.clamp(1, MAX_RECENT_SETTING);
+        if let DefaultZoom::Level(z) = self.default_zoom {
+            if !(z.is_finite() && z > 0.0) {
+                self.default_zoom = DefaultZoom::Auto;
+            }
+        }
+        let skip = self.last_views.len().saturating_sub(MAX_LAST_VIEWS);
+        self.last_views.drain(..skip);
         self
     }
 }
@@ -118,6 +178,49 @@ impl Prefs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefs_defaults_match_acrobat() {
+        let p = Prefs::default();
+        assert!(!p.single_key, "aceleradores de tecla única desligados de fábrica");
+        assert!(p.restore_views);
+        assert_eq!(p.max_recents, 20);
+        assert_eq!((p.default_mode, p.default_zoom), (None, DefaultZoom::Auto));
+    }
+
+    #[test]
+    fn last_views_are_capped() {
+        use crate::view_history::ViewEntry;
+        let mut p = Prefs::default();
+        let e = ViewEntry {
+            page: 3,
+            y: 1.0,
+            zoom: 1.5,
+            fit: crate::zoom::Fit::None,
+        };
+        for i in 0..MAX_LAST_VIEWS + 30 {
+            p.remember_view(&format!("/doc{i}.pdf"), e);
+        }
+        assert_eq!(p.last_views.len(), MAX_LAST_VIEWS);
+        assert_eq!(p.last_view("/doc0.pdf"), None, "o mais antigo sai");
+        assert_eq!(p.last_view(&format!("/doc{}.pdf", MAX_LAST_VIEWS + 29)), Some(e));
+        // de novo o mesmo arquivo: vira o mais recente, sem duplicar
+        p.remember_view("/doc40.pdf", e);
+        assert_eq!(p.last_views.len(), MAX_LAST_VIEWS);
+    }
+
+    #[test]
+    fn bad_prefs_are_sanitized() {
+        let mut p = Prefs {
+            max_recents: 0,
+            ..Prefs::default()
+        };
+        assert_eq!(p.clone().sanitized().max_recents, 1);
+        p.max_recents = 999;
+        assert_eq!(p.clone().sanitized().max_recents, MAX_RECENT_SETTING);
+        p.default_zoom = DefaultZoom::Level(f32::NAN);
+        assert_eq!(p.sanitized().default_zoom, DefaultZoom::Auto);
+    }
 
     #[test]
     fn bad_link_sites_are_dropped() {

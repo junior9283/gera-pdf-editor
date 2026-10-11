@@ -464,6 +464,8 @@ impl EditState {
                 }
                 self.context_menu(&response, pointer, annots, page, map);
             }
+            // Mão e Zoom com marca: os gestos ficam na aba (rolagem e zoom)
+            Tool::Hand | Tool::Zoom => {}
             Tool::Note => {
                 if let (true, Some(at)) = (response.clicked(), pointer) {
                     self.note_draft = Some(NoteDraft {

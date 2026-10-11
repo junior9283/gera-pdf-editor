@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const MAX_RECENTS: usize = 20;
+/// Recentes guardados (a preferência escolhe quantos mostrar, até isso).
+pub const MAX_RECENTS: usize = 50;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Recent {
@@ -47,6 +48,11 @@ impl RecentFiles {
         self.items.truncate(MAX_RECENTS);
     }
 
+    /// Preferências → Documentos → Esquecer os documentos recentes.
+    pub fn clear(&mut self) {
+        self.items.clear();
+    }
+
     pub fn remove(&mut self, path: &Path) {
         self.items.retain(|r| r.path != path);
     }
@@ -82,11 +88,11 @@ mod tests {
     #[test]
     fn newest_first_without_duplicates_and_limited() {
         let mut r = RecentFiles::default();
-        for n in 0..25 {
+        for n in 0..MAX_RECENTS + 5 {
             r.add(p(n), n as u64);
         }
         assert_eq!(r.items().len(), MAX_RECENTS);
-        assert_eq!(r.items()[0].path, p(24));
+        assert_eq!(r.items()[0].path, p(MAX_RECENTS + 4));
         r.add(p(10), 100);
         assert_eq!(
             r.items()[0],
@@ -104,7 +110,7 @@ mod tests {
     fn load_tolerates_extra_fields_and_trims_long_lists() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("recentes.json");
-        let items: Vec<String> = (0..30)
+        let items: Vec<String> = (0..MAX_RECENTS + 10)
             .map(|n| format!(r#"{{"path":"/d/{n}.pdf","opened_at":{n},"cor":"azul"}}"#))
             .collect();
         std::fs::write(

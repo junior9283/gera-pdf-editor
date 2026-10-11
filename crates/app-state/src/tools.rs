@@ -19,9 +19,20 @@ pub enum Tool {
     /// Redigir: marcar texto (arrastando sobre ele) ou uma área (retângulo); fora de `ALL`.
     RedactText,
     RedactArea,
+    /// Mão: arrastar move a página (`H`; Espaço segurado). Fora de `ALL`.
+    Hand,
+    /// Zoom com marca: arrastar um retângulo amplia até ele (`Z`). Fora de `ALL`.
+    Zoom,
 }
 
 impl Tool {
+    /// Ferramentas de tela da barra do documento: não criam nada na página.
+    pub const SCREEN: [Tool; 3] = [Tool::Select, Tool::Hand, Tool::Zoom];
+
+    pub fn is_screen_tool(self) -> bool {
+        Self::SCREEN.contains(&self)
+    }
+
     pub const ALL: [Tool; 11] = [
         Tool::Select,
         Tool::Highlight,
@@ -52,6 +63,8 @@ impl Tool {
             Tool::Fill => "Preencher e assinar",
             Tool::RedactText => "Marcar texto para redação",
             Tool::RedactArea => "Marcar área para redação",
+            Tool::Hand => "Mão",
+            Tool::Zoom => "Zoom com marca",
         }
     }
 }
@@ -59,6 +72,16 @@ impl Tool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hand_and_zoom_are_not_comment_tools() {
+        for t in [Tool::Hand, Tool::Zoom] {
+            assert!(!Tool::ALL.contains(&t), "{t:?} fica fora da linha Comentar");
+            assert!(!t.label().is_empty());
+            assert!(t.is_screen_tool());
+        }
+        assert!(Tool::Select.is_screen_tool() && !Tool::Note.is_screen_tool());
+    }
 
     #[test]
     fn every_tool_is_listed_once_with_a_distinct_label() {

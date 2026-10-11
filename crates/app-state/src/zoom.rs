@@ -77,7 +77,7 @@ pub fn fit_width(page_w: f32, avail_w: f32) -> f32 {
 }
 
 /// Ajuste automático do zoom à área visível (refeito quando a janela muda de tamanho).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Fit {
     /// Zoom escolhido pelo usuário.
     None,
