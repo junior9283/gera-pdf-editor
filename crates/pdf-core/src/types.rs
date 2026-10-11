@@ -545,6 +545,8 @@ pub struct DocSummary {
     pub labels: Vec<String>,
     /// Destinos nomeados (painel Destinos).
     pub destinations: Vec<crate::DestInfo>,
+    /// Camadas (painel Camadas).
+    pub layers: Vec<crate::LayerNode>,
     /// Campos de formulário de todas as páginas.
     pub fields: Vec<crate::FieldInfo>,
     pub form_notes: crate::FormNotes,
@@ -857,4 +859,6 @@ pub enum Changed {
     Attachments,
     /// Destinos nomeados (com o nome do criado, se houver).
     Destinations(Option<String>),
+    /// Camadas (a renderização muda: a aba limpa o cache).
+    Layers,
 }

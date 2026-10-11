@@ -61,6 +61,10 @@ pub struct PdfDoc {
     /// Números dos objetos das fontes que o Editar texto acrescentou nesta sessão: só elas são
     /// reaproveitadas; nada do arquivo é confiado como "fonte do app".
     pub(crate) added_fonts: Vec<i32>,
+    /// Olho do painel Camadas: as camadas que o usuário ligou ou desligou (só a vista).
+    pub(crate) layer_view: std::collections::BTreeMap<i32, bool>,
+    /// O `/D` das camadas do arquivo, guardado enquanto o da memória mostra o olho.
+    pub(crate) layer_default: Option<crate::layers::LayerDefault>,
 }
 
 /// Abre o arquivo e, se for protegido, autentica com `password`.
@@ -96,6 +100,8 @@ impl PdfDoc {
             owner_unlocked: false,
             pending_protection: None,
             added_fonts: Vec::new(),
+            layer_view: Default::default(),
+            layer_default: None,
         };
         doc.signed_on_disk = doc.has_signatures().unwrap_or(false);
         // abrir digitando a senha de permissões libera tudo (como no Acrobat)
@@ -880,12 +886,15 @@ impl PdfDoc {
     /// verdade; o histórico recomeça. Em erro, as edições continuam em memória (só o histórico se
     /// perde, porque as apagadas já saíram) e o documento segue com alterações a salvar.
     pub fn save(&mut self, dest: &Path) -> Result<()> {
+        // o olho das camadas não vai para o arquivo
+        self.layer_config_for_write()?;
         let result = self.purge_hidden().and_then(|()| self.write(dest));
         self.unsaved = result.is_err() && (self.unsaved || self.history.can_undo());
         self.history = History::default();
-        result?;
-        // proteção nova: reabre com a senha nova (a gravação seguinte mantém a do arquivo)
-        self.after_protection_saved()
+        let result = result.and_then(|()| self.after_protection_saved());
+        // proteção nova: reabriu com a senha nova; em todo caso, a vista das camadas continua
+        let reapplied = self.reapply_layer_view();
+        result.and(reapplied)
     }
 
     /// Arquivo → Reverter: também a proteção pedida e as fontes embutidas desde o último Salvar
@@ -903,7 +912,7 @@ impl PdfDoc {
         self.history = History::default();
         self.unsaved = false;
         self.signed_on_disk = self.has_signatures().unwrap_or(false);
-        Ok(())
+        self.reapply_layer_view()
     }
 
     pub(crate) fn purge_hidden(&mut self) -> Result<()> {
@@ -1252,7 +1261,13 @@ impl PdfDoc {
         // arquivo assinado: o instantâneo é incremental, para continuar começando pelos bytes
         // assinados (restaurar e salvar depois não pode regravar o arquivo)
         keep.set_incremental(self.signed_on_disk);
-        self.inner.write_to_with_options(&mut bytes, keep)?;
+        // o instantâneo guarda o /D das camadas do arquivo, não o do olho
+        let swapped = self.layer_config_for_write()?;
+        let written = self.inner.write_to_with_options(&mut bytes, keep);
+        if swapped {
+            self.layer_view_after_write()?;
+        }
+        written?;
         Ok(Snapshot {
             bytes,
             hidden: self.history.hidden.clone(),
@@ -1265,7 +1280,7 @@ impl PdfDoc {
         self.inner = reopen(&snap.bytes, self.password.as_deref())?;
         self.history.hidden = snap.hidden.clone();
         self.added_fonts = snap.added_fonts.clone();
-        Ok(())
+        self.reapply_layer_view()
     }
 
     /// Texto de uma página.
@@ -1386,6 +1401,7 @@ impl PdfDoc {
             display_title: self.display_title(),
             labels: self.labels(),
             destinations: self.destinations(),
+            layers: self.layers(),
             fields: self.all_fields().unwrap_or_default(),
             form_notes: self.form_notes().unwrap_or_default(),
             security: self.security()?,

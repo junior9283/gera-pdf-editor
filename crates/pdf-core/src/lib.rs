@@ -14,6 +14,7 @@ mod edit_images;
 mod edit_text;
 mod error;
 mod forms;
+mod layers;
 mod links;
 mod ocr;
 mod outline;
@@ -50,6 +51,7 @@ pub use edit_images::{ImageEdit, PageImage};
 pub use edit_text::{PageTextBlock, MIN_TEXT_WIDTH, NEW_TEXT_SIZE, TEXT_MARGIN};
 pub use error::{PdfError, Result};
 pub use forms::{FieldInfo, FieldKind, FormNotes};
+pub use layers::LayerNode;
 pub use ocr::{tessdata_dir, OcrLanguage, OcrReport};
 pub use page_labels::{apply_labels, format_label, label_list, PageLabelRange, PageLabelStyle};
 pub use pagination::{

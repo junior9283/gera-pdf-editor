@@ -49,6 +49,19 @@ pub enum Request {
     RemoveAttachment {
         name: String,
     },
+    /// Olho de uma camada (só a vista).
+    LayerView {
+        id: i32,
+        on: bool,
+    },
+    /// Redefinir para visibilidade inicial.
+    ResetLayers,
+    /// Propriedades da camada: nome e estado padrão.
+    EditLayer {
+        id: i32,
+        name: String,
+        default_on: bool,
+    },
     /// Cria, renomeia, redefine ou exclui um destino nomeado.
     Destination(crate::DestOp),
     /// Grava os rótulos de página (diálogo Rótulos de página).
@@ -252,6 +265,11 @@ pub enum Response {
     },
     AttachmentsChanged {
         attachments: Vec<crate::types::AttachmentInfo>,
+        history: HistoryState,
+    },
+    /// As camadas mudaram (olho ou propriedades): a renderização também.
+    LayersChanged {
+        layers: Vec<crate::LayerNode>,
         history: HistoryState,
     },
     DestinationsChanged {
@@ -498,9 +516,25 @@ impl State {
                 d.add_attachment(&path, "")?;
                 Ok(Changed::Attachments)
             }),
-            Request::Destination(op) => self.edit(send, |d| {
-                Ok(Changed::Destinations(d.edit_destination(op)?))
+            Request::LayerView { id, on } => self.edit(send, |d| {
+                d.set_layer_view(id, on)?;
+                Ok(Changed::Layers)
             }),
+            Request::ResetLayers => self.edit(send, |d| {
+                d.reset_layer_view()?;
+                Ok(Changed::Layers)
+            }),
+            Request::EditLayer {
+                id,
+                name,
+                default_on,
+            } => self.edit(send, |d| {
+                d.edit_layer(id, &name, default_on)?;
+                Ok(Changed::Layers)
+            }),
+            Request::Destination(op) => {
+                self.edit(send, |d| Ok(Changed::Destinations(d.edit_destination(op)?)))
+            }
             Request::PageLabels(ranges) => self.edit(send, |d| {
                 d.set_page_labels(ranges)?;
                 Ok(Changed::Document)
@@ -794,6 +828,10 @@ impl State {
             Ok(Changed::Outline(created)) => send(Response::OutlineChanged {
                 outline: d.outline_tree().unwrap_or_default(),
                 created,
+                history: d.history_state(),
+            }),
+            Ok(Changed::Layers) => send(Response::LayersChanged {
+                layers: d.layers(),
                 history: d.history_state(),
             }),
             Ok(Changed::Destinations(created)) => send(Response::DestinationsChanged {

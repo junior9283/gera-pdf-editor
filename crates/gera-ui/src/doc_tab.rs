@@ -144,6 +144,8 @@ pub struct DocTab {
     pub(crate) attachments: Vec<pdf_core::AttachmentInfo>,
     /// Destinos nomeados (painel Destinos).
     pub(crate) destinations: Vec<pdf_core::DestInfo>,
+    /// Camadas (painel Camadas).
+    pub(crate) layers: Vec<pdf_core::LayerNode>,
     /// Rótulo de cada página (vazio sem rótulos).
     pub(crate) labels: Vec<String>,
     /// Painel Marcadores (seleção, renomeação, arraste, foco do teclado).
@@ -329,6 +331,7 @@ impl DocTab {
             attach_warning: None,
             attachments: Vec::new(),
             destinations: Vec::new(),
+            layers: Vec::new(),
             labels: Vec::new(),
             display_title: None,
             marquee: None,
@@ -1089,6 +1092,7 @@ impl DocTab {
         self.links = summary.links;
         self.attachments = summary.attachments;
         self.destinations = summary.destinations;
+        self.layers = summary.layers;
         self.labels = summary.labels;
         self.display_title = summary.display_title;
         (summary.path, summary.sizes)
@@ -1321,6 +1325,14 @@ impl DocTab {
                 } => {
                     self.attachments = attachments;
                     self.history = history;
+                }
+                Response::LayersChanged { layers, history } => {
+                    self.layers = layers;
+                    self.history = history;
+                    // a página desenha diferente: as imagens em cache valem para a vista antiga
+                    if let Some(view) = self.view.as_mut() {
+                        view.clear_cache();
+                    }
                 }
                 Response::DestinationsChanged {
                     destinations,
