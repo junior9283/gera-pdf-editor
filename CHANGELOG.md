@@ -8,6 +8,14 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 - v6c2 — miniaturas com menu e arraste, Camadas, Destinos, rótulos de página.
 
+## [0.15.2] — 2026-10-11 · Ícone do app no sistema
+
+### Corrigido
+- O ícone do app aparece na barra de tarefas e no menu de aplicativos. No Wayland o sistema acha o
+  ícone pelo atalho `.desktop` instalado, e o AppImage sozinho não instalava nenhum. Agora, ao rodar
+  como AppImage, o app grava o próprio atalho (apontando para o AppImage) e os ícones em
+  `~/.local/share` e os atualiza se o arquivo mudar de lugar.
+
 ## [0.15.1] — 2026-10-11 · Correções de segurança
 
 ### Segurança
