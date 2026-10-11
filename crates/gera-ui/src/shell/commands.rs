@@ -293,17 +293,21 @@ fn belongs_to_text_fields(cmd: &Command) -> bool {
     )
 }
 
+/// Digitando, o atalho é do campo de texto: os de edição (desfazer, copiar…) e as teclas que
+/// escrevem (letras das teclas únicas). As de função (F1, F3, F11) continuam valendo.
+fn blocked_while_typing(s: &KeyboardShortcut, c: &Command) -> bool {
+    let plain = !s.modifiers.command && !s.modifiers.alt && !s.modifiers.ctrl;
+    let writes = s.logical_key.symbol_or_name().chars().count() == 1;
+    belongs_to_text_fields(c) || (plain && writes)
+}
+
 /// Comandos pedidos pelo teclado neste quadro (as teclas são consumidas).
 pub fn from_keyboard(ctx: &egui::Context, single_key: bool) -> Vec<Command> {
     let typing = ctx.egui_wants_keyboard_input();
     ctx.input_mut(|i| {
         let mut out: Vec<Command> = shortcuts_for(single_key)
             .iter()
-            // digitando, as teclas sem Ctrl/Alt (letras das teclas únicas) são do campo
-            .filter(|(s, c)| {
-                let plain = !s.modifiers.command && !s.modifiers.alt && !s.modifiers.ctrl;
-                !(typing && (belongs_to_text_fields(c) || plain))
-            })
+            .filter(|(s, c)| !(typing && blocked_while_typing(s, c)))
             .filter(|(s, _)| i.consume_shortcut(s))
             .map(|(_, c)| c.clone())
             .collect();
@@ -460,6 +464,19 @@ mod tests {
         ));
         assert_eq!(text(Command::Help), "F1");
         assert!(HELP_URL.starts_with("https://github.com/junior9283/gera-pdf-editor"));
+    }
+
+    #[test]
+    fn function_keys_work_while_typing_but_letters_do_not() {
+        let key = |k| KeyboardShortcut::new(Modifiers::NONE, k);
+        let doc = Command::Doc;
+        assert!(!blocked_while_typing(&key(Key::F3), &doc(DocCommand::FindNext)));
+        assert!(!blocked_while_typing(&key(Key::F11), &Command::FullScreen));
+        assert!(!blocked_while_typing(&key(Key::F1), &Command::Help));
+        let tool = doc(DocCommand::Tool(app_state::tools::Tool::Hand));
+        assert!(blocked_while_typing(&key(Key::H), &tool), "letra é do campo");
+        let undo = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
+        assert!(blocked_while_typing(&undo, &doc(DocCommand::Undo)));
     }
 
     #[test]
