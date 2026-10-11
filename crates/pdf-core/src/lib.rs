@@ -3,6 +3,7 @@ pub mod sample;
 
 mod annot_edit;
 mod attachments;
+mod comments_io;
 mod compare;
 mod compare_report;
 mod compress;
@@ -39,6 +40,7 @@ mod worker;
 
 pub use annot_edit::{callout_end, dist_to_segment, MAX_VERTICES};
 pub use attachments::MAX_ATTACHMENT_BYTES;
+pub use comments_io::{CommentFormat, ImportReport};
 pub use compare::{
     compare, Change, ChangeKind, CompareInput, CompareOptions, CompareStage, Comparison,
 };

@@ -678,7 +678,7 @@ fn group_members(annots: &[AnnotInfo], root: i32) -> Vec<i32> {
 }
 
 /// O que sai ao excluir `ids`: cada um com o grupo e, como no Acrobat, as respostas e os status.
-fn deleted(annots: &[AnnotInfo], ids: &[i32]) -> Vec<i32> {
+pub(crate) fn deleted(annots: &[AnnotInfo], ids: &[i32]) -> Vec<i32> {
     let mut out: Vec<i32> = Vec::new();
     for &id in ids {
         for root in group_members(annots, group_root(annots, id)) {
