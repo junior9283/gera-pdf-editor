@@ -258,6 +258,7 @@ impl GeraApp {
     fn close_tab(&mut self, tab: usize) {
         if let Some(i) = self.tabs.close(tab) {
             let doc = self.docs.remove(i); // o Worker cai junto e a thread termina
+            doc.remove_attachment_copy();
             self.remember_view_of(&doc);
         }
     }

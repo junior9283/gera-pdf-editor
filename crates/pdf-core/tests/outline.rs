@@ -256,6 +256,28 @@ fn broken_tree_with_a_cycle_is_read_and_fixed() {
     })
     .unwrap();
     assert_eq!(titles(&tree(&d)), ["A2", "B"]);
+    // gravado consertado: ligações e contagens refeitas
+    assert_eq!(
+        d.outline_counts(),
+        [("A2".to_string(), 0), ("B".to_string(), 0)]
+    );
+    let out = dir.path().join("consertado.pdf");
+    d.save(&out).unwrap();
+    let bytes = String::from_utf8_lossy(&std::fs::read(&out).unwrap()).into_owned();
+    let b = saved_object(&bytes, "B");
+    assert!(b.contains("/Parent 4 0 R"), "{b}");
+    assert!(!b.contains("/Next") && !b.contains("/First"), "{b}");
+    let a = saved_object(&bytes, "A2");
+    assert!(
+        a.contains("/Next 6 0 R") && a.contains("/Parent 4 0 R"),
+        "{a}"
+    );
+    let root_at = bytes.find("/Type/Outlines").unwrap();
+    let root = &bytes[root_at..root_at + bytes[root_at..].find(">>").unwrap()];
+    assert!(
+        root.contains("/Count 2") && root.contains("/Last 6 0 R"),
+        "{root}"
+    );
 }
 
 #[test]
@@ -419,4 +441,41 @@ fn expand_and_collapse_all_in_one_step() {
     d.edit_outline(OutlineOp::SetAllOpen { open: false })
         .unwrap();
     assert!(tree(&d).iter().all(|n| !n.open));
+}
+
+#[test]
+fn direct_outlines_root_is_made_indirect() {
+    let dir = tempfile::tempdir().unwrap();
+    let objs = vec![
+        "<</Type/Catalog/Pages 2 0 R/Outlines<</Type/Outlines/First 4 0 R/Last 4 0 R/Count 1>>>>"
+            .to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>".to_string(),
+        "<</Title(A)>>".to_string(),
+    ];
+    let path = dir.path().join("direto.pdf");
+    std::fs::write(&path, pdf_from_objects(&objs)).unwrap();
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    d.edit_outline(OutlineOp::Add {
+        parent: None,
+        after: None,
+        title: "B".into(),
+        page: 0,
+        at: None,
+    })
+    .unwrap();
+    let out = dir.path().join("depois.pdf");
+    d.save(&out).unwrap();
+    let bytes = String::from_utf8_lossy(&std::fs::read(&out).unwrap()).into_owned();
+    let at = bytes.find("/Outlines").unwrap();
+    let after = bytes[at + "/Outlines".len()..].trim_start();
+    assert!(
+        after.chars().next().is_some_and(|c| c.is_ascii_digit()),
+        "a raiz virou referência: {}",
+        &after[..after.len().min(40)]
+    );
+    assert_eq!(
+        titles(&tree(&PdfDoc::open(&out, None).unwrap())),
+        ["B", "A"]
+    );
 }

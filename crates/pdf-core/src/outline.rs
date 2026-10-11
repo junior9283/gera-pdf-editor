@@ -450,6 +450,12 @@ impl PdfDoc {
 
     fn write_outline(&mut self, root: Option<PdfObject>, items: &[Item]) -> Result<()> {
         let mut root = match root {
+            // raiz direta no catálogo: vira objeto próprio, senão cada /Parent levaria uma cópia
+            Some(r) if r.as_indirect().unwrap_or(0) == 0 => {
+                let r = self.inner.add_object(&r)?;
+                self.inner.catalog()?.dict_put("Outlines", r.clone())?;
+                r
+            }
             Some(r) => r,
             None => {
                 let mut dict = self.inner.new_dict()?;

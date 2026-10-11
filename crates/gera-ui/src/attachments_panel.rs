@@ -69,12 +69,28 @@ pub enum AttachmentAction {
 
 #[derive(Debug, Default)]
 pub struct AttachmentsPanel {
-    selected: Option<usize>,
+    /// O anexo selecionado (origem e nome): continua o mesmo quando a lista muda.
+    selected: Option<(AttachmentOrigin, String)>,
     /// Descrição em edição: (índice, texto).
     editing: Option<(usize, String)>,
 }
 
 impl AttachmentsPanel {
+    pub fn select(&mut self, a: &AttachmentInfo) {
+        self.selected = Some((a.origin.clone(), a.name.clone()));
+    }
+
+    fn is_selected(&self, a: &AttachmentInfo) -> bool {
+        self.selected
+            .as_ref()
+            .is_some_and(|(o, n)| *o == a.origin && *n == a.name)
+    }
+
+    /// O anexo selecionado na lista atual (nenhum se ele saiu).
+    pub fn selected_in<'a>(&self, list: &'a [AttachmentInfo]) -> Option<&'a AttachmentInfo> {
+        list.iter().find(|a| self.is_selected(a))
+    }
+
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -82,7 +98,7 @@ impl AttachmentsPanel {
         can_edit: bool,
     ) -> Vec<AttachmentAction> {
         let mut out = Vec::new();
-        let sel = self.selected.and_then(|k| list.get(k));
+        let sel = self.selected_in(list);
         let non_pdf = sel.is_some_and(|a| !opens_in_app(&a.name));
         ui.horizontal_wrapped(|ui| {
             if !non_pdf
@@ -125,12 +141,9 @@ impl AttachmentsPanel {
             .auto_shrink(false)
             .show(ui, |ui| {
                 for (k, a) in list.iter().enumerate() {
-                    let row = ui.add(egui::Button::selectable(
-                        self.selected == Some(k),
-                        row_label(a),
-                    ));
+                    let row = ui.add(egui::Button::selectable(self.is_selected(a), row_label(a)));
                     if row.clicked() {
-                        self.selected = Some(k);
+                        self.select(a);
                         if let AttachmentOrigin::Comment { page, .. } = a.origin {
                             out.push(AttachmentAction::Go { page });
                         }
@@ -179,6 +192,30 @@ impl AttachmentsPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn info(name: &str) -> AttachmentInfo {
+        AttachmentInfo {
+            name: name.into(),
+            description: String::new(),
+            size: 1,
+            origin: AttachmentOrigin::Document,
+        }
+    }
+
+    #[test]
+    fn selection_follows_the_attachment_after_the_list_changes() {
+        let mut panel = AttachmentsPanel::default();
+        let before = [info("a.pdf"), info("b.txt")];
+        panel.select(&before[1]);
+        // um anexo novo entra antes (lista em outra ordem): a seleção continua no b.txt
+        let after = [info("0.pdf"), info("a.pdf"), info("b.txt")];
+        assert_eq!(
+            panel.selected_in(&after).map(|a| a.name.as_str()),
+            Some("b.txt")
+        );
+        // removido: nada selecionado
+        assert!(panel.selected_in(&[info("a.pdf")]).is_none());
+    }
 
     #[test]
     fn only_pdf_attachments_open() {

@@ -440,9 +440,12 @@ fn font_info(font: &PdfObject) -> Option<FontInfo> {
     })
 }
 
-/// Texto escapado para XML.
+/// Texto escapado para XML (sem os caracteres de controle que o XML 1.0 proíbe).
 fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
+    s.chars()
+        .filter(|&c| !c.is_control() || matches!(c, '\t' | '\n' | '\r'))
+        .collect::<String>()
+        .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
@@ -587,6 +590,11 @@ mod tests {
         assert_eq!(iso_date("D:20261011"), "2026-10-11T00:00:00");
         assert_eq!(iso_date("D:2026"), "");
         assert_eq!(xml_escape("a<b>&\"c\""), "a&lt;b&gt;&amp;&quot;c&quot;");
+        assert_eq!(
+            xml_escape("a\u{1}b\tc\u{0}d\u{7f}"),
+            "ab\tcd",
+            "controles proibidos no XML 1.0 saem"
+        );
         assert_eq!(xmp_value("<x:a>1</x:a>", "x:a").as_deref(), Some("1"));
         assert_eq!(xmp_value("<x:a><evil/></x:a>", "x:a"), None);
     }

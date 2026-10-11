@@ -1094,6 +1094,15 @@ impl DocTab {
         }
     }
 
+    /// Fechando a aba de um anexo aberto: a cópia na pasta privada sai junto (só ela: o nome
+    /// precisa ser o de uma cópia de anexo).
+    pub(crate) fn remove_attachment_copy(&self) {
+        let is_copy = crate::attachments_panel::spool_name(&self.path).is_some();
+        if self.attachment_name.is_some() && is_copy {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
     /// Caminho sugerido no Salvar como: o próprio arquivo, ou, para um anexo aberto, o nome dele
     /// na pasta pessoal (a cópia na pasta privada não é lugar para guardar).
     pub fn save_suggestion(&self) -> PathBuf {
@@ -3991,6 +4000,28 @@ mod tests {
         tab.copy_pages(&ctx, vec![0], PathBuf::from("/outro.pdf"));
         assert!(tab.copy_pending.is_none(), "nada foi exportado");
         assert!(tab.status.contains("não permite"), "{}", tab.status);
+    }
+
+    #[test]
+    fn closing_an_attachment_tab_removes_the_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let copy = dir.path().join("gera-anexo-77-0-outro.pdf");
+        std::fs::write(&copy, b"%PDF").unwrap();
+        let mut tab = tab_with_pages(1);
+        tab.path = copy.clone();
+        tab.attachment_name = Some("outro.pdf".into());
+        tab.remove_attachment_copy();
+        assert!(
+            !copy.exists(),
+            "a cópia na pasta privada sai junto com a aba"
+        );
+        // um documento comum nunca é apagado
+        let own = dir.path().join("meu.pdf");
+        std::fs::write(&own, b"%PDF").unwrap();
+        let mut tab = tab_with_pages(1);
+        tab.path = own.clone();
+        tab.remove_attachment_copy();
+        assert!(own.exists());
     }
 
     #[test]
