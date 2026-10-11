@@ -331,7 +331,7 @@ impl GeraApp {
                         self.docs[i].path = dest.clone();
                         self.remember(dest);
                     }
-                    DocEvent::Author(name) => self.set_author(name),
+                    DocEvent::Author(name) => self.set_author(Some(name)),
                     DocEvent::ShowPanel(p) => {
                         if self.prefs.left_panel != Some(p) {
                             self.prefs.toggle_left(p);
@@ -504,13 +504,12 @@ impl GeraApp {
         }
     }
 
-    /// Editar → Preferências → Identidade: muda o nome dos carimbos e autor das anotações.
     /// Guarda o nome nas preferências e o passa a todas as abas.
-    fn set_author(&mut self, name: String) {
-        self.prefs.author = Some(name.clone());
+    fn set_author(&mut self, name: Option<String>) {
+        self.prefs.author = name.clone();
         self.prefs_dirty = true;
         for doc in &mut self.docs {
-            doc.set_author(Some(name.clone()));
+            doc.set_author(name.clone());
         }
     }
 
@@ -914,10 +913,13 @@ impl eframe::App for GeraApp {
                 || self.full_screen_request.is_some()
                 || self.preferences.is_some();
             let doc_window = self.active_doc().is_some_and(|d| d.has_modal());
-            let target = escape_target(app_window || doc_window, self.fullscreen, self.reading);
             // as janelas da aba tratam o próprio Esc
-            let ours = target != Escape::Pass && !(target == Escape::CloseWindow && !app_window);
-            if ours
+            let target = if doc_window && !app_window {
+                Escape::Pass
+            } else {
+                escape_target(app_window, self.fullscreen, self.reading)
+            };
+            if target != Escape::Pass
                 && !ctx.egui_wants_keyboard_input()
                 && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
             {
@@ -1055,27 +1057,31 @@ impl GeraApp {
         let Some(draft) = self.preferences.take() else {
             return;
         };
-        if ok && draft.forget_recents {
-            self.recents.clear();
-            self.recents_changed();
-        }
+        let forget = draft.forget_recents;
         let Some(new) = draft.finish(ok) else {
-            return;
+            return; // Cancelar
         };
+        if new == self.prefs && !forget {
+            return;
+        }
+        let fewer = new.max_recents < self.prefs.max_recents;
         let (dark, author) = (new.dark, new.author.clone());
-        let theme_changed = dark != self.prefs.dark;
-        let author_changed = author != self.prefs.author;
+        let (theme_changed, author_changed) =
+            (dark != self.prefs.dark, author != self.prefs.author);
         self.prefs = new;
         self.prefs_dirty = true;
-        self.recents.limit(self.prefs.max_recents);
-        self.recents_changed();
+        if forget || fewer {
+            if forget {
+                self.recents.clear();
+            }
+            self.recents.limit(self.prefs.max_recents);
+            self.recents_changed();
+        }
         if theme_changed {
             self.set_dark(ctx, dark);
         }
         if author_changed {
-            for doc in &mut self.docs {
-                doc.set_author(author.clone());
-            }
+            self.set_author(author);
         }
     }
 }

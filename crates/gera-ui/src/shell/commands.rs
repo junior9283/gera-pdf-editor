@@ -222,20 +222,29 @@ fn single_keys() -> Vec<(KeyboardShortcut, Command)> {
 }
 
 /// A tabela de atalhos, com as teclas únicas quando a preferência está ligada.
-pub fn shortcuts_for(single_key: bool) -> Vec<(KeyboardShortcut, Command)> {
-    let mut all = shortcuts();
+/// Montada uma vez (o teclado a percorre a cada quadro, e cada item de menu busca nela).
+pub fn shortcuts_for(single_key: bool) -> &'static [(KeyboardShortcut, Command)] {
+    static PLAIN: std::sync::LazyLock<Vec<(KeyboardShortcut, Command)>> =
+        std::sync::LazyLock::new(shortcuts);
+    static WITH_KEYS: std::sync::LazyLock<Vec<(KeyboardShortcut, Command)>> =
+        std::sync::LazyLock::new(|| {
+            let mut all = shortcuts();
+            all.extend(single_keys());
+            all
+        });
     if single_key {
-        all.extend(single_keys());
+        &WITH_KEYS
+    } else {
+        &PLAIN
     }
-    all
 }
 
 /// Primeiro atalho do comando (para mostrar no menu).
 pub fn shortcut_of(cmd: &Command) -> Option<KeyboardShortcut> {
-    shortcuts()
-        .into_iter()
+    shortcuts_for(false)
+        .iter()
         .find(|(_, c)| c == cmd)
-        .map(|(s, _)| s)
+        .map(|(s, _)| *s)
 }
 
 /// Atalho escrito como no Acrobat, com símbolos ("Ctrl+Shift++", "Ctrl+="), não nomes de tecla.
@@ -289,14 +298,14 @@ pub fn from_keyboard(ctx: &egui::Context, single_key: bool) -> Vec<Command> {
     let typing = ctx.egui_wants_keyboard_input();
     ctx.input_mut(|i| {
         let mut out: Vec<Command> = shortcuts_for(single_key)
-            .into_iter()
+            .iter()
             // digitando, as teclas sem Ctrl/Alt (letras das teclas únicas) são do campo
             .filter(|(s, c)| {
                 let plain = !s.modifiers.command && !s.modifiers.alt && !s.modifiers.ctrl;
                 !(typing && (belongs_to_text_fields(c) || plain))
             })
             .filter(|(s, _)| i.consume_shortcut(s))
-            .map(|(_, c)| c)
+            .map(|(_, c)| c.clone())
             .collect();
         // o egui entrega Ctrl+C, Ctrl+X e Ctrl+V como eventos, não como teclas; num campo de
         // texto são dele
@@ -414,18 +423,18 @@ mod tests {
             Key::X,
             Key::K,
         ] {
-            assert_eq!(plain(&off, k), None, "{k:?} sem a preferência");
+            assert_eq!(plain(off, k), None, "{k:?} sem a preferência");
         }
         let on = shortcuts_for(true);
         let tool = |t| Some(Command::Doc(DocCommand::Tool(t)));
-        assert_eq!(plain(&on, Key::V), tool(Tool::Select));
-        assert_eq!(plain(&on, Key::H), tool(Tool::Hand));
-        assert_eq!(plain(&on, Key::Z), tool(Tool::Zoom));
-        assert_eq!(plain(&on, Key::S), tool(Tool::Note));
-        assert_eq!(plain(&on, Key::U), tool(Tool::Highlight));
-        assert_eq!(plain(&on, Key::D), tool(Tool::Ink));
-        assert_eq!(plain(&on, Key::X), tool(Tool::TextBox));
-        assert_eq!(plain(&on, Key::K), tool(Tool::Stamp));
+        assert_eq!(plain(on, Key::V), tool(Tool::Select));
+        assert_eq!(plain(on, Key::H), tool(Tool::Hand));
+        assert_eq!(plain(on, Key::Z), tool(Tool::Zoom));
+        assert_eq!(plain(on, Key::S), tool(Tool::Note));
+        assert_eq!(plain(on, Key::U), tool(Tool::Highlight));
+        assert_eq!(plain(on, Key::D), tool(Tool::Ink));
+        assert_eq!(plain(on, Key::X), tool(Tool::TextBox));
+        assert_eq!(plain(on, Key::K), tool(Tool::Stamp));
         assert!(on.iter().any(|(s, c)| s.modifiers == Modifiers::SHIFT
             && s.logical_key == Key::U
             && *c == Command::Doc(DocCommand::CycleMarkup)));

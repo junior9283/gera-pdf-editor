@@ -370,8 +370,7 @@ impl Worker {
 /// Busca em andamento, avançada uma página por vez para não prender os outros pedidos.
 struct SearchJob {
     id: u64,
-    needle: String,
-    options: SearchOptions,
+    query: crate::search::SearchQuery,
     cancel: CancelToken,
     next: i32,
     pages: i32,
@@ -470,8 +469,7 @@ impl State {
                         let bookmarks = d.search_bookmarks(&needle, &options);
                         self.search = Some(SearchJob {
                             id,
-                            needle,
-                            options,
+                            query: crate::search::SearchQuery::new(&needle, options),
                             cancel,
                             next: 0,
                             pages,
@@ -774,7 +772,7 @@ impl State {
         } else {
             let page = job.next;
             job.next += 1;
-            if let Ok(found) = doc.search_with(page, &job.needle, &job.options) {
+            if let Ok(found) = doc.search_page(page, &job.query) {
                 let rects: Vec<PdfRect> = job
                     .bookmarks
                     .iter()

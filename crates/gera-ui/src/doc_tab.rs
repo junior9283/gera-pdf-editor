@@ -398,6 +398,17 @@ impl DocTab {
             }
             return;
         }
+        // comandos que não dependem da vista
+        match cmd {
+            DocCommand::FindNext | DocCommand::FindPrev => {
+                return self.search_step(cmd == DocCommand::FindNext)
+            }
+            DocCommand::Revert => {
+                self.revert_ask = self.is_dirty();
+                return;
+            }
+            _ => {}
+        }
         if self.navigate(cmd) {
             return;
         }
@@ -519,13 +530,7 @@ impl DocTab {
     fn navigate(&mut self, cmd: DocCommand) -> bool {
         let page = self.last.current_page;
         let Some(view) = self.view.as_ref() else {
-            return matches!(
-                cmd,
-                DocCommand::GoToPage
-                    | DocCommand::FindNext
-                    | DocCommand::FindPrev
-                    | DocCommand::Revert
-            );
+            return matches!(cmd, DocCommand::GoToPage);
         };
         let last = view.layout.page_count().saturating_sub(1);
         match cmd {
@@ -538,10 +543,7 @@ impl DocTab {
             DocCommand::FirstPage => self.jump(0, None),
             DocCommand::LastPage => self.jump(last as i32, None),
             DocCommand::GoToPage => self.focus_page = true,
-            DocCommand::FindNext | DocCommand::FindPrev => {
-                self.search_step(cmd == DocCommand::FindNext)
-            }
-            DocCommand::Revert => self.revert_ask = self.is_dirty(),
+
             DocCommand::ViewBack | DocCommand::ViewForward => {
                 let current = view.view_entry(self.last.scroll_y, page);
                 let to = if cmd == DocCommand::ViewBack {
@@ -609,37 +611,58 @@ impl DocTab {
     }
 
     fn paste_text_box(&mut self, page: i32, text: String) {
-        let Some(size) = self
+        let lines = text.lines().count().clamp(1, 40) as f32;
+        let longest = text.lines().map(|l| l.chars().count()).max().unwrap_or(1) as f32;
+        self.paste_centered(
+            page,
+            |pw, _| {
+                (
+                    (longest * 6.5 + 12.0).clamp(80.0, pw * 0.8),
+                    lines * 14.5 + 10.0,
+                )
+            },
+            |rect| pdf_core::NewAnnot::TextBox {
+                page,
+                rect,
+                text,
+                size: crate::create::TEXT_SIZE,
+                color: [0.0, 0.0, 0.0],
+            },
+        );
+    }
+
+    /// Cria o que foi colado no meio da página `page`: `size` dá o tamanho pela página
+    /// (largura, altura) e `make`, a anotação no retângulo. Fica selecionado ao chegar.
+    fn paste_centered(
+        &mut self,
+        page: i32,
+        size: impl FnOnce(f32, f32) -> (f32, f32),
+        make: impl FnOnce(pdf_core::PdfRect) -> pdf_core::NewAnnot,
+    ) {
+        let Some(p) = self
             .view
             .as_ref()
             .and_then(|v| v.sizes.get(page as usize).copied())
         else {
             return;
         };
-        let lines = text.lines().count().clamp(1, 40) as f32;
-        let longest = text.lines().map(|l| l.chars().count()).max().unwrap_or(1) as f32;
-        let box_size = (
-            (longest * 6.5 + 12.0).clamp(80.0, size.width * 0.8),
-            lines * 14.5 + 10.0,
-        );
-        let center = (size.width / 2.0, size.height / 2.0);
-        let rect = crate::clipboard::centered(center, box_size, (size.width, size.height));
+        let center = (p.width / 2.0, p.height / 2.0);
+        let rect = crate::clipboard::centered(center, size(p.width, p.height), (p.width, p.height));
         self.select_newest_on = Some(page);
-        self.edit
-            .push_op(pdf_core::AnnotOp::Create(pdf_core::NewAnnot::TextBox {
-                page,
-                rect,
-                text,
-                size: 12.0,
-                color: [0.0, 0.0, 0.0],
-            }));
+        self.edit.add(make(rect));
     }
 
     /// Lê a área de transferência do sistema numa thread: imagem (vira carimbo) ou texto.
     fn read_system_clipboard(&mut self) {
+        let dir = match crate::print_job::spool_dir() {
+            Ok(dir) => dir,
+            Err(e) => {
+                self.status = format!("Não foi possível colar: {e}");
+                return;
+            }
+        };
         let (tx, rx) = std::sync::mpsc::channel();
         self.paste_rx = Some(rx);
-        let dir = std::env::temp_dir();
         std::thread::spawn(move || {
             let _ = tx.send(crate::clipboard::read_system(&dir));
         });
@@ -673,26 +696,21 @@ impl DocTab {
     /// Imagem colada: um carimbo no meio da página atual, do tamanho natural (até 80 % da página).
     fn paste_image(&mut self, path: std::path::PathBuf, px: (u32, u32)) {
         let page = self.last.current_page as i32;
-        let Some(size) = self
-            .view
-            .as_ref()
-            .and_then(|v| v.sizes.get(page as usize).copied())
-        else {
-            return;
-        };
         // 96 ppp da tela: 1 px = 0,75 pt
         let (w, h) = (px.0 as f32 * 0.75, px.1 as f32 * 0.75);
-        let k = (size.width * 0.8 / w).min(size.height * 0.8 / h).min(1.0);
-        let center = (size.width / 2.0, size.height / 2.0);
-        let rect = crate::clipboard::centered(center, (w * k, h * k), (size.width, size.height));
-        self.select_newest_on = Some(page);
-        self.edit
-            .push_op(pdf_core::AnnotOp::Create(pdf_core::NewAnnot::Signature {
+        self.paste_centered(
+            page,
+            |pw, ph| {
+                let k = (pw * 0.8 / w).min(ph * 0.8 / h).min(1.0);
+                (w * k, h * k)
+            },
+            |rect| pdf_core::NewAnnot::Signature {
                 page,
                 rect,
                 art: pdf_core::SignatureArt::Image { path },
                 initials: false,
-            }));
+            },
+        );
     }
 
     /// Escolhe a ferramenta; as de comentário abrem a linha Comentar (como no Acrobat).
@@ -1465,7 +1483,7 @@ impl DocTab {
             }
             // ←/→ mudam de página em qualquer modo. Com a janela de assinatura ou de propriedades
             // do campo aberta, as setas são dela.
-            let arrows = self.edit.fill.dialog.is_none() && self.prepare.props.is_none();
+            let arrows = !self.has_modal();
             let step = ctx.input_mut(|i| {
                 [
                     (egui::Key::ArrowRight, arrows, DocCommand::NextPage),
@@ -2917,17 +2935,18 @@ fn page_menu_items(tool: app_state::tools::Tool) -> Vec<(Option<Command>, bool)>
 fn page_menu(ui: &mut egui::Ui, tool: app_state::tools::Tool) -> Option<Command> {
     let mut picked = None;
     for (cmd, checked) in page_menu_items(tool) {
-        let Some(cmd) = cmd else {
-            ui.separator();
-            continue;
-        };
-        if ui
-            .add(egui::Button::selectable(checked, cmd.label()))
-            .clicked()
-        {
-            picked = Some(cmd);
-            ui.close();
+        match cmd {
+            None => {
+                ui.separator();
+            }
+            Some(c @ Command::Doc(DocCommand::Tool(_))) => {
+                crate::shell::menus::check(ui, &mut picked, c, checked, true)
+            }
+            Some(c) => crate::shell::menus::item(ui, &mut picked, c, true),
         }
+    }
+    if picked.is_some() {
+        ui.close();
     }
     picked
 }
@@ -2986,10 +3005,8 @@ fn screen_gesture(
                 };
                 ui.ctx().set_cursor_icon(grab);
             }
-            response
-                .dragged()
-                .then(|| ScreenAction::Pan(response.drag_delta()))
-                .filter(|a| matches!(a, ScreenAction::Pan(d) if *d != egui::Vec2::ZERO))
+            let d = response.drag_delta();
+            (response.dragged() && d != egui::Vec2::ZERO).then_some(ScreenAction::Pan(d))
         }
         Tool::Zoom => {
             let ctrl = ui.input(|i| i.modifiers.command);

@@ -4,8 +4,11 @@ use pdf_core::PdfRect;
 
 /// Texto colado vira caixa de texto com no máximo isso.
 pub const MAX_PASTED_CHARS: usize = 10_000;
-/// Imagem colada: teto de pixels (40 Mpx).
+/// Imagem colada: teto de pixels lidos da área de transferência (40 Mpx).
 pub const MAX_PASTED_PIXELS: usize = 40_000_000;
+/// O carimbo nunca passa de 80 % da página: acima disso a imagem é reduzida antes de gravar
+/// (8 Mpx bastam para uma página A4 a mais de 300 ppp), poupando memória e tempo.
+const MAX_STAMP_PIXELS: usize = 8_000_000;
 
 /// O que Colar faz.
 #[derive(Debug, Clone, PartialEq)]
@@ -125,11 +128,13 @@ pub fn read_system(dir: &std::path::Path) -> SystemClip {
                 "A imagem da área de transferência é grande demais para colar.".into(),
             );
         }
-        return match write_png(dir, img.width as u32, img.height as u32, &img.bytes) {
+        let (w, h, rgba) = shrink(img.width, img.height, &img.bytes, MAX_STAMP_PIXELS);
+        drop(img);
+        return match write_png(dir, w as u32, h as u32, &rgba) {
             Ok(path) => SystemClip::Image {
                 path,
-                width: img.width as u32,
-                height: img.height as u32,
+                width: w as u32,
+                height: h as u32,
             },
             Err(_) => SystemClip::Refused("Não foi possível colar a imagem.".into()),
         };
@@ -138,6 +143,33 @@ pub fn read_system(dir: &std::path::Path) -> SystemClip {
         Ok(t) if !t.trim().is_empty() => SystemClip::Text(t),
         _ => SystemClip::Empty,
     }
+}
+
+/// Reduz a imagem RGBA (média de blocos `k × k`) até caber em `max` pixels; menor que isso, só
+/// copia. Devolve largura, altura e pixels.
+fn shrink(w: usize, h: usize, rgba: &[u8], max: usize) -> (usize, usize, Vec<u8>) {
+    if w * h <= max {
+        return (w, h, rgba[..w * h * 4].to_vec());
+    }
+    let k = ((w * h) as f64 / max as f64).sqrt().ceil() as usize;
+    let (nw, nh) = (w / k, h / k);
+    let mut out = Vec::with_capacity(nw * nh * 4);
+    for y in 0..nh {
+        for x in 0..nw {
+            let mut sum = [0u32; 4];
+            for dy in 0..k {
+                let row = (y * k + dy) * w;
+                for dx in 0..k {
+                    let i = (row + x * k + dx) * 4;
+                    for c in 0..4 {
+                        sum[c] += u32::from(rgba[i + c]);
+                    }
+                }
+            }
+            out.extend(sum.map(|s| (s / (k * k) as u32) as u8));
+        }
+    }
+    (nw, nh, out)
 }
 
 /// Grava os pixels RGBA num PNG novo da pasta `dir`, legível só pelo dono.
@@ -159,6 +191,7 @@ fn write_png(
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), width, height);
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
+    enc.set_compression(png::Compression::Fast);
     let len = width as usize * height as usize * 4;
     enc.write_header()
         .and_then(|mut w| w.write_image_data(&rgba[..len]))
@@ -258,6 +291,18 @@ mod tests {
         );
         assert!(!image_fits(100, 100, 10), "bytes faltando");
         assert!(!image_fits(0, 100, 0));
+    }
+
+    #[test]
+    fn big_images_are_shrunk_before_writing() {
+        let (w, h, px) = shrink(4, 4, &[200u8; 64], 4);
+        assert_eq!((w, h, px.len()), (2, 2, 16), "4 px no máximo: blocos 2 × 2");
+        assert!(
+            px.iter().all(|&b| b == 200),
+            "a média de blocos iguais é a mesma cor"
+        );
+        let (w, h, _) = shrink(3, 3, &[1u8; 36], 100);
+        assert_eq!((w, h), (3, 3), "pequena: fica como está");
     }
 
     #[test]

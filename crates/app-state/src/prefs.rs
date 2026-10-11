@@ -59,8 +59,8 @@ pub enum DefaultZoom {
     Level(f32),
 }
 
-/// Maior número de recentes que dá para escolher.
-pub const MAX_RECENT_SETTING: usize = 50;
+/// Maior número de recentes que dá para escolher (o que a lista guarda).
+pub const MAX_RECENT_SETTING: usize = crate::recents::MAX_RECENTS;
 /// Arquivos com a última vista lembrada.
 pub const MAX_LAST_VIEWS: usize = 200;
 

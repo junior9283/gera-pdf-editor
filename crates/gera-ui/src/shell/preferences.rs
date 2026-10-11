@@ -197,11 +197,14 @@ impl PrefsDraft {
 }
 
 fn zoom_label(z: DefaultZoom) -> String {
+    use crate::doc_tab::DocCommand;
+    use crate::shell::commands::Command;
+    let fit = |f| Command::Doc(DocCommand::Fit(f)).label();
     match z {
         DefaultZoom::Auto => "Automático".into(),
-        DefaultZoom::FitPage => "Ajustar à página".into(),
-        DefaultZoom::FitWidth => "Ajustar à largura".into(),
-        DefaultZoom::FitHeight => "Ajustar à altura".into(),
+        DefaultZoom::FitPage => fit(zoom::Fit::Page),
+        DefaultZoom::FitWidth => fit(zoom::Fit::Width),
+        DefaultZoom::FitHeight => fit(zoom::Fit::Height),
         DefaultZoom::Level(l) => zoom::percent_text(l),
     }
 }

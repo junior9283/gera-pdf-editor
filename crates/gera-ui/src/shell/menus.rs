@@ -25,7 +25,7 @@ pub struct MenuState<'a> {
     pub active: usize,
 }
 
-fn item(ui: &mut egui::Ui, out: &mut Option<Command>, cmd: Command, enabled: bool) {
+pub(crate) fn item(ui: &mut egui::Ui, out: &mut Option<Command>, cmd: Command, enabled: bool) {
     let mut button = egui::Button::new(cmd.label());
     if let Some(sc) = shortcut_of(&cmd) {
         button = button.shortcut_text(shortcut_text(&sc));
@@ -35,7 +35,13 @@ fn item(ui: &mut egui::Ui, out: &mut Option<Command>, cmd: Command, enabled: boo
     }
 }
 
-fn check(ui: &mut egui::Ui, out: &mut Option<Command>, cmd: Command, checked: bool, enabled: bool) {
+pub(crate) fn check(
+    ui: &mut egui::Ui,
+    out: &mut Option<Command>,
+    cmd: Command,
+    checked: bool,
+    enabled: bool,
+) {
     if ui
         .add_enabled(enabled, egui::Button::selectable(checked, cmd.label()))
         .clicked()
