@@ -76,6 +76,12 @@ pub(crate) fn open_authenticated(path: &Path, password: Option<&str>) -> Result<
     Ok(inner)
 }
 
+type AnnotsLinksFiles = (
+    Vec<AnnotInfo>,
+    Vec<crate::LinkInfo>,
+    Vec<crate::AttachmentInfo>,
+);
+
 impl PdfDoc {
     pub fn open(path: &Path, password: Option<&str>) -> Result<Self> {
         let inner = open_authenticated(path, password)?;
@@ -356,6 +362,12 @@ impl PdfDoc {
             pages: self.page_count()?,
             first_page: self.page_size(0)?,
             file_size: std::fs::metadata(&self.path).map_or(0, |m| m.len()),
+            custom: self.custom_properties(),
+            initial: self.initial_view(),
+            window: self.window_options(),
+            lang: self.language(),
+            print: self.print_prefs(),
+            fonts: self.fonts(),
         })
     }
 
@@ -826,8 +838,10 @@ impl PdfDoc {
 
     /// Anotações e links de todas as páginas, numa passada (cada página é carregada uma vez).
     /// Uma página ilegível perde só as próprias anotações e links.
-    fn annotations_and_links(&self) -> Result<(Vec<AnnotInfo>, Vec<crate::LinkInfo>)> {
+    /// Anotações, links e anexos (os de comentário somam-se aos do documento).
+    fn annotations_links_attachments(&self) -> Result<AnnotsLinksFiles> {
         let (mut annots, mut links) = (Vec::new(), Vec::new());
+        let mut files = self.document_attachments();
         let count = self.page_count()?;
         for p in 0..count {
             // página ilegível: perde só o que é dela
@@ -836,8 +850,9 @@ impl PdfDoc {
             };
             annots.extend(self.annotations_in(&mut page_ref, p).unwrap_or_default());
             links.extend(self.links_in(&page_ref, p, count).unwrap_or_default());
+            crate::attachments::comment_attachments(&page_ref, p, &mut files);
         }
-        Ok((annots, links))
+        Ok((annots, links, files))
     }
 
     pub fn all_annotations(&self) -> Result<Vec<AnnotInfo>> {
@@ -1359,14 +1374,16 @@ impl PdfDoc {
         let sizes = (0..self.page_count()?)
             .map(|p| self.page_size(p))
             .collect::<Result<Vec<_>>>()?;
-        let (annots, links) = self.annotations_and_links().unwrap_or_default();
+        let (annots, links, attachments) = self.annotations_links_attachments().unwrap_or_default();
         Ok(DocSummary {
             path: self.path.clone(),
             sizes,
-            outline: self.outline().unwrap_or_default(),
+            outline: self.outline_tree().unwrap_or_default(),
             annots,
             links,
             initial_view: self.initial_view(),
+            attachments,
+            display_title: self.display_title(),
             fields: self.all_fields().unwrap_or_default(),
             form_notes: self.form_notes().unwrap_or_default(),
             security: self.security()?,
@@ -1376,12 +1393,8 @@ impl PdfDoc {
 
     /// Se o documento é um resultado do Comparar arquivos.
     fn is_comparison(&self) -> bool {
-        let info = self
-            .inner
-            .trailer()
-            .ok()
-            .and_then(|t| t.get_dict("Info").ok().flatten());
-        info.and_then(|i| i.get_dict("GeraCompare").ok().flatten())
+        self.info_dict()
+            .and_then(|i| i.get_dict("GeraCompare").ok().flatten())
             .and_then(|v| v.as_bool().ok())
             .unwrap_or(false)
     }

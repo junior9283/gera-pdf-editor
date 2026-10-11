@@ -14,10 +14,7 @@ use app_state::prefs::LeftPanel;
 use app_state::print::{any_oversized, lp_args, PrintOptions};
 use app_state::transform::PageMap;
 use app_state::zoom::{self, Fit};
-use pdf_core::{
-    AnnotInfo, DocProperties, DocSummary, HistoryState, OutlineItem, PdfError, Request, Response,
-    Worker,
-};
+use pdf_core::{AnnotInfo, DocSummary, HistoryState, PdfError, Request, Response, Worker};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -62,6 +59,8 @@ pub enum DocCommand {
     LastPage,
     /// Leva o foco ao campo da página.
     GoToPage,
+    /// Novo marcador (Ctrl+B).
+    NewBookmark,
     /// Zoom para…: leva o foco ao campo de zoom.
     ZoomTo,
     /// Escolhe a ferramenta (Selecionar, Mão, Zoom com marca; teclas únicas).
@@ -102,6 +101,8 @@ pub enum DocEvent {
     OpenLink(pdf_core::LinkTarget),
     /// O arquivo pede para abrir em tela cheia (`/PageMode /FullScreen`).
     FullScreen,
+    /// Anexo PDF gravado na pasta privada: abrir numa aba, sem lugar escolhido (Salvar pergunta).
+    OpenAttachment(PathBuf),
     /// Um comando da casca escolhido na página (menu de contexto: Imprimir, Propriedades).
     Run(Command),
 }
@@ -137,6 +138,18 @@ pub struct DocTab {
     paste_rx: Option<std::sync::mpsc::Receiver<crate::clipboard::SystemClip>>,
     /// Imagens coladas gravadas na pasta temporária (apagadas ao fechar a aba).
     pasted_files: Vec<std::path::PathBuf>,
+    /// Título a mostrar na aba (Propriedades → Visualização inicial → Mostrar o título).
+    pub(crate) display_title: Option<String>,
+    /// Anexos do documento e dos comentários (painel Anexos).
+    pub(crate) attachments: Vec<pdf_core::AttachmentInfo>,
+    /// Painel Marcadores (seleção, renomeação, arraste, foco do teclado).
+    pub(crate) bookmarks: crate::bookmarks::BookmarksPanel,
+    /// Painel Anexos (seleção e descrição em edição).
+    attachments_panel: crate::attachments_panel::AttachmentsPanel,
+    /// Aviso antes de abrir um anexo (o anexo e quando o aviso apareceu).
+    attach_warning: Option<(pdf_core::AttachmentInfo, Option<f64>)>,
+    /// Documento que não permite alterar: expandir e recolher só na tela (marcador → aberto).
+    bookmarks_open: std::collections::HashMap<i32, bool>,
     /// Arquivo → Reverter: a pergunta está aberta.
     pub(crate) revert_ask: bool,
     /// Depois de colar, seleciona o comentário mais novo desta página.
@@ -174,7 +187,7 @@ pub struct DocTab {
     history: HistoryState,
     /// O motor de PDF (thread do worker) parou; já avisado.
     engine_stopped: bool,
-    outline: Vec<OutlineItem>,
+    pub(crate) outline: Vec<pdf_core::OutlineNode>,
     /// Caminho que está sendo aberto (para pedir a senha de um PDF protegido).
     opening: Option<PathBuf>,
     /// Pedido de senha: (caminho, senha digitada).
@@ -215,10 +228,13 @@ pub struct DocTab {
     pub(crate) ocr: Option<OcrWindow>,
     /// Criado pelo app (Criar PDF): ainda sem lugar escolhido, conta como não salvo.
     pub(crate) created: bool,
+    /// Anexo aberto (cópia na pasta privada), com o nome original: dá o título da aba, e Salvar
+    /// pede o destino (mas fechar sem mudanças não pergunta nada).
+    pub(crate) attachment_name: Option<String>,
     /// Pedido de foco no campo de busca (Ctrl+F ou menu).
     pub(crate) focus_search: bool,
     /// Propriedades mostradas na janela (aberta enquanto houver).
-    properties: Option<DocProperties>,
+    properties: Option<crate::shell::properties::PropertiesDialog>,
     /// Diálogo "Imprimir" aberto.
     print_dialog: Option<PrintDialog>,
     /// Impressão esperando a cópia temporária ficar pronta: opções e a página atual no clique.
@@ -259,6 +275,10 @@ enum PickFor {
         separate: bool,
         delete_after: bool,
     },
+    /// Anexos → Adicionar arquivo.
+    Attachment,
+    /// Anexos → Salvar: onde gravar este anexo.
+    SaveAttachment(pdf_core::AttachmentInfo),
 }
 
 /// Diálogo Dividir documento.
@@ -299,6 +319,12 @@ impl DocTab {
             pasted_files: Vec::new(),
             select_newest_on: None,
             revert_ask: false,
+            bookmarks: Default::default(),
+            bookmarks_open: Default::default(),
+            attachments_panel: Default::default(),
+            attach_warning: None,
+            attachments: Vec::new(),
+            display_title: None,
             marquee: None,
             focus_zoom: false,
             zoom_text: None,
@@ -334,6 +360,7 @@ impl DocTab {
             compress: None,
             export: None,
             created: false,
+            attachment_name: None,
             ocr: None,
             focus_search: false,
             properties: None,
@@ -407,6 +434,7 @@ impl DocTab {
                 self.revert_ask = self.can_revert();
                 return;
             }
+            DocCommand::NewBookmark => return self.new_bookmark(),
             _ => {}
         }
         if self.navigate(cmd) {
@@ -458,7 +486,10 @@ impl DocTab {
         }
         match cmd {
             // PDF criado pelo app: o primeiro Salvar escolhe onde guardar (como o Acrobat)
-            DocCommand::Save if self.created => self.events.push(DocEvent::NeedSaveAs),
+            // criado pelo app, ou anexo aberto da pasta privada: o primeiro Salvar escolhe onde
+            DocCommand::Save if self.created || self.attachment_name.is_some() => {
+                self.events.push(DocEvent::NeedSaveAs)
+            }
             DocCommand::Save => self.save(),
             DocCommand::Undo if self.history.can_undo => self.worker.send(Request::Undo),
             DocCommand::Redo if self.history.can_redo => self.worker.send(Request::Redo),
@@ -520,7 +551,8 @@ impl DocTab {
             | DocCommand::ViewForward
             | DocCommand::FindNext
             | DocCommand::FindPrev
-            | DocCommand::Revert => {} // já tratados no começo
+            | DocCommand::Revert
+            | DocCommand::NewBookmark => {} // já tratados no começo
             DocCommand::Mode(mode) => {
                 view.set_mode(mode, page);
                 self.jump_to = view.go_to(page as i32, None);
@@ -806,6 +838,9 @@ impl DocTab {
             Some(pdf_core::InitialPanel::Thumbnails) => {
                 self.events.push(DocEvent::ShowPanel(LeftPanel::Thumbnails))
             }
+            Some(pdf_core::InitialPanel::Attachments) => self
+                .events
+                .push(DocEvent::ShowPanel(LeftPanel::Attachments)),
             None => {}
         }
         if initial.full_screen {
@@ -998,8 +1033,25 @@ impl DocTab {
         self.id
     }
 
+    /// Rótulo da aba: o nome do arquivo, ou o título do documento quando ele pede.
     pub fn title(&self) -> String {
-        app_state::tabs::tab_title(&self.path, 28)
+        match self
+            .display_title
+            .as_ref()
+            .or(self.attachment_name.as_ref())
+        {
+            Some(t) => app_state::tabs::shorten(t, 28),
+            None => app_state::tabs::tab_title(&self.path, 28),
+        }
+    }
+
+    /// Caminho sugerido no Salvar como: o próprio arquivo, ou, para um anexo aberto, o nome dele
+    /// na pasta pessoal (a cópia na pasta privada não é lugar para guardar).
+    pub fn save_suggestion(&self) -> PathBuf {
+        match (&self.attachment_name, std::env::var_os("HOME")) {
+            (Some(name), Some(home)) => PathBuf::from(home).join(name),
+            _ => self.path.clone(),
+        }
     }
 
     pub fn open(&mut self, path: PathBuf) {
@@ -1029,6 +1081,8 @@ impl DocTab {
         self.form.notes = summary.form_notes;
         self.outline = summary.outline;
         self.links = summary.links;
+        self.attachments = summary.attachments;
+        self.display_title = summary.display_title;
         (summary.path, summary.sizes)
     }
 
@@ -1253,6 +1307,30 @@ impl DocTab {
                         view.on_tile(ctx, page, scale, invert, rotation, tile, image);
                     }
                 }
+                Response::AttachmentsChanged {
+                    attachments,
+                    history,
+                } => {
+                    self.attachments = attachments;
+                    self.history = history;
+                }
+                Response::AttachmentWritten { dest, open: true } => {
+                    self.events.push(DocEvent::OpenAttachment(dest))
+                }
+                Response::AttachmentWritten { dest, open: false } => {
+                    self.status = format!("Anexo salvo em {}", dest.display());
+                }
+                Response::OutlineChanged {
+                    outline,
+                    created,
+                    history,
+                } => {
+                    self.outline = outline;
+                    self.history = history;
+                    if let Some(id) = created {
+                        self.bookmarks.created(id, &self.outline);
+                    }
+                }
                 Response::ContentBox { page, rect } => {
                     if let Some(view) = self.view.as_mut().filter(|v| v.fit == Fit::Visible) {
                         // página em branco: a página inteira
@@ -1332,7 +1410,10 @@ impl DocTab {
                     self.status = format!("Não foi possível salvar: {error}");
                 }
                 Response::Properties(p) => {
-                    self.properties = Some(p);
+                    self.properties = Some(crate::shell::properties::PropertiesDialog::new(
+                        p,
+                        self.security,
+                    ));
                 }
                 Response::PropertiesFailed(msg) => {
                     self.status = format!("Não foi possível ler as propriedades: {msg}");
@@ -1475,6 +1556,12 @@ impl DocTab {
             } else if !self.form.escape() {
                 self.edit.escape();
             }
+        }
+        if !typing && self.bookmarks.focused {
+            // painel Marcadores focado: setas, Enter, Delete e F2 são dele
+            let nodes = outline_shown(&self.outline, &self.bookmarks_open);
+            let actions = self.bookmarks.keys(ctx, &nodes);
+            self.bookmark_actions(actions);
         }
         if !typing {
             self.nudge_selected(ctx);
@@ -2127,11 +2214,15 @@ impl DocTab {
 
     /// Páginas, janelas (propriedades, imprimir, nota, senha) e fim do quadro, depois dos painéis.
     pub fn show_canvas(&mut self, ui: &mut egui::Ui) {
-        if let Some(p) = &self.properties {
-            let mut open = true;
-            crate::shell::properties::window(ui, p, &mut open);
-            if !open {
-                self.properties = None;
+        let answer = self.properties.as_mut().and_then(|d| d.show(ui.ctx()));
+        if let Some(ok) = answer {
+            let edit = self.properties.take().and_then(|d| d.finish(ok));
+            if let Some(e) = edit {
+                if self.security.permissions.modify {
+                    self.worker.send(Request::SetProperties(e));
+                } else {
+                    self.deny("alterar as propriedades");
+                }
             }
         }
         if let (Some(rx), Some(dialog)) = (&self.printers_rx, self.print_dialog.as_mut()) {
@@ -2186,6 +2277,7 @@ impl DocTab {
         }
         self.field_props_window(ui.ctx());
         self.revert_window(ui.ctx());
+        self.attach_warning_window(ui.ctx());
         self.protect_windows(ui.ctx());
         self.pagination_windows(ui.ctx());
         self.redact_windows(ui.ctx());
@@ -2205,6 +2297,31 @@ impl DocTab {
 
     /// Conteúdo do painel esquerdo; clicar leva à página.
     pub fn side_panel(&mut self, ui: &mut egui::Ui, panel: LeftPanel) {
+        if panel == LeftPanel::Outline {
+            let can_edit = self.bookmarks_editable();
+            let nodes = outline_shown(&self.outline, &self.bookmarks_open);
+            let actions = ui
+                .push_id(self.id, |ui| {
+                    ui.strong(panel.label());
+                    self.bookmarks.show(ui, &nodes, can_edit)
+                })
+                .inner;
+            self.bookmark_actions(actions);
+            return;
+        }
+        if panel == LeftPanel::Attachments {
+            let can_edit = self.security.permissions.modify;
+            let actions = ui
+                .push_id(self.id, |ui| {
+                    ui.strong(panel.label());
+                    self.attachments_panel.show(ui, &self.attachments, can_edit)
+                })
+                .inner;
+            for action in actions {
+                self.attachment_action(ui.ctx(), action);
+            }
+            return;
+        }
         if panel == LeftPanel::Signatures {
             match crate::certificates::panel(ui, &self.cert.signatures, &self.fields) {
                 Some(crate::certificates::PanelAction::Validate) => {
@@ -2223,7 +2340,7 @@ impl DocTab {
         // cada aba com seu id: as listas guardam a própria rolagem
         let action = ui
             .push_id(self.id, |ui| {
-                sidebar::show(ui, panel, view, &self.worker, &self.outline, &self.annots)
+                sidebar::show(ui, panel, view, &self.worker, &self.annots)
             })
             .inner;
         let target = match action {
@@ -2235,6 +2352,138 @@ impl DocTab {
             }
         };
         self.jump(target.0, target.1);
+    }
+
+    fn attachment_action(
+        &mut self,
+        ctx: &egui::Context,
+        action: crate::attachments_panel::AttachmentAction,
+    ) {
+        use crate::attachments_panel::{save_name, AttachmentAction};
+        match action {
+            AttachmentAction::Open(a) => self.attach_warning = Some((a, None)),
+            AttachmentAction::Save(a) => {
+                let dir = self.path.parent().map(PathBuf::from).unwrap_or_default();
+                let suggested = dir.join(save_name(&a.name));
+                self.picking = Some(PickFor::SaveAttachment(a));
+                self.files.save_any(ctx, suggested);
+            }
+            AttachmentAction::Add => {
+                self.picking = Some(PickFor::Attachment);
+                self.files.pick_any_file(ctx, "Adicionar anexo");
+            }
+            AttachmentAction::Remove(name) => self.worker.send(Request::RemoveAttachment { name }),
+            AttachmentAction::Describe { name, text } => {
+                self.worker.send(Request::DescribeAttachment { name, text })
+            }
+            AttachmentAction::Go { page } => self.jump(page, None),
+        }
+    }
+
+    /// Aviso antes de abrir um anexo PDF (como no Acrobat); Permitir grava uma cópia na pasta
+    /// privada do app e a abre numa aba.
+    fn attach_warning_window(&mut self, ctx: &egui::Context) {
+        let Some((a, opened)) = self.attach_warning.as_mut() else {
+            return;
+        };
+        let answer = crate::links::security_warning(ctx, opened, |ui| {
+            ui.label("O documento está tentando abrir o anexo:");
+            ui.monospace(crate::links::safe_display(&a.name));
+            ui.label("Se você confia neste anexo, escolha Permitir.");
+        });
+        let Some(allow) = answer else { return };
+        let Some((a, _)) = self.attach_warning.take() else {
+            return;
+        };
+        if !allow {
+            return;
+        }
+        match crate::print_job::spool_dir() {
+            Ok(dir) => {
+                use crate::print_job::{spool_file_name, ATTACHMENT_PREFIX};
+                let name = crate::attachments_panel::save_name(&a.name);
+                let dest = dir.join(spool_file_name(ATTACHMENT_PREFIX, &format!("-{name}")));
+                self.worker.send(Request::WriteAttachment {
+                    origin: a.origin,
+                    name: a.name,
+                    dest,
+                    open: true,
+                });
+            }
+            Err(e) => self.status = format!("Não foi possível abrir o anexo: {e}"),
+        }
+    }
+
+    /// Executa o que o painel Marcadores pediu.
+    fn bookmark_actions(&mut self, actions: Vec<crate::bookmarks::BookmarkAction>) {
+        use crate::bookmarks::BookmarkAction;
+        for action in actions {
+            match action {
+                BookmarkAction::Go { page, at } => self.jump(page, at),
+                BookmarkAction::New => self.new_bookmark(),
+                BookmarkAction::DestinationHere(id) => {
+                    let (page, at) = self.view_target();
+                    self.outline_op(pdf_core::OutlineOp::SetDest { id, page, at });
+                }
+                BookmarkAction::Op(op) => self.outline_op(op),
+            }
+        }
+    }
+
+    /// Página e ponto do topo da vista atual (destino de marcador novo).
+    fn view_target(&self) -> (i32, Option<(f32, f32)>) {
+        let page = self.last.current_page;
+        let y = self
+            .view
+            .as_ref()
+            .map(|v| v.view_entry(self.last.scroll_y, page).y.max(0.0))
+            .unwrap_or(0.0);
+        (page as i32, Some((0.0, y)))
+    }
+
+    /// Ctrl+B: marcador novo depois do selecionado, com o texto selecionado como título.
+    fn new_bookmark(&mut self) {
+        let text = self
+            .edit
+            .selection
+            .as_ref()
+            .map(|s| s.text.clone())
+            .unwrap_or_default();
+        let (page, at) = self.view_target();
+        let op =
+            crate::bookmarks::new_bookmark(&self.outline, self.bookmarks.selected, &text, page, at);
+        self.events.push(DocEvent::ShowPanel(LeftPanel::Outline));
+        self.outline_op(op);
+    }
+
+    /// Os marcadores podem ser alterados no arquivo? Não num documento protegido contra alteração
+    /// nem num assinado (mudar o arquivo alteraria as assinaturas).
+    fn bookmarks_editable(&self) -> bool {
+        self.security.permissions.modify && self.cert.signatures.is_empty()
+    }
+
+    fn outline_op(&mut self, op: pdf_core::OutlineOp) {
+        use pdf_core::OutlineOp;
+        if !self.bookmarks_editable() {
+            // expandir e recolher continuam, só na tela
+            match op {
+                OutlineOp::SetOpen { id, open } => {
+                    self.bookmarks_open.insert(id, open);
+                }
+                OutlineOp::SetAllOpen { open } => {
+                    let parents = self.outline.iter().filter_map(|n| n.parent);
+                    self.bookmarks_open.extend(parents.map(|p| (p, open)));
+                }
+                _ if !self.cert.signatures.is_empty() => {
+                    self.status = "O documento está assinado: alterar os marcadores alteraria as \
+                                   assinaturas."
+                        .into();
+                }
+                _ => self.deny("alterar os marcadores"),
+            }
+            return;
+        }
+        self.worker.send(Request::Outline(op));
     }
 
     /// ◀ campo da página / total ▶
@@ -2552,7 +2801,7 @@ impl DocTab {
                         separate,
                         delete_after,
                     });
-                    self.files.save_as(ui.ctx(), suggested);
+                    self.files.save_as(ui.ctx(), suggested.clone(), suggested);
                 }
             }
         }
@@ -2628,6 +2877,19 @@ impl DocTab {
                 {
                     d.path = files.into_iter().next().or(d.path.take());
                 }
+            }
+            (Some(PickFor::Attachment), Picked::Open(files)) => {
+                if let Some(path) = files.into_iter().next() {
+                    self.worker.send(Request::AddAttachment { path });
+                }
+            }
+            (Some(PickFor::SaveAttachment(a)), Picked::SaveTo(dest)) => {
+                self.worker.send(Request::WriteAttachment {
+                    origin: a.origin,
+                    name: a.name,
+                    dest,
+                    open: false,
+                });
             }
             (Some(PickFor::Folder), Picked::Folder(dir)) => {
                 if let Some(split) = self.split.as_mut() {
@@ -2904,6 +3166,10 @@ impl DocTab {
         }
         if let Some(cmd) = turn {
             self.run(ui.ctx(), cmd);
+        }
+        // clique nas páginas: o teclado volta para o documento
+        if ui.input(|i| i.pointer.any_pressed()) && ui.rect_contains_pointer(ui.max_rect()) {
+            self.bookmarks.focused = false;
         }
         if let Some(action) = screen_action {
             self.screen_action(action);
@@ -3226,6 +3492,24 @@ fn link_gesture(
     clicked.then(|| link.target.clone())
 }
 
+/// Marcadores como aparecem: com expandir e recolher locais (`open`) quando o documento não
+/// permite alterar; sem eles, empresta a lista como está.
+fn outline_shown<'a>(
+    outline: &'a [pdf_core::OutlineNode],
+    open: &std::collections::HashMap<i32, bool>,
+) -> std::borrow::Cow<'a, [pdf_core::OutlineNode]> {
+    if open.is_empty() {
+        return std::borrow::Cow::Borrowed(outline);
+    }
+    let mut nodes = outline.to_vec();
+    for n in &mut nodes {
+        if let Some(&o) = open.get(&n.id) {
+            n.open = o;
+        }
+    }
+    std::borrow::Cow::Owned(nodes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3329,6 +3613,49 @@ mod tests {
             tab.history_views.back(e).is_none(),
             "só uma vista no histórico"
         );
+    }
+
+    #[test]
+    fn display_title_changes_the_tab_title() {
+        let mut tab = tab_with_pages(1);
+        assert_eq!(tab.title(), "a.pdf");
+        tab.display_title = Some("Manual do Usuário".into());
+        assert_eq!(tab.title(), "Manual do Usuário");
+    }
+
+    #[test]
+    fn bookmarks_of_a_signed_document_open_on_screen_only() {
+        let mut tab = tab_with_pages(1);
+        tab.security.permissions.modify = true;
+        tab.cert.signatures = vec![pdf_core::SignatureInfo {
+            field: "Assinatura1".into(),
+            page: 0,
+            id: 9,
+            signer: "Ana".into(),
+            email: String::new(),
+            signed_at: String::new(),
+            reason: String::new(),
+            location: String::new(),
+            integrity: pdf_core::Integrity::Intact,
+            modified_after: false,
+            fingerprints: Vec::new(),
+            changes_permitted: false,
+            cert_valid_at_signing: true,
+        }];
+        tab.outline_op(pdf_core::OutlineOp::SetOpen { id: 4, open: true });
+        assert_eq!(tab.bookmarks_open.get(&4), Some(&true), "só na tela");
+        assert!(!tab.bookmarks_editable(), "assinado: o painel não edita");
+    }
+
+    #[test]
+    fn an_opened_attachment_shows_its_own_name() {
+        let mut tab = tab_with_pages(1);
+        tab.path = "/run/user/1000/gera-pdf-editor/gera-anexo-77-0-outro.pdf".into();
+        tab.attachment_name = Some("outro.pdf".into());
+        assert_eq!(tab.title(), "outro.pdf");
+        assert!(!tab.is_dirty(), "abrir um anexo não é uma alteração");
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        assert_eq!(tab.save_suggestion(), home.join("outro.pdf"));
     }
 
     #[test]

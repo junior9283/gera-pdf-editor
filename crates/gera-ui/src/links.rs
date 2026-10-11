@@ -119,69 +119,87 @@ impl LinkWarning {
 
     /// Mostra a janela; devolve a escolha (Permitir ou Bloquear) quando o usuário escolhe.
     pub fn show(&mut self, ctx: &egui::Context) -> Option<LinkDecision> {
-        let mut answer = None;
-        let now = ctx.input(|i| i.time);
-        let ready = armed(*self.opened_at.get_or_insert(now), now);
-        if !ready {
-            ctx.request_repaint_after(std::time::Duration::from_secs_f64(ARM_DELAY));
-        }
-        egui::Window::new("Aviso de segurança")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |ui| {
-                ui.set_max_width(460.0);
-                let (what, detail, rememberable) = match &self.target {
-                    // endereço ambíguo (sem site reconhecível): nada a lembrar, o aviso volta sempre
-                    LinkTarget::Uri(url) => (
-                        "se conectar a:",
-                        safe_display(&shortened(url, 2 * HINT_CHARS)),
-                        link_policy::site_key(url).is_some(),
-                    ),
-                    LinkTarget::File { path, .. } => {
-                        let path = path.display().to_string();
-                        (
-                            "abrir o arquivo:",
-                            safe_display(&shortened(&path, 2 * HINT_CHARS)),
-                            false,
-                        )
-                    }
-                    _ => return,
-                };
-                ui.label(format!("O documento está tentando {what}"));
-                ui.add(egui::Label::new(egui::RichText::new(detail).monospace()).wrap());
-                if let LinkTarget::Uri(url) = &self.target {
-                    if let Some(line) = site_line(url) {
-                        ui.label(egui::RichText::new(line).strong());
-                    }
+        let allow = security_warning(ctx, &mut self.opened_at, |ui| {
+            let (what, detail, rememberable) = match &self.target {
+                // endereço ambíguo (sem site reconhecível): nada a lembrar, o aviso volta sempre
+                LinkTarget::Uri(url) => (
+                    "se conectar a:",
+                    safe_display(&shortened(url, 2 * HINT_CHARS)),
+                    link_policy::site_key(url).is_some(),
+                ),
+                LinkTarget::File { path, .. } => {
+                    let path = path.display().to_string();
+                    (
+                        "abrir o arquivo:",
+                        safe_display(&shortened(&path, 2 * HINT_CHARS)),
+                        false,
+                    )
                 }
-                ui.add_space(4.0);
-                ui.label(
-                    "Se você confia neste destino, escolha Permitir. Se não confia, escolha \
+                _ => return,
+            };
+            ui.label(format!("O documento está tentando {what}"));
+            ui.add(egui::Label::new(egui::RichText::new(detail).monospace()).wrap());
+            if let LinkTarget::Uri(url) = &self.target {
+                if let Some(line) = site_line(url) {
+                    ui.label(egui::RichText::new(line).strong());
+                }
+            }
+            ui.add_space(4.0);
+            ui.label(
+                "Se você confia neste destino, escolha Permitir. Se não confia, escolha \
                      Bloquear.",
+            );
+            if rememberable {
+                ui.checkbox(
+                    &mut self.remember,
+                    "Lembrar desta ação para este site em todos os documentos PDF",
                 );
-                if rememberable {
-                    ui.checkbox(
-                        &mut self.remember,
-                        "Lembrar desta ação para este site em todos os documentos PDF",
-                    );
-                }
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(ready, egui::Button::new("Permitir"))
-                        .clicked()
-                    {
-                        answer = Some(LinkDecision::Allow);
-                    }
-                    let block = ui.add_enabled(ready, egui::Button::new("Bloquear"));
-                    if block.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        answer = Some(LinkDecision::Block);
-                    }
-                });
-            });
-        answer
+            }
+        })?;
+        Some(if allow {
+            LinkDecision::Allow
+        } else {
+            LinkDecision::Block
+        })
     }
+}
+
+/// Janela "Aviso de segurança" com Permitir e Bloquear (Esc bloqueia). Os botões só respondem
+/// depois de `ARM_DELAY` desde a abertura (`opened_at`), contra o clique acidental. Devolve
+/// `Some(true)` ao permitir e `Some(false)` ao bloquear.
+pub(crate) fn security_warning(
+    ctx: &egui::Context,
+    opened_at: &mut Option<f64>,
+    body: impl FnOnce(&mut egui::Ui),
+) -> Option<bool> {
+    let now = ctx.input(|i| i.time);
+    let ready = armed(*opened_at.get_or_insert(now), now);
+    if !ready {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(ARM_DELAY));
+    }
+    let mut answer = None;
+    egui::Window::new("Aviso de segurança")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.set_max_width(460.0);
+            body(ui);
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(ready, egui::Button::new("Permitir"))
+                    .clicked()
+                {
+                    answer = Some(true);
+                }
+                let block = ui.add_enabled(ready, egui::Button::new("Bloquear"));
+                if block.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    answer = Some(false);
+                }
+            });
+        });
+    answer
 }
 
 #[cfg(test)]

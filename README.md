@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="packaging/gera-pdf-editor.svg" width="96" alt="">
+  <img src="packaging/icons/gera-pdf-editor-256.png" width="96" alt="">
 </p>
 
 <h1 align="center">Gera PDF Editor</h1>
@@ -27,7 +27,7 @@ reconhecer texto (OCR) e editar o conteúdo. O Gera PDF Editor reúne tudo isso 
 
 - abre em ~120 ms;
 - usa ~120 MB de memória, mesmo com 3 abas;
-- binário de ~21 MB.
+- binário de ~24 MB.
 
 O comportamento e os atalhos de teclado seguem os do Acrobat, para quem vem de lá não precisar
 reaprender nada. A implementação é **original**: nenhum código, ícone ou recurso da Adobe.

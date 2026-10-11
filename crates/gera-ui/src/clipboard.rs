@@ -179,10 +179,8 @@ fn write_png(
     height: u32,
     rgba: &[u8],
 ) -> std::io::Result<std::path::PathBuf> {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static N: AtomicU32 = AtomicU32::new(0);
-    let n = N.fetch_add(1, Ordering::Relaxed);
-    let path = dir.join(format!("gera-colar-{}-{n}.png", std::process::id()));
+    use crate::print_job::{spool_file_name, PASTE_PREFIX};
+    let path = dir.join(spool_file_name(PASTE_PREFIX, ".png"));
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]

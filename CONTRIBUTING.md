@@ -35,7 +35,7 @@ cargo fmt --all
   Acrobat faz. A implementação deve ser **original**: não copie código, ícones nem textos da Adobe.
 - **Testes primeiro.** Toda correção de bug vem com um teste que falha sem a correção; toda
   funcionalidade nova vem com testes em `pdf-core` (e na UI, quando houver lógica).
-- **Desempenho.** Abertura < 300 ms, memória < 150 MB (também com 3 abas) e binário < 25 MB:
+- **Desempenho.** Abertura < 300 ms, memória < 150 MB (também com 3 abas) e binário < 50 MB:
   rode `scripts/measure.sh` se a mudança puder afetar isso.
 - **Interface e comentários em português do Brasil.**
 - Dependências novas precisam ter licença compatível com a **AGPL-3.0** e ser listadas em

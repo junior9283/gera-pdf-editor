@@ -24,22 +24,27 @@ pub const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "tif", "tiff", "bmp", "g
 
 /// "Salvar como" de PDF partindo de `suggested` (pasta e nome); sem extensão, ganha ".pdf".
 fn save_dialog(suggested: &std::path::Path) -> Option<PathBuf> {
-    let mut dialog = rfd::FileDialog::new()
+    let dialog = rfd::FileDialog::new()
         .set_title("Salvar como")
         .add_filter("PDF", &["pdf"]);
-    if let Some(dir) = suggested.parent() {
-        dialog = dialog.set_directory(dir);
-    }
-    if let Some(name) = suggested.file_name() {
-        dialog = dialog.set_file_name(name.to_string_lossy());
-    }
-    dialog.save_file().map(|p| {
+    suggest(dialog, suggested).save_file().map(|p| {
         if p.extension().is_some() {
             p
         } else {
             p.with_extension("pdf")
         }
     })
+}
+
+/// Pasta e nome iniciais do diálogo de gravação.
+fn suggest(mut dialog: rfd::FileDialog, suggested: &std::path::Path) -> rfd::FileDialog {
+    if let Some(dir) = suggested.parent() {
+        dialog = dialog.set_directory(dir);
+    }
+    if let Some(name) = suggested.file_name() {
+        dialog = dialog.set_file_name(name.to_string_lossy());
+    }
+    dialog
 }
 
 #[derive(Default)]
@@ -65,8 +70,9 @@ impl FileDialogs {
         });
     }
 
-    pub fn save_as(&mut self, ctx: &egui::Context, doc: PathBuf) {
-        self.spawn(ctx, move || match save_dialog(&doc) {
+    /// Salvar como: `doc` identifica a aba; `suggested` é o caminho proposto no diálogo.
+    pub fn save_as(&mut self, ctx: &egui::Context, doc: PathBuf, suggested: PathBuf) {
+        self.spawn(ctx, move || match save_dialog(&suggested) {
             Some(dest) => Picked::SaveAs { doc, dest },
             None => Picked::Cancelled,
         });
@@ -128,6 +134,26 @@ impl FileDialogs {
             dialog
                 .pick_folder()
                 .map_or(Picked::Cancelled, Picked::Folder)
+        });
+    }
+
+    /// Qualquer arquivo (Anexos → Adicionar arquivo).
+    pub fn pick_any_file(&mut self, ctx: &egui::Context, title: &'static str) {
+        self.spawn(ctx, move || {
+            rfd::FileDialog::new()
+                .set_title(title)
+                .pick_file()
+                .map_or(Picked::Cancelled, |p| Picked::Open(vec![p]))
+        });
+    }
+
+    /// Onde gravar um arquivo de qualquer tipo (anexo), sugerindo `suggested`.
+    pub fn save_any(&mut self, ctx: &egui::Context, suggested: PathBuf) {
+        self.spawn(ctx, move || {
+            let dialog = rfd::FileDialog::new().set_title("Salvar anexo");
+            suggest(dialog, &suggested)
+                .save_file()
+                .map_or(Picked::Cancelled, Picked::SaveTo)
         });
     }
 

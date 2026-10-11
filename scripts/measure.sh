@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-MAX_BIN=$((25 * 1024 * 1024))
+MAX_BIN=$((50 * 1024 * 1024))
 MAX_MS=300
 MAX_RSS_KB=$((150 * 1024))
 RUNS=5

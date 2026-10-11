@@ -90,11 +90,23 @@ pub(crate) fn spool_dir() -> std::io::Result<PathBuf> {
     }
 }
 
-/// Arquivo temporário novo para imprimir.
-pub fn temp_file() -> std::io::Result<PathBuf> {
+/// Prefixos das cópias na pasta privada: impressão, imagem colada e anexo aberto. Todas levam o
+/// pid logo depois do prefixo, e a varredura apaga as de execuções que já terminaram.
+pub(crate) const PRINT_PREFIX: &str = "imprimir-";
+pub(crate) const PASTE_PREFIX: &str = "gera-colar-";
+pub(crate) const ATTACHMENT_PREFIX: &str = "gera-anexo-";
+const SPOOL_PREFIXES: [&str; 3] = [PRINT_PREFIX, PASTE_PREFIX, ATTACHMENT_PREFIX];
+
+/// Nome único de uma cópia na pasta privada: "<prefixo><pid>-<n><fim>".
+pub(crate) fn spool_file_name(prefix: &str, end: &str) -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    Ok(spool_dir()?.join(format!("imprimir-{}-{n}.pdf", std::process::id())))
+    format!("{prefix}{}-{n}{end}", std::process::id())
+}
+
+/// Arquivo temporário novo para imprimir.
+pub fn temp_file() -> std::io::Result<PathBuf> {
+    Ok(spool_dir()?.join(spool_file_name(PRINT_PREFIX, ".pdf")))
 }
 
 /// Apaga cópias de impressão deixadas por execuções que já terminaram (app fechado no meio).
@@ -106,11 +118,7 @@ fn sweep_stale(dir: &Path) {
         let name = entry.file_name();
         let pid = name
             .to_str()
-            // cópias de impressão e imagens coladas (clipboard.rs)
-            .and_then(|n| {
-                n.strip_prefix("imprimir-")
-                    .or_else(|| n.strip_prefix("gera-colar-"))
-            })
+            .and_then(|n| SPOOL_PREFIXES.iter().find_map(|p| n.strip_prefix(p)))
             .and_then(|n| n.split('-').next())
             .and_then(|p| p.parse::<u32>().ok());
         if let Some(pid) = pid {

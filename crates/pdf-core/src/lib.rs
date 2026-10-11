@@ -2,6 +2,7 @@
 pub mod sample;
 
 mod annot_edit;
+mod attachments;
 mod compare;
 mod compare_report;
 mod compress;
@@ -14,11 +15,14 @@ mod error;
 mod forms;
 mod links;
 mod ocr;
+mod outline;
 mod owner_password;
 mod page_content;
 mod pages;
 mod pagination;
+mod pdf_obj;
 mod prepare;
+mod properties_edit;
 mod redact;
 mod search;
 mod security;
@@ -30,6 +34,7 @@ mod text_fit;
 mod types;
 mod worker;
 
+pub use attachments::MAX_ATTACHMENT_BYTES;
 pub use compare::{
     compare, Change, ChangeKind, CompareInput, CompareOptions, CompareStage, Comparison,
 };
@@ -48,6 +53,7 @@ pub use pagination::{
     StdFont, TextLook, Watermark, WatermarkSource,
 };
 pub use prepare::{FieldProps, NewFieldKind, PrepareOp};
+pub use properties_edit::valid_custom_name;
 pub use redact::{RedactHit, RedactLook, RedactPattern, RedactQuery, SanitizeOptions};
 pub use security::{Permissions, Protection, SecurityInfo};
 pub use sign::{display_date, Integrity, SignPlace, SignatureInfo};

@@ -17,7 +17,13 @@ APPDIR=target/AppDir
 DOCDIR=$APPDIR/usr/share/doc/gera-pdf-editor
 rm -rf "$APPDIR" && mkdir -p "$APPDIR/usr/bin" "$DOCDIR" dist
 cp target/release/gera-pdf-editor "$APPDIR/usr/bin/"
-cp packaging/gera-pdf-editor.desktop packaging/gera-pdf-editor.svg "$APPDIR/"
+cp packaging/gera-pdf-editor.desktop "$APPDIR/"
+# ícone: o de 256 px na raiz (o appimagetool usa) e todos os tamanhos no tema hicolor
+cp packaging/icons/gera-pdf-editor-256.png "$APPDIR/gera-pdf-editor.png"
+for s in 32 48 64 128 256 512; do
+  mkdir -p "$APPDIR/usr/share/icons/hicolor/${s}x${s}/apps"
+  cp "packaging/icons/gera-pdf-editor-$s.png" "$APPDIR/usr/share/icons/hicolor/${s}x${s}/apps/gera-pdf-editor.png"
+done
 cp LICENSE THIRD_PARTY_NOTICES.md "$DOCDIR/" # AGPL-3.0: a licença e os avisos acompanham o binário
 cp crates/pdf-core/fonts/OFL.txt "$DOCDIR/OFL-GreatVibes.txt"
 # dados de idioma do OCR (português e inglês): o app os procura em $APPDIR/usr/share/tessdata

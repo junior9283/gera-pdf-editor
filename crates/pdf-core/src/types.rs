@@ -429,6 +429,7 @@ pub struct InitialView {
 pub enum InitialPanel {
     Bookmarks,
     Thumbnails,
+    Attachments,
 }
 
 /// `cover`: a primeira página sozinha (variantes `…Right`).
@@ -447,15 +448,99 @@ pub enum InitialZoom {
     Factor(f32),
 }
 
+/// Anexo (painel Anexos).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AttachmentInfo {
+    /// Nome na árvore de anexos (ou o do arquivo, nos de comentário).
+    pub name: String,
+    pub description: String,
+    pub size: usize,
+    pub origin: AttachmentOrigin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachmentOrigin {
+    /// Anexado ao documento (`/EmbeddedFiles`).
+    Document,
+    /// Anexo de um comentário `FileAttachment`.
+    Comment { page: i32, id: i32 },
+}
+
+/// Marcador (painel Marcadores), em ordem de exibição.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutlineNode {
+    /// Número do objeto do marcador.
+    pub id: i32,
+    pub parent: Option<i32>,
+    pub depth: usize,
+    pub title: String,
+    pub page: Option<i32>,
+    /// Ponto do destino (coordenadas do MuPDF), quando o destino diz qual.
+    pub at: Option<(f32, f32)>,
+    /// Filhos à mostra (sinal de `/Count`).
+    pub open: bool,
+    pub color: Option<[f32; 3]>,
+    pub bold: bool,
+    pub italic: bool,
+}
+
+/// Edição dos marcadores. `after: None` põe no começo da lista dos irmãos.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OutlineOp {
+    Add {
+        parent: Option<i32>,
+        after: Option<i32>,
+        title: String,
+        page: i32,
+        at: Option<(f32, f32)>,
+    },
+    Rename {
+        id: i32,
+        title: String,
+    },
+    /// Exclui com os filhos.
+    Delete {
+        id: i32,
+    },
+    Move {
+        id: i32,
+        parent: Option<i32>,
+        after: Option<i32>,
+    },
+    Style {
+        id: i32,
+        color: Option<[f32; 3]>,
+        bold: bool,
+        italic: bool,
+    },
+    SetDest {
+        id: i32,
+        page: i32,
+        at: Option<(f32, f32)>,
+    },
+    /// Expandir ou recolher (não entra no desfazer).
+    SetOpen {
+        id: i32,
+        open: bool,
+    },
+    /// Expandir ou recolher todos (uma gravação só; fora do desfazer).
+    SetAllOpen {
+        open: bool,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct DocSummary {
     pub path: PathBuf,
     pub sizes: Vec<PageSize>,
-    pub outline: Vec<OutlineItem>,
+    pub outline: Vec<OutlineNode>,
     pub annots: Vec<AnnotInfo>,
     /// Links de todas as páginas.
     pub links: Vec<LinkInfo>,
     pub initial_view: InitialView,
+    pub attachments: Vec<AttachmentInfo>,
+    /// Título a mostrar no lugar do nome do arquivo ("Mostrar o título do documento").
+    pub display_title: Option<String>,
     /// Campos de formulário de todas as páginas.
     pub fields: Vec<crate::FieldInfo>,
     pub form_notes: crate::FormNotes,
@@ -607,6 +692,85 @@ pub struct DocProperties {
     pub pages: i32,
     pub first_page: PageSize,
     pub file_size: u64,
+    /// Propriedades personalizadas do `/Info` (nome, valor).
+    pub custom: Vec<(String, String)>,
+    pub initial: InitialView,
+    pub window: WindowOptions,
+    /// Idioma do documento (`/Lang`).
+    pub lang: String,
+    pub print: PrintPrefs,
+    pub fonts: Vec<FontInfo>,
+}
+
+/// Opções de janela da Visualização inicial (`/ViewerPreferences`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WindowOptions {
+    pub fit_window: bool,
+    pub center_window: bool,
+    /// Mostrar o título do documento (não o nome do arquivo).
+    pub display_title: bool,
+    pub hide_menubar: bool,
+    pub hide_toolbar: bool,
+    pub hide_window_ui: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Duplex {
+    Simplex,
+    ShortEdge,
+    LongEdge,
+}
+
+/// Preferências de impressão pedidas pelo documento.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PrintPrefs {
+    /// Escala de página: Nenhuma (tamanho real).
+    pub scaling_none: bool,
+    pub duplex: Option<Duplex>,
+    pub copies: Option<u32>,
+    /// Intervalos de páginas, a partir de 1, inclusive.
+    pub ranges: Vec<(u32, u32)>,
+}
+
+/// Fonte usada no documento (aba Fontes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontInfo {
+    pub name: String,
+    /// Type1, TrueType, Type0, Type3…
+    pub kind: String,
+    pub embedded: bool,
+    /// Embutida só com as letras usadas (nome com prefixo `ABCDEF+`).
+    pub subset: bool,
+}
+
+/// O que a janela Propriedades grava.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PropertiesEdit {
+    pub title: String,
+    pub author: String,
+    pub subject: String,
+    pub keywords: String,
+    pub custom: Vec<(String, String)>,
+    pub initial: InitialView,
+    pub window: WindowOptions,
+    pub lang: String,
+    pub print: PrintPrefs,
+}
+
+impl From<&DocProperties> for PropertiesEdit {
+    fn from(p: &DocProperties) -> Self {
+        Self {
+            title: p.title.clone(),
+            author: p.author.clone(),
+            subject: p.subject.clone(),
+            keywords: p.keywords.clone(),
+            custom: p.custom.clone(),
+            initial: p.initial,
+            window: p.window,
+            lang: p.lang.clone(),
+            print: p.print.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -684,4 +848,7 @@ pub enum Changed {
     Document,
     /// Valores de campos de formulário (um campo pode ter widgets em várias páginas).
     Fields,
+    /// Marcadores (com o id do criado, se houver).
+    Outline(Option<i32>),
+    Attachments,
 }

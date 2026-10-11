@@ -56,6 +56,7 @@ impl PdfDoc {
             panel: match mode.as_str() {
                 "UseOutlines" => Some(InitialPanel::Bookmarks),
                 "UseThumbs" => Some(InitialPanel::Thumbnails),
+                "UseAttachments" => Some(InitialPanel::Attachments),
                 _ => None,
             },
             full_screen: mode == "FullScreen",
@@ -92,26 +93,10 @@ impl PdfDoc {
         } else {
             action.clone()
         };
-        let count = self.page_count().ok()?;
-        if dest.is_string().ok()? || dest.is_name().ok()? {
-            let name = if dest.is_string().ok()? {
-                dest.as_string().ok()?.to_string()
-            } else {
-                String::from_utf8_lossy(&dest.as_name().ok()?).into_owned()
-            };
-            let d = self
-                .inner
-                .resolve_link(&format!("#nameddest={name}"))
-                .ok()??;
-            let page = i32::try_from(d.loc.page_number)
-                .ok()
-                .filter(|p| *p < count)?;
-            return Some((page, None));
-        }
-        (dest.is_array().ok()? && dest.len().ok()? >= 2).then_some(())?;
-        let page_obj = dest.get_array(0).ok()??;
-        let page = self.inner.lookup_page_number(&page_obj).ok()?;
-        (0..count).contains(&page).then_some(())?;
+        let (page, array) = self.resolve_dest(&dest)?;
+        let (page, Some(dest)) = (page?, array) else {
+            return Some((page?, None));
+        };
         let kind = dest.get_array(1).ok()??.as_name().ok()?;
         let zoom = match kind.as_slice() {
             b"Fit" | b"FitB" => Some(InitialZoom::FitPage),
@@ -126,6 +111,37 @@ impl PdfDoc {
             _ => None,
         };
         Some((page, zoom))
+    }
+}
+
+impl PdfDoc {
+    /// Página do destino (nome, string ou array). Um destino nomeado que não leva a nenhuma
+    /// página dá `(None, None)`; um array explícito vem junto para quem lê o tipo e o ponto.
+    pub(crate) fn resolve_dest(
+        &self,
+        dest: &PdfObject,
+    ) -> Option<(Option<i32>, Option<PdfObject>)> {
+        let count = self.page_count().ok()?;
+        if dest.is_string().ok()? || dest.is_name().ok()? {
+            let name = if dest.is_string().ok()? {
+                dest.as_string().ok()?.to_string()
+            } else {
+                crate::pdf_obj::name_of(dest)?
+            };
+            let d = self
+                .inner
+                .resolve_link(&format!("#nameddest={name}"))
+                .ok()??;
+            let page = i32::try_from(d.loc.page_number).ok().filter(|p| *p < count);
+            return Some((page, None));
+        }
+        (dest.is_array().ok()? && dest.len().ok()? >= 2).then_some(())?;
+        let page = self
+            .inner
+            .lookup_page_number(&dest.get_array(0).ok()??)
+            .ok()
+            .filter(|p| (0..count).contains(p))?;
+        Some((Some(page), Some(dest.clone())))
     }
 }
 
