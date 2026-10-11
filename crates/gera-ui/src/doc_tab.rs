@@ -65,6 +65,8 @@ pub enum DocCommand {
     ZoomTo,
     /// Escolhe a ferramenta (Selecionar, Mão, Zoom com marca; teclas únicas).
     Tool(app_state::tools::Tool),
+    /// Shift+U: alterna entre Destacar e Sublinhar.
+    CycleMarkup,
     /// Histórico de vistas (Alt+← / Alt+→).
     ViewBack,
     ViewForward,
@@ -117,6 +119,8 @@ pub struct DocTab {
     /// Último quadro do canvas (rolagem e página atual).
     pub(crate) last: CanvasFrame,
     pub(crate) jump_to: Option<f32>,
+    /// Como abrir: padrão das Preferências e a última vista do arquivo (dados pela casca).
+    pub(crate) open_view: OpenView,
     /// Mão temporária enquanto o Espaço está segurado.
     temp_tool: app_state::tools::TempTool,
     /// Zoom com marca: a página e o ponto (tela) onde o arraste começou.
@@ -267,6 +271,7 @@ impl DocTab {
             jump_x: None,
             pending_target: None,
             temp_tool: Default::default(),
+            open_view: OpenView::default(),
             marquee: None,
             focus_zoom: false,
             zoom_text: None,
@@ -428,7 +433,16 @@ impl DocTab {
             }
             DocCommand::Fit(fit) => view.fit = fit,
             DocCommand::ZoomTo => self.focus_zoom = true,
-            DocCommand::Tool(tool) => self.edit.tool = tool,
+            DocCommand::Tool(tool) => self.pick_tool(tool),
+            DocCommand::CycleMarkup => {
+                use app_state::tools::Tool;
+                let next = if self.edit.tool == Tool::Highlight {
+                    Tool::Underline
+                } else {
+                    Tool::Highlight
+                };
+                self.pick_tool(next);
+            }
             DocCommand::NextChange
             | DocCommand::PrevChange
             | DocCommand::FirstPage
@@ -490,6 +504,51 @@ impl DocTab {
             _ => return false,
         }
         true
+    }
+
+    /// Escolhe a ferramenta; as de comentário abrem a linha Comentar (como no Acrobat).
+    fn pick_tool(&mut self, tool: app_state::tools::Tool) {
+        if !tool.is_screen_tool() && !self.comment_tools {
+            self.show_row(app_state::tools_catalog::COMMENT);
+            if !self.comment_tools {
+                return; // sem permissão de comentar (o aviso já saiu)
+            }
+        }
+        self.edit.tool = tool;
+    }
+
+    /// Vista de abertura: o padrão das Preferências, depois a visualização inicial do arquivo, e
+    /// por cima a última vista lembrada do arquivo.
+    pub(crate) fn apply_open_view(&mut self, initial: pdf_core::InitialView) {
+        use app_state::prefs::DefaultZoom;
+        let open = self.open_view;
+        if let Some(view) = self.view.as_mut() {
+            if let Some(mode) = open.mode {
+                view.set_mode(mode, 0);
+            }
+            match open.zoom {
+                DefaultZoom::Auto => {}
+                DefaultZoom::FitPage => view.fit = Fit::Page,
+                DefaultZoom::FitWidth => view.fit = Fit::Width,
+                DefaultZoom::FitHeight => view.fit = Fit::Height,
+                DefaultZoom::Level(z) => {
+                    view.set_manual_zoom(z);
+                }
+            }
+        }
+        self.apply_initial_view(initial);
+        if let Some(last) = open.last {
+            if let Some(y) = self.view.as_mut().and_then(|v| v.restore(&last)) {
+                self.pending_target = None;
+                self.jump_to = Some(y);
+            }
+        }
+    }
+
+    /// A vista atual (para lembrar ao fechar).
+    pub(crate) fn current_view(&self) -> Option<app_state::view_history::ViewEntry> {
+        let view = self.view.as_ref()?;
+        Some(view.view_entry(self.last.scroll_y, self.last.current_page))
     }
 
     /// Visualização inicial pedida pelo arquivo: modo, zoom, página, painel e tela cheia.
@@ -721,7 +780,7 @@ impl DocTab {
         self.last = CanvasFrame::default();
         self.jump_to = Some(0.0);
         self.events.push(DocEvent::Opened);
-        self.apply_initial_view(initial);
+        self.apply_open_view(initial);
         if let Some(page) = self.pending_page.take() {
             self.jump(page, None);
         }
@@ -2531,6 +2590,14 @@ impl DocTab {
     }
 }
 
+/// Vista de abertura vinda das Preferências.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OpenView {
+    pub mode: Option<ViewMode>,
+    pub zoom: app_state::prefs::DefaultZoom,
+    pub last: Option<app_state::view_history::ViewEntry>,
+}
+
 /// O que a Mão ou o Zoom com marca pedem neste quadro.
 enum ScreenAction {
     /// Arraste da Mão (tela).
@@ -2779,6 +2846,62 @@ mod tests {
         tab.last.scroll_y = 300.0;
         tab.after_zoom_change(0.5);
         assert_eq!(tab.jump_to, Some(150.0));
+    }
+
+    #[test]
+    fn opening_view_uses_defaults_then_the_file_then_the_last_view() {
+        use app_state::prefs::DefaultZoom;
+        use app_state::view_history::ViewEntry;
+        // padrão das Preferências
+        let mut tab = tab_with_pages(6);
+        tab.open_view = OpenView {
+            mode: Some(ViewMode::TwoUp),
+            zoom: DefaultZoom::FitPage,
+            last: None,
+        };
+        tab.apply_open_view(pdf_core::InitialView::default());
+        let v = tab.view.as_ref().unwrap();
+        assert_eq!((v.mode, v.fit), (ViewMode::TwoUp, Fit::Page));
+        // o arquivo prevalece sobre o padrão
+        let mut tab = tab_with_pages(6);
+        tab.open_view.mode = Some(ViewMode::TwoUp);
+        tab.apply_open_view(pdf_core::InitialView {
+            layout: Some(pdf_core::InitialLayout::Single),
+            ..Default::default()
+        });
+        assert_eq!(tab.view.as_ref().unwrap().mode, ViewMode::Single);
+        // a última vista prevalece sobre tudo e vai à página dela
+        let mut tab = tab_with_pages(6);
+        tab.open_view.last = Some(ViewEntry {
+            page: 4,
+            y: 10.0,
+            zoom: 2.0,
+            fit: Fit::None,
+        });
+        tab.apply_open_view(pdf_core::InitialView {
+            page: Some(1),
+            ..Default::default()
+        });
+        let v = tab.view.as_ref().unwrap();
+        assert!((v.zoom - 2.0).abs() < 1e-6);
+        let expected = v.layout.page_top(4) - v.window().0 + 10.0 * 2.0;
+        assert_eq!(tab.jump_to, Some(expected));
+    }
+
+    #[test]
+    fn comment_keys_open_the_comment_row_and_shift_u_cycles() {
+        use app_state::tools::Tool;
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_pages(1);
+        tab.run(&ctx, DocCommand::Tool(Tool::Note));
+        assert!(tab.comment_tools);
+        assert_eq!(tab.edit.tool, Tool::Note);
+        tab.run(&ctx, DocCommand::CycleMarkup);
+        assert_eq!(tab.edit.tool, Tool::Highlight);
+        tab.run(&ctx, DocCommand::CycleMarkup);
+        assert_eq!(tab.edit.tool, Tool::Underline);
+        tab.run(&ctx, DocCommand::Tool(Tool::Hand));
+        assert_eq!(tab.edit.tool, Tool::Hand);
     }
 
     #[test]

@@ -42,6 +42,8 @@ pub struct GeraApp {
     reading: bool,
     /// Último movimento do mouse (a barra da tela cheia some 2 s depois).
     last_motion: f64,
+    /// Janela Preferências aberta (as mudanças só valem com OK).
+    preferences: Option<crate::shell::preferences::PrefsDraft>,
     /// O arquivo pediu tela cheia: a pergunta está aberta.
     full_screen_request: Option<crate::shell::reading::FullScreenRequest>,
     /// Linha de ferramentas (Comentar ou Preencher e assinar) a abrir no próximo documento
@@ -55,8 +57,6 @@ pub struct GeraApp {
     last_doc: Option<PathBuf>,
     show_shortcuts: bool,
     show_about: bool,
-    /// Diálogo Identidade aberto pelo menu: nome sendo digitado.
-    identity: Option<String>,
     /// Janela Combinar arquivos.
     combine: crate::shell::combine::CombineWindow,
     compare: crate::shell::compare::CompareWindow,
@@ -94,13 +94,13 @@ impl GeraApp {
             reading: false,
             last_motion: 0.0,
             full_screen_request: None,
+            preferences: None,
             row_after_open: None,
             create_after_pick: false,
             creating: None,
             last_doc: None,
             show_shortcuts: false,
             show_about: false,
-            identity: None,
             combine: Default::default(),
             compare: Default::default(),
             link_warning: None,
@@ -182,6 +182,16 @@ impl GeraApp {
         if created {
             let mut doc = DocTab::new(ctx, path.clone(), self.prefs.dark);
             doc.set_author(self.prefs.author.clone());
+            let key = path.to_string_lossy();
+            doc.open_view = crate::doc_tab::OpenView {
+                mode: self.prefs.default_mode,
+                zoom: self.prefs.default_zoom,
+                last: self
+                    .prefs
+                    .restore_views
+                    .then(|| self.prefs.last_view(&key))
+                    .flatten(),
+            };
             doc.open(path);
             self.docs.push(doc);
         }
@@ -237,7 +247,12 @@ impl GeraApp {
 
     fn close_tab(&mut self, tab: usize) {
         if let Some(i) = self.tabs.close(tab) {
-            self.docs.remove(i); // o Worker cai junto e a thread termina
+            let doc = self.docs.remove(i); // o Worker cai junto e a thread termina
+            if let (true, Some(view)) = (self.prefs.restore_views, doc.current_view()) {
+                // Restaurar a última vista ao reabrir (Preferências → Documentos)
+                self.prefs.remember_view(&doc.path.to_string_lossy(), view);
+                self.prefs_dirty = true;
+            }
         }
     }
 
@@ -269,6 +284,7 @@ impl GeraApp {
 
     fn remember(&mut self, path: PathBuf) {
         self.recents.add(path, now_secs());
+        self.recents.limit(self.prefs.max_recents);
         self.recents_changed();
     }
 
@@ -433,6 +449,9 @@ impl GeraApp {
                 self.prefs_dirty = true;
             }
             Command::Tool(id) => self.run_tool(ctx, id),
+            Command::Preferences => {
+                self.preferences = Some(crate::shell::preferences::PrefsDraft::new(&self.prefs))
+            }
             Command::FullScreen => {
                 self.fullscreen = !self.fullscreen;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
@@ -452,9 +471,6 @@ impl GeraApp {
             Command::Shortcuts => self.show_shortcuts = true,
             Command::About => self.show_about = true,
             Command::Compare => self.run_tool(ctx, tools_catalog::COMPARE),
-            Command::Identity => {
-                self.identity = Some(self.prefs.author.clone().unwrap_or_default());
-            }
             Command::Print => {
                 if let Some(doc) = self.active_doc() {
                     doc.open_print_dialog(ctx);
@@ -469,21 +485,6 @@ impl GeraApp {
     }
 
     /// Editar → Preferências → Identidade: muda o nome dos carimbos e autor das anotações.
-    fn identity_window(&mut self, ui: &mut egui::Ui) {
-        let Some(name) = self.identity.as_mut() else {
-            return;
-        };
-        match crate::shell::identity::window(ui, name) {
-            Some(true) => {
-                let name = name.trim().to_owned();
-                self.identity = None;
-                self.set_author(name);
-            }
-            Some(false) => self.identity = None,
-            None => {}
-        }
-    }
-
     /// Guarda o nome nas preferências e o passa a todas as abas.
     fn set_author(&mut self, name: String) {
         self.prefs.author = Some(name.clone());
@@ -880,7 +881,7 @@ impl eframe::App for GeraApp {
         }
         self.persist_when_idle(ctx);
         if self.closing.is_none() {
-            for cmd in commands::from_keyboard(ctx) {
+            for cmd in commands::from_keyboard(ctx, self.prefs.single_key) {
                 self.run(ctx, cmd);
             }
             // Esc sai da tela cheia, depois do modo leitura
@@ -987,8 +988,8 @@ impl eframe::App for GeraApp {
             // a aba do resultado abre com a linha Comparação (o PDF diz que é uma comparação)
             self.open_path(ui.ctx(), result);
         }
-        self.identity_window(ui);
         self.link_warning_window(ui.ctx());
+        self.preferences_window(ui.ctx());
         let full = self
             .full_screen_request
             .as_mut()
@@ -997,6 +998,40 @@ impl eframe::App for GeraApp {
             self.full_screen_request = None;
             if yes && !self.fullscreen {
                 self.run(ui.ctx(), Command::FullScreen);
+            }
+        }
+    }
+}
+
+impl GeraApp {
+    /// Preferências: OK aplica (tema e nome passam às abas), Cancelar descarta.
+    fn preferences_window(&mut self, ctx: &egui::Context) {
+        let Some(ok) = self.preferences.as_mut().and_then(|d| d.show(ctx)) else {
+            return;
+        };
+        let Some(draft) = self.preferences.take() else {
+            return;
+        };
+        if ok && draft.forget_recents {
+            self.recents.clear();
+            self.recents_changed();
+        }
+        let Some(new) = draft.finish(ok) else {
+            return;
+        };
+        let (dark, author) = (new.dark, new.author.clone());
+        let theme_changed = dark != self.prefs.dark;
+        let author_changed = author != self.prefs.author;
+        self.prefs = new;
+        self.prefs_dirty = true;
+        self.recents.limit(self.prefs.max_recents);
+        self.recents_changed();
+        if theme_changed {
+            self.set_dark(ctx, dark);
+        }
+        if author_changed {
+            for doc in &mut self.docs {
+                doc.set_author(author.clone());
             }
         }
     }

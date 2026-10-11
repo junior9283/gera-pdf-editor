@@ -48,6 +48,11 @@ impl RecentFiles {
         self.items.truncate(MAX_RECENTS);
     }
 
+    /// Fica só com os `max` mais recentes (Preferências → Documentos).
+    pub fn limit(&mut self, max: usize) {
+        self.items.truncate(max);
+    }
+
     /// Preferências → Documentos → Esquecer os documentos recentes.
     pub fn clear(&mut self) {
         self.items.clear();
@@ -83,6 +88,21 @@ mod tests {
 
     fn p(n: usize) -> PathBuf {
         PathBuf::from(format!("/d/{n}.pdf"))
+    }
+
+    #[test]
+    fn recents_respect_the_maximum() {
+        let mut r = RecentFiles::default();
+        for n in 0..10 {
+            r.add(p(n), n as u64);
+        }
+        r.limit(99);
+        assert_eq!(r.items().len(), 10);
+        r.limit(3);
+        assert_eq!(r.items().len(), 3);
+        assert_eq!(r.items()[0].path, p(9));
+        r.clear();
+        assert!(r.items().is_empty());
     }
 
     #[test]

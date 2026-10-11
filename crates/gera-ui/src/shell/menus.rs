@@ -84,10 +84,7 @@ pub fn menu_bar(ui: &mut egui::Ui, s: &MenuState) -> Option<Command> {
             ui.separator();
             item(ui, &mut out, doc(DocCommand::Find), has_doc);
             ui.separator();
-            ui.menu_button("Preferências", |ui| {
-                check(ui, &mut out, Command::ToggleDark, s.dark, true);
-                item(ui, &mut out, Command::Identity, true);
-            });
+            item(ui, &mut out, Command::Preferences, true);
         });
         ui.menu_button("Exibir", |ui| {
             ui.menu_button("Zoom", |ui| {
