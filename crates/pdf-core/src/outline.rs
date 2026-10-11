@@ -100,6 +100,24 @@ fn contains(items: &[Item], id: i32) -> bool {
     items.iter().any(|i| i.id == id || contains(&i.kids, id))
 }
 
+/// Abre ou fecha `items` (e, com `deep`, todos os descendentes). Com a árvore lida pela metade
+/// (`truncated`) só o sinal do `/Count` muda: regravar as ligações cortaria o que não foi lido.
+fn set_open(items: &mut [Item], open: bool, deep: bool, truncated: bool) -> Result<()> {
+    for item in items {
+        item.open = open;
+        if truncated {
+            if let Some(c) = get(&item.obj, "Count").and_then(|c| c.as_int().ok()) {
+                let c = if open { c.abs() } else { -c.abs() };
+                item.obj.dict_put("Count", PdfObject::new_int(c)?)?;
+            }
+        }
+        if deep {
+            set_open(&mut item.kids, open, true, truncated)?;
+        }
+    }
+    Ok(())
+}
+
 /// Níveis abaixo de cada item (1 para uma folha).
 fn height(item: &Item) -> usize {
     1 + item.kids.iter().map(height).max().unwrap_or(0)
@@ -297,19 +315,19 @@ impl PdfDoc {
     pub fn edit_outline(&mut self, op: OutlineOp) -> Result<Option<i32>> {
         self.require_modifiable("alterar os marcadores")?;
         let (root, mut items, truncated) = self.read_outline()?;
-        if let OutlineOp::SetOpen { id, open } = op {
-            let item = find_mut(&mut items, id).ok_or_else(not_found)?;
-            if truncated {
-                // árvore lida pela metade: só o sinal do /Count do item muda; regravar as
-                // ligações cortaria o que não foi lido
-                if let Some(c) = get(&item.obj, "Count").and_then(|c| c.as_int().ok()) {
-                    let c = if open { c.abs() } else { -c.abs() };
-                    item.obj.dict_put("Count", PdfObject::new_int(c)?)?;
-                }
-                return Ok(None);
+        let open_state = match op {
+            OutlineOp::SetOpen { id, open } => {
+                let item = find_mut(&mut items, id).ok_or_else(not_found)?;
+                Some((std::slice::from_mut(item), open, false))
             }
-            item.open = open;
-            self.write_outline(root, &items)?;
+            OutlineOp::SetAllOpen { open } => Some((&mut items[..], open, true)),
+            _ => None,
+        };
+        if let Some((targets, open, deep)) = open_state {
+            set_open(targets, open, deep, truncated)?;
+            if !truncated {
+                self.write_outline(root, &items)?;
+            }
             return Ok(None);
         }
         if truncated {
@@ -397,7 +415,9 @@ impl PdfDoc {
                 item.obj.dict_delete("A")?;
                 item.obj.dict_put("Dest", dest)?;
             }
-            OutlineOp::SetOpen { .. } => unreachable!("tratado em edit_outline"),
+            OutlineOp::SetOpen { .. } | OutlineOp::SetAllOpen { .. } => {
+                unreachable!("tratado em edit_outline")
+            }
         }
         self.write_outline(root, &items)?;
         Ok(created)

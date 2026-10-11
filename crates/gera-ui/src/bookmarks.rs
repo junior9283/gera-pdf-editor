@@ -279,13 +279,7 @@ impl BookmarksPanel {
             for (icon, open, tip) in [("⊞", true, "Expandir tudo"), ("⊟", false, "Recolher tudo")]
             {
                 if ui.small_button(icon).on_hover_text(tip).clicked() {
-                    out.extend(
-                        nodes
-                            .iter()
-                            .filter(|n| n.open != open)
-                            .filter(|n| parents.contains(&n.id))
-                            .map(|n| BookmarkAction::Op(OutlineOp::SetOpen { id: n.id, open })),
-                    );
+                    out.push(BookmarkAction::Op(OutlineOp::SetAllOpen { open }));
                 }
             }
         });
@@ -296,10 +290,14 @@ impl BookmarksPanel {
         }
         let shown = visible(nodes);
         let mut drop: Option<(i32, Zone)> = None;
-        egui::ScrollArea::vertical()
-            .auto_shrink(false)
-            .show(ui, |ui| {
-                for n in &shown {
+        // só as linhas à vista são montadas (manuais com milhares de marcadores)
+        let row_h = ui.spacing().interact_size.y;
+        egui::ScrollArea::vertical().auto_shrink(false).show_rows(
+            ui,
+            row_h,
+            shown.len(),
+            |ui, rows| {
+                for n in &shown[rows] {
                     let row = ui.horizontal(|ui| {
                         ui.add_space(14.0 * n.depth as f32);
                         if parents.contains(&n.id) {
@@ -438,7 +436,8 @@ impl BookmarksPanel {
                         }
                     });
                 }
-            });
+            },
+        );
         if let Some(dragged) = self.dragging {
             if ui.input(|i| !i.pointer.any_down()) {
                 self.dragging = None;

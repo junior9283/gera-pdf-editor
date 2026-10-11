@@ -2298,7 +2298,7 @@ impl DocTab {
     /// Conteúdo do painel esquerdo; clicar leva à página.
     pub fn side_panel(&mut self, ui: &mut egui::Ui, panel: LeftPanel) {
         if panel == LeftPanel::Outline {
-            let can_edit = self.security.permissions.modify;
+            let can_edit = self.bookmarks_editable();
             let nodes = outline_shown(&self.outline, &self.bookmarks_open);
             let actions = ui
                 .push_id(self.id, |ui| {
@@ -2456,13 +2456,32 @@ impl DocTab {
         self.outline_op(op);
     }
 
+    /// Os marcadores podem ser alterados no arquivo? Não num documento protegido contra alteração
+    /// nem num assinado (mudar o arquivo alteraria as assinaturas).
+    fn bookmarks_editable(&self) -> bool {
+        self.security.permissions.modify && self.cert.signatures.is_empty()
+    }
+
     fn outline_op(&mut self, op: pdf_core::OutlineOp) {
-        if !self.security.permissions.modify {
-            if let pdf_core::OutlineOp::SetOpen { id, open } = op {
-                self.bookmarks_open.insert(id, open); // só na tela
-                return;
+        use pdf_core::OutlineOp;
+        if !self.bookmarks_editable() {
+            // expandir e recolher continuam, só na tela
+            match op {
+                OutlineOp::SetOpen { id, open } => {
+                    self.bookmarks_open.insert(id, open);
+                }
+                OutlineOp::SetAllOpen { open } => {
+                    let parents = self.outline.iter().filter_map(|n| n.parent);
+                    self.bookmarks_open.extend(parents.map(|p| (p, open)));
+                }
+                _ if !self.cert.signatures.is_empty() => {
+                    self.status = "O documento está assinado: alterar os marcadores alteraria as \
+                                   assinaturas."
+                        .into();
+                }
+                _ => self.deny("alterar os marcadores"),
             }
-            return self.deny("alterar os marcadores");
+            return;
         }
         self.worker.send(Request::Outline(op));
     }
@@ -3602,6 +3621,30 @@ mod tests {
         assert_eq!(tab.title(), "a.pdf");
         tab.display_title = Some("Manual do Usuário".into());
         assert_eq!(tab.title(), "Manual do Usuário");
+    }
+
+    #[test]
+    fn bookmarks_of_a_signed_document_open_on_screen_only() {
+        let mut tab = tab_with_pages(1);
+        tab.security.permissions.modify = true;
+        tab.cert.signatures = vec![pdf_core::SignatureInfo {
+            field: "Assinatura1".into(),
+            page: 0,
+            id: 9,
+            signer: "Ana".into(),
+            email: String::new(),
+            signed_at: String::new(),
+            reason: String::new(),
+            location: String::new(),
+            integrity: pdf_core::Integrity::Intact,
+            modified_after: false,
+            fingerprints: Vec::new(),
+            changes_permitted: false,
+            cert_valid_at_signing: true,
+        }];
+        tab.outline_op(pdf_core::OutlineOp::SetOpen { id: 4, open: true });
+        assert_eq!(tab.bookmarks_open.get(&4), Some(&true), "só na tela");
+        assert!(!tab.bookmarks_editable(), "assinado: o painel não edita");
     }
 
     #[test]

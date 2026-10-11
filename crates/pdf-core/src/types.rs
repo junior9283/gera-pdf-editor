@@ -523,6 +523,10 @@ pub enum OutlineOp {
         id: i32,
         open: bool,
     },
+    /// Expandir ou recolher todos (uma gravação só; fora do desfazer).
+    SetAllOpen {
+        open: bool,
+    },
 }
 
 #[derive(Debug, Clone)]

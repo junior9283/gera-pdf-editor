@@ -403,3 +403,20 @@ fn moving_past_the_depth_limit_is_refused() {
     assert!(moved.is_err());
     assert_eq!(tree(&d).len(), 66, "a árvore não mudou");
 }
+
+#[test]
+fn expand_and_collapse_all_in_one_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut d = deep_chain(&dir, 5);
+    d.edit_outline(OutlineOp::SetAllOpen { open: true })
+        .unwrap();
+    let t = tree(&d);
+    assert!(
+        t.iter().filter(|n| n.title != "N4").all(|n| n.open),
+        "todos os pais abertos"
+    );
+    assert!(!d.can_undo(), "abrir e fechar não entram no desfazer");
+    d.edit_outline(OutlineOp::SetAllOpen { open: false })
+        .unwrap();
+    assert!(tree(&d).iter().all(|n| !n.open));
+}
