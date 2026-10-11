@@ -44,6 +44,8 @@ pub struct GeraApp {
     reading: bool,
     /// Último movimento do mouse (a barra da tela cheia some 2 s depois).
     last_motion: f64,
+    /// O arquivo pediu tela cheia: a pergunta está aberta.
+    full_screen_request: Option<crate::shell::reading::FullScreenRequest>,
     /// Linha de ferramentas (Comentar ou Preencher e assinar) a abrir no próximo documento
     /// aberto pelo seletor.
     row_after_open: Option<&'static str>,
@@ -94,6 +96,7 @@ impl GeraApp {
             presenting: None,
             reading: false,
             last_motion: 0.0,
+            full_screen_request: None,
             row_after_open: None,
             create_after_pick: false,
             creating: None,
@@ -341,7 +344,8 @@ impl GeraApp {
             self.open_path(ctx, path);
         }
         if full_screen {
-            self.run(ctx, Command::FullScreen); // o arquivo pediu (/PageMode /FullScreen)
+            // o arquivo pediu (/PageMode /FullScreen): pergunta antes, como o Acrobat
+            self.full_screen_request = Some(Default::default());
         }
         self.poll_creating(ctx);
         if let Some(picked) = self.dialogs.poll() {
@@ -984,6 +988,16 @@ impl eframe::App for GeraApp {
         }
         self.identity_window(ui);
         self.link_warning_window(ui.ctx());
+        let full = self
+            .full_screen_request
+            .as_mut()
+            .and_then(|r| r.show(ui.ctx()));
+        if let Some(yes) = full {
+            self.full_screen_request = None;
+            if yes && !self.fullscreen {
+                self.run(ui.ctx(), Command::FullScreen);
+            }
+        }
     }
 }
 

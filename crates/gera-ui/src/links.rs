@@ -78,7 +78,7 @@ pub struct LinkWarning {
 /// Segundos até os botões aceitarem clique: o clique que abriu o aviso não pode cair em Permitir.
 pub const ARM_DELAY: f64 = 0.6;
 
-fn armed(opened_at: f64, now: f64) -> bool {
+pub(crate) fn armed(opened_at: f64, now: f64) -> bool {
     now - opened_at >= ARM_DELAY - 1e-9
 }
 
