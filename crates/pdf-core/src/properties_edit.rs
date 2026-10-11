@@ -235,7 +235,6 @@ impl PdfDoc {
         catalog.dict_put("Metadata", meta)?;
         Ok(())
     }
-
 }
 
 /// O que o XMP repete do `/Info` (o PDF/A exige os dois iguais).

@@ -33,24 +33,33 @@ fn num(obj: Option<PdfObject>) -> Option<f32> {
         .filter(|v| v.is_finite())
 }
 
+/// O que a leitura achou além dos tetos: a árvore em memória está incompleta.
+#[derive(Default)]
+struct Reading {
+    visited: HashSet<i32>,
+    count: usize,
+    truncated: bool,
+}
+
 /// Irmãos a partir de `first` (e os filhos de cada um), uma vez cada objeto.
-fn read_kids(
-    first: Option<PdfObject>,
-    depth: usize,
-    visited: &mut HashSet<i32>,
-    count: &mut usize,
-) -> Vec<Item> {
+fn read_kids(first: Option<PdfObject>, depth: usize, r: &mut Reading) -> Vec<Item> {
     let mut out = Vec::new();
     let mut node = first;
     while let Some(n) = node {
         let Ok(id) = n.as_indirect() else { break };
-        if id == 0 || *count >= MAX_NODES || !visited.insert(id) {
+        if r.count >= MAX_NODES {
+            r.truncated = true;
             break;
         }
-        *count += 1;
+        if id == 0 || !r.visited.insert(id) {
+            break;
+        }
+        r.count += 1;
+        let first = get(&n, "First");
         let kids = if depth < MAX_DEPTH {
-            read_kids(get(&n, "First"), depth + 1, visited, count)
+            read_kids(first, depth + 1, r)
         } else {
+            r.truncated |= first.is_some();
             Vec::new()
         };
         let open = get(&n, "Count")
@@ -89,6 +98,28 @@ fn find_mut(items: &mut [Item], id: i32) -> Option<&mut Item> {
 
 fn contains(items: &[Item], id: i32) -> bool {
     items.iter().any(|i| i.id == id || contains(&i.kids, id))
+}
+
+/// Níveis abaixo de cada item (1 para uma folha).
+fn height(item: &Item) -> usize {
+    1 + item.kids.iter().map(height).max().unwrap_or(0)
+}
+
+/// Profundidade do item `id` (0 no topo).
+fn depth_of(items: &[Item], id: i32) -> Option<usize> {
+    items.iter().find_map(|i| {
+        if i.id == id {
+            Some(0)
+        } else {
+            depth_of(&i.kids, id).map(|d| d + 1)
+        }
+    })
+}
+
+/// O galho `item` cabe dentro de `parent` sem passar do teto de profundidade da leitura?
+fn fits_under(items: &[Item], parent: Option<i32>, item: &Item) -> bool {
+    let base = parent.map_or(Some(0), |p| depth_of(items, p).map(|d| d + 1));
+    base.is_some_and(|b| b + height(item) - 1 <= MAX_DEPTH)
 }
 
 /// Tira o item `id` (com os filhos) da árvore.
@@ -161,23 +192,22 @@ fn write_kids(parent: &mut PdfObject, items: &[Item]) -> Result<()> {
 }
 
 impl PdfDoc {
-    /// Raiz `/Outlines` (se houver) e a árvore lida.
-    fn read_outline(&self) -> Result<(Option<PdfObject>, Vec<Item>)> {
+    /// Raiz `/Outlines` (se houver), a árvore lida e se ela ficou incompleta pelos tetos.
+    fn read_outline(&self) -> Result<(Option<PdfObject>, Vec<Item>, bool)> {
         let Some(root) = get(&self.inner.catalog()?, "Outlines") else {
-            return Ok((None, Vec::new()));
+            return Ok((None, Vec::new(), false));
         };
-        let mut visited = HashSet::new();
+        let mut r = Reading::default();
         if let Ok(id) = root.as_indirect() {
-            visited.insert(id);
+            r.visited.insert(id);
         }
-        let mut count = 0;
-        let items = read_kids(get(&root, "First"), 0, &mut visited, &mut count);
-        Ok((Some(root), items))
+        let items = read_kids(get(&root, "First"), 0, &mut r);
+        Ok((Some(root), items, r.truncated))
     }
 
     /// Marcadores em ordem de exibição, com destino e estilo.
     pub fn outline_tree(&self) -> Result<Vec<OutlineNode>> {
-        let (_, items) = self.read_outline()?;
+        let (_, items, _) = self.read_outline()?;
         let mut out = Vec::new();
         self.flatten_items(&items, None, 0, &mut out, &mut PageCache::new());
         Ok(out)
@@ -266,18 +296,33 @@ impl PdfDoc {
     /// devolve o id do marcador novo.
     pub fn edit_outline(&mut self, op: OutlineOp) -> Result<Option<i32>> {
         self.require_modifiable("alterar os marcadores")?;
+        let (root, mut items, truncated) = self.read_outline()?;
         if let OutlineOp::SetOpen { id, open } = op {
-            let (root, mut items) = self.read_outline()?;
             let item = find_mut(&mut items, id).ok_or_else(not_found)?;
+            if truncated {
+                // árvore lida pela metade: só o sinal do /Count do item muda; regravar as
+                // ligações cortaria o que não foi lido
+                if let Some(c) = get(&item.obj, "Count").and_then(|c| c.as_int().ok()) {
+                    let c = if open { c.abs() } else { -c.abs() };
+                    item.obj.dict_put("Count", PdfObject::new_int(c)?)?;
+                }
+                return Ok(None);
+            }
             item.open = open;
             self.write_outline(root, &items)?;
             return Ok(None);
+        }
+        if truncated {
+            return Err(refused(
+                "os marcadores deste documento passam do limite que o app edita (50 mil itens ou \
+                 64 níveis)",
+            ));
         }
         self.with_snapshot(|d| d.apply_outline(op))
     }
 
     fn apply_outline(&mut self, op: OutlineOp) -> Result<Option<i32>> {
-        let (root, mut items) = self.read_outline()?;
+        let (root, mut items, _) = self.read_outline()?;
         let mut created = None;
         match op {
             OutlineOp::Add {
@@ -293,17 +338,16 @@ impl PdfDoc {
                 dict.dict_put("Dest", dest)?;
                 let obj = self.inner.add_object(&dict)?;
                 let id = obj.as_indirect()?;
-                insert(
-                    &mut items,
-                    parent,
-                    after,
-                    Item {
-                        obj,
-                        id,
-                        open: false,
-                        kids: Vec::new(),
-                    },
-                )?;
+                let item = Item {
+                    obj,
+                    id,
+                    open: false,
+                    kids: Vec::new(),
+                };
+                if !fits_under(&items, parent, &item) {
+                    return Err(too_deep());
+                }
+                insert(&mut items, parent, after, item)?;
                 created = Some(id);
             }
             OutlineOp::Rename { id, title } => {
@@ -317,6 +361,9 @@ impl PdfDoc {
                 let moving = detach(&mut items, id).ok_or_else(not_found)?;
                 if parent == Some(id) || parent.is_some_and(|p| contains(&moving.kids, p)) {
                     return Err(refused("um marcador não pode ir para dentro de si mesmo"));
+                }
+                if !fits_under(&items, parent, &moving) {
+                    return Err(too_deep());
                 }
                 insert(&mut items, parent, after, moving)?;
             }
@@ -395,7 +442,7 @@ impl PdfDoc {
     /// (título, `/Count`) de cada marcador, em ordem (para os testes conferirem a gravação).
     #[doc(hidden)]
     pub fn outline_counts(&self) -> Vec<(String, i32)> {
-        let Ok((_, items)) = self.read_outline() else {
+        let Ok((_, items, _)) = self.read_outline() else {
             return Vec::new();
         };
         let mut out = Vec::new();
@@ -418,4 +465,8 @@ impl PdfDoc {
 
 fn not_found() -> PdfError {
     refused("marcador não encontrado")
+}
+
+fn too_deep() -> PdfError {
+    refused("os marcadores passariam de 64 níveis")
 }

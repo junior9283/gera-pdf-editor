@@ -301,3 +301,105 @@ fn first_bookmark_in_a_document_without_outline() {
     assert_eq!(titles(&tree(&d)), ["Primeiro"]);
     assert_eq!(d.outline().unwrap().len(), 1, "o MuPDF também vê");
 }
+
+/// Corrente de `levels` marcadores, um dentro do outro ("N0" no topo).
+fn deep_chain(dir: &tempfile::TempDir, levels: usize) -> PdfDoc {
+    let mut objs = vec![
+        "<</Type/Catalog/Pages 2 0 R/Outlines 4 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>".to_string(),
+        "<</Type/Outlines/First 5 0 R/Last 5 0 R/Count 1>>".to_string(),
+    ];
+    for k in 0..levels {
+        let num = 5 + k;
+        let parent = if k == 0 { 4 } else { num - 1 };
+        let kids = if k + 1 < levels {
+            format!("/First {} 0 R/Last {} 0 R/Count -1", num + 1, num + 1)
+        } else {
+            String::new()
+        };
+        objs.push(format!("<</Title(N{k})/Parent {parent} 0 R{kids}>>"));
+    }
+    let path = dir.path().join("fundo.pdf");
+    std::fs::write(&path, pdf_from_objects(&objs)).unwrap();
+    PdfDoc::open(&path, None).unwrap()
+}
+
+/// Dicionário gravado do objeto com o título dado.
+fn saved_object(bytes: &str, title: &str) -> String {
+    let at = bytes.find(&format!("({title})")).unwrap();
+    let start = bytes[..at].rfind(" obj").unwrap();
+    let end = at + bytes[at..].find("endobj").unwrap();
+    bytes[start..end].to_owned()
+}
+
+#[test]
+fn a_tree_deeper_than_the_limit_is_not_cut() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut d = deep_chain(&dir, 70);
+    let top = id_of(&d, "N0");
+    // editar a estrutura de uma árvore lida pela metade perderia o resto: recusado
+    let renamed = d.edit_outline(OutlineOp::Rename {
+        id: top,
+        title: "x".into(),
+    });
+    assert!(renamed.is_err());
+    // expandir continua valendo, sem cortar a parte não lida
+    d.edit_outline(OutlineOp::SetOpen {
+        id: top,
+        open: true,
+    })
+    .unwrap();
+    let out = dir.path().join("depois.pdf");
+    d.save(&out).unwrap();
+    let bytes = String::from_utf8_lossy(&std::fs::read(&out).unwrap()).into_owned();
+    for k in [63, 64, 68] {
+        assert!(
+            saved_object(&bytes, &format!("N{k}")).contains("/First"),
+            "N{k}"
+        );
+    }
+    let reopened = PdfDoc::open(&out, None).unwrap();
+    assert!(reopened.outline_tree().unwrap()[0].open);
+}
+
+#[test]
+fn moving_past_the_depth_limit_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut d = deep_chain(&dir, 60);
+    let leaf = id_of(&d, "N59");
+    let added = d
+        .edit_outline(OutlineOp::Add {
+            parent: None,
+            after: None,
+            title: "Galho".into(),
+            page: 0,
+            at: None,
+        })
+        .unwrap()
+        .unwrap();
+    for _ in 0..5 {
+        let parent = tree(&d)
+            .iter()
+            .rev()
+            .find(|n| n.title == "Galho" || n.title == "G")
+            .unwrap()
+            .id;
+        d.edit_outline(OutlineOp::Add {
+            parent: Some(parent),
+            after: None,
+            title: "G".into(),
+            page: 0,
+            at: None,
+        })
+        .unwrap();
+    }
+    // a corrente de 60 com um galho de 6 níveis embaixo passaria do limite (65 níveis)
+    let moved = d.edit_outline(OutlineOp::Move {
+        id: added,
+        parent: Some(leaf),
+        after: None,
+    });
+    assert!(moved.is_err());
+    assert_eq!(tree(&d).len(), 66, "a árvore não mudou");
+}

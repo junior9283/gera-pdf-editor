@@ -103,7 +103,12 @@ fn read_capped(stream: &PdfObject, cap: usize) -> Result<Vec<u8>> {
     // ASCIIHex e ASCII85 só encolhem; os demais podem expandir
     let expanding = filters
         .iter()
-        .filter(|f| !matches!(f.as_str(), "ASCIIHexDecode" | "AHx" | "ASCII85Decode" | "A85"))
+        .filter(|f| {
+            !matches!(
+                f.as_str(),
+                "ASCIIHexDecode" | "AHx" | "ASCII85Decode" | "A85"
+            )
+        })
         .count();
     if expanding > 0 {
         let raw = stream.read_raw_stream()?;
@@ -295,7 +300,9 @@ mod tests {
             .unwrap();
         // o tamanho declarado mente: diz 1 byte
         let mut params = doc.new_dict().unwrap();
-        params.dict_put("Size", PdfObject::new_int(1).unwrap()).unwrap();
+        params
+            .dict_put("Size", PdfObject::new_int(1).unwrap())
+            .unwrap();
         dict.dict_put("Params", params).unwrap();
         let buf = mupdf::Buffer::from_bytes(&packed).unwrap();
         doc.add_stream(&buf, Some(&dict), true).unwrap()
@@ -333,7 +340,10 @@ mod tests {
         let packed = z.finish().unwrap();
         let mut doc = mupdf::pdf::PdfDocument::new();
         let s = raw_stream(&mut doc, &packed, false);
-        assert!(read_capped(&s, 1 << 20).is_err(), "sem cabeçalho também tem teto");
+        assert!(
+            read_capped(&s, 1 << 20).is_err(),
+            "sem cabeçalho também tem teto"
+        );
         let all = read_capped(&s, 8 << 20).unwrap();
         assert_eq!(all, vec![7u8; 4 << 20]);
     }
@@ -342,7 +352,10 @@ mod tests {
     fn flate_with_parameters_and_a_big_body_is_refused() {
         let mut doc = mupdf::pdf::PdfDocument::new();
         let s = raw_stream(&mut doc, &vec![0x78; 1 << 20], true);
-        assert!(read_capped(&s, 64 << 20).is_err(), "o app não mede o preditor");
+        assert!(
+            read_capped(&s, 64 << 20).is_err(),
+            "o app não mede o preditor"
+        );
     }
 
     #[test]

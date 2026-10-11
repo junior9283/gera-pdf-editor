@@ -220,7 +220,11 @@ fn pdfa_id_in_attribute_form_survives_and_xmp_matches_info() {
     let p = saved.properties().unwrap();
     let producer = element(&x, "pdf:Producer").unwrap_or("");
     assert_eq!(producer, p.producer, "{x}");
-    assert_eq!(element(&x, "xmp:CreatorTool").unwrap_or(""), p.creator, "{x}");
+    assert_eq!(
+        element(&x, "xmp:CreatorTool").unwrap_or(""),
+        p.creator,
+        "{x}"
+    );
     // datas com fuso, como no /Info
     let modified = element(&x, "xmp:ModifyDate").unwrap();
     let tz = &modified[19..];
@@ -234,7 +238,11 @@ fn pdfa_id_in_attribute_form_survives_and_xmp_matches_info() {
 fn changing_only_the_title_keeps_the_initial_view_as_it_was() {
     let dir = tempfile::tempdir().unwrap();
     let js = "<</S/JavaScript/JS(app.alert\\(1\\))>>".to_string();
-    let mut d = pdf_with(&dir, "/OpenAction 4 0 R/PageMode/UseOC/PageLayout/OneColumn", &[js]);
+    let mut d = pdf_with(
+        &dir,
+        "/OpenAction 4 0 R/PageMode/UseOC/PageLayout/OneColumn",
+        &[js],
+    );
     let mut e = edit_from(&d);
     e.title = "Só o título".into();
     d.set_properties(&e).unwrap();
