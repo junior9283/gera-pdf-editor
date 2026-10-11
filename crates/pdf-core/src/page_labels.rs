@@ -1,6 +1,9 @@
 //! Rótulos de página (`/PageLabels`): numeração lógica como "i, ii, iii" no prefácio e "1, 2, 3"
 //! depois, como no diálogo Rótulos de página do Acrobat.
 
+/// Maior rótulo (o prefixo vem do arquivo e se repete em cada página).
+pub const MAX_LABEL_CHARS: usize = 64;
+
 /// Estilo da numeração de uma faixa.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageLabelStyle {
@@ -70,7 +73,11 @@ pub fn format_label(style: PageLabelStyle, prefix: &str, n: i32) -> String {
         PageLabelStyle::UpperAlpha => letters(n),
         PageLabelStyle::LowerAlpha => letters(n).to_lowercase(),
     };
-    format!("{prefix}{number}")
+    prefix
+        .chars()
+        .chain(number.chars())
+        .take(MAX_LABEL_CHARS)
+        .collect()
 }
 
 /// Faixa que vale na página `page` (a última que começa nela ou antes).
@@ -233,7 +240,7 @@ fn read_node(
             out.push(PageLabelRange {
                 start_page: page,
                 style: style_of(&dict),
-                prefix: text(&dict, "P"),
+                prefix: text(&dict, "P").chars().take(MAX_LABEL_CHARS).collect(),
                 first,
             });
         }
@@ -315,6 +322,18 @@ mod tests {
         );
         assert_eq!(r(4000), "4000", "acima de 3999 vira decimal");
         assert_eq!(format_label(PageLabelStyle::LowerRoman, "p-", 3), "p-iii");
+    }
+
+    #[test]
+    fn a_huge_prefix_does_not_multiply_by_the_page_count() {
+        let big = PageLabelRange {
+            start_page: 0,
+            style: PageLabelStyle::Decimal,
+            prefix: "x".repeat(1 << 20),
+            first: 1,
+        };
+        let labels = label_list(&[big], 1000);
+        assert!(labels.iter().all(|l| l.chars().count() <= MAX_LABEL_CHARS));
     }
 
     #[test]
