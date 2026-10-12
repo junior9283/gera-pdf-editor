@@ -140,3 +140,22 @@ fn merge_three_files_into_csv() {
     assert_eq!(lines[2], "\"Ana, \"\"A\"\"\",,,1");
     assert_eq!(lines[3], "Bia,,Olinda,");
 }
+
+#[test]
+fn flatten_bakes_fields_and_undo_restores() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, mut d) = form(&dir);
+    d.flatten(false).unwrap();
+    assert!(d.fields(0).unwrap().is_empty(), "os campos viram conteúdo");
+    assert!(
+        d.page_text(0).unwrap().contains("Recife"),
+        "o valor ficou na página"
+    );
+    d.undo().unwrap();
+    assert_eq!(value(&d, "Cidade"), "Recife", "desfazer volta o formulário");
+    d.redo().unwrap();
+    d.save(&path).unwrap();
+    let saved = PdfDoc::open(&path, None).unwrap();
+    assert!(saved.fields(0).unwrap().is_empty());
+    assert!(saved.page_text(0).unwrap().contains("Recife"));
+}

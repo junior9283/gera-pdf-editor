@@ -288,6 +288,14 @@ impl PdfDoc {
     }
 }
 
+impl PdfDoc {
+    /// Nivelar: os campos (e, com `comments`, os comentários) viram parte da página, com a
+    /// aparência que tinham, numa etapa do desfazer.
+    pub fn flatten(&mut self, comments: bool) -> Result<()> {
+        self.with_snapshot(|d| Ok(d.inner.bake(comments, true)?))
+    }
+}
+
 /// Lê um arquivo de dados (pelo conteúdo: FDF, XFDF, XML ou texto delimitado por tabulação).
 pub(crate) fn read_data_file(path: &Path) -> Result<Vec<(String, String)>> {
     if std::fs::metadata(path)?.len() > MAX_BYTES {
