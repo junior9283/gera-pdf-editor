@@ -96,7 +96,8 @@ interface) e revisão de código independente antes de entrar na `main`.
 | v6d2 | Carimbos personalizados, exportar e importar FDF/XFDF, Resumir comentários, agrupar | ✅ 0.18.0 |
 | v6e | Formatar, Validar e Calcular; campos Botão e Data; ordem de tabulação | ✅ 0.19.0 |
 | v6e2 | Organizar campos (alinhar, duplicar, cópias), ações de campo e de página, campo Imagem | ✅ 0.20.0 |
-| v6e3–v6n | Avaliação para a 1.0.0: as lacunas restantes em relação ao Acrobat Pro | 🚧 próxima |
+| v6e3 | Detecção automática de campos e campo Código de barras | ✅ 0.21.0 |
+| v6e4–v6n | Avaliação para a 1.0.0: as lacunas restantes em relação ao Acrobat Pro | 🚧 próxima |
 
 O histórico de cada versão está no [CHANGELOG](CHANGELOG.md) e o plano detalhado no [ROADMAP](ROADMAP.md).
 As especificações e os planos de cada etapa ficam em [`docs/superpowers`](docs/superpowers).

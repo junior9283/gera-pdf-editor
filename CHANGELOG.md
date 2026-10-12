@@ -6,7 +6,25 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 ## [Não lançado]
 
-- v6e3 — formulários: detecção automática de campos e campo Código de barras.
+- v6e4 — formulários: importar e exportar dados, Enviar, nivelar e preenchimento automático.
+
+## [0.21.0] — 2026-10-12 · Detecção automática de campos e Código de barras (v6e3)
+
+### Adicionado
+- **Detecção automática de campos**, como o Acrobat: ao abrir o Preparar formulário num documento
+  sem formulário, as linhas para escrever, as sequências de "_", as caixas e as células vazias
+  viram campos, com o nome do rótulo ao lado (ou acima). "Assinatura" vira campo de assinatura,
+  "Data" vira campo de data, caixas altas viram campos de várias linhas. Numa etapa do desfazer, e
+  também pelo menu **Organizar ▸ Detectar campos automaticamente**.
+- **Campo Código de barras** (PDF417, QR Code e Data Matrix) com os valores dos campos escolhidos,
+  delimitados por tabulação (com a linha dos nomes, se quiser), atualizado a cada preenchimento e
+  gravado como o Acrobat (/PMD). Abas **Valor** e **Opções** (simbologia e correção de erros).
+  Códigos de outros programas aparecem desenhados a partir do valor.
+- A barra do Preparar usa rótulos curtos (o nome completo fica na dica).
+
+### Segurança
+- Detecção e códigos de barras com tetos: páginas hostis (traços, palavras ou códigos demais)
+  terminam rápido, e dados que não cabem no código mostram um aviso em vez de travar o app.
 
 ## [0.20.0] — 2026-10-12 · Organizar campos, ações e campo Imagem (v6e2)
 
