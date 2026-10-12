@@ -6,7 +6,35 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 ## [Não lançado]
 
-- v6e4 — formulários: importar e exportar dados, Enviar, nivelar e preenchimento automático.
+- v6f — editar PDF: painel Formatar, ferramenta Link, plano de fundo.
+
+## [0.22.0] — 2026-10-12 · Dados do formulário, Enviar, nivelar e preenchimento automático (v6e4)
+
+### Adicionado
+- **Dados do formulário** (Preparar formulário ▸ Organizar ▸ Dados do formulário), como o Acrobat:
+  **Exportar** e **Importar** em FDF, XFDF, XML ou texto delimitado por tabulação (importar é uma
+  etapa do desfazer e só preenche campos existentes e editáveis), e **Mesclar arquivos de dados
+  numa planilha** CSV (uma linha por PDF, FDF ou XFDF).
+- **Ação Enviar formulário** na aba Ações (FDF, XFDF, HTML ou o PDF inteiro): o app sempre pede
+  confirmação mostrando quem recebe; http e https vão por POST e mailto abre o programa de e-mail
+  com os dados no corpo.
+- **Nivelar campos** e **Nivelar campos e comentários**: viram parte da página, numa etapa do
+  desfazer.
+- **Preenchimento automático** (Preferências ▸ Formulários: Desligado, Básico ou Avançado; lembrar
+  dados numéricos; editar a lista): ao digitar num campo, as entradas já usadas aparecem numa lista
+  (setas e Enter, ou clique). Senhas nunca são guardadas.
+
+### Segurança
+- A planilha mesclada neutraliza fórmulas (=, +, -, @, |, também com espaços antes) e põe entre
+  aspas células com `;` ou tabulação (Excel em pt-BR).
+- Enviar recusa localhost, nomes de intranet e IPs privados em qualquer grafia, resolve só para IP
+  público (contra DNS rebinding), não segue redirecionamentos e usa o mesmo analisador de URL do
+  envio; o mailto só leva destinatários, assunto, cc e bcc (nada de `attach`), e a confirmação
+  mostra todos os que recebem.
+- Arquivos de dados hostis (enormes, fundos, com ciclo, com nomes ou valores multiplicados) têm
+  tetos de tamanho, campos, profundidade, nome e total lido.
+- Nivelar não age em documento assinado ou sem permissão de alteração; importar respeita a
+  permissão de preencher formulários.
 
 ## [0.21.1] — 2026-10-12 · Correções de segurança dos códigos de barras
 

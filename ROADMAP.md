@@ -38,13 +38,13 @@ A meta da versão **1.0.0**: todas as ferramentas do Adobe Acrobat Pro, com qual
 - [x] v6e — Formatar, Validar e Calcular; Botão e Data; ordem de tabulação (0.19.0)
 - [x] v6e2 — organizar campos, ações de campo e de página, campo Imagem (0.20.0)
 - [x] v6e3 — detecção automática de campos e campo Código de barras (0.21.1)
-- [ ] v6e4 — próxima: importar e exportar dados do formulário, Enviar, nivelar, preenchimento automático
+- [x] v6e4 — dados do formulário, Enviar, nivelar e preenchimento automático (0.22.0)
 
 ## Planejado
 
 - [ ] v6c3 — pendências dos painéis: visibilidade de camadas pela API do MuPDF (olho em PDF
   assinado), /PageMode /UseOC abre Camadas, grupos exclusivos de camadas, Delete no painel Destinos
-- [ ] v6f — editar PDF: painel Formatar, ferramenta Link, plano de fundo
+- [ ] v6f — próxima: editar PDF: painel Formatar, ferramenta Link, plano de fundo
 - [ ] v6g — converter: criar de Office, exportar Excel/PowerPoint/HTML
 - [ ] v6h a v6n — impressão de livreto/pôster e Otimizador, ortografia e digitalização, Medir e réguas,
   certificados avançados, acessibilidade, PDF/A-X-UA e Preflight, pesquisa em vários arquivos
