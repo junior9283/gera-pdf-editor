@@ -38,7 +38,7 @@ pub(crate) fn safe_display(text: &str) -> String {
 /// Controle ou marca de direção (invisíveis, mas invertem ou escondem parte do texto).
 pub(crate) fn hidden_mark(c: char) -> bool {
     c.is_control()
-        || matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
 }
 
 /// Linha em destaque no aviso: o site para onde o endereço vai, ou um alerta quando o endereço é

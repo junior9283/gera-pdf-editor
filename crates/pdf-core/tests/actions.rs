@@ -384,9 +384,23 @@ fn submit_target_is_canonical_and_mailto_is_restricted() {
         Some(T::Mail("mailto:rh@x.y".into()))
     );
     assert!(pdf_core::submit_target("mailto:?attach=/etc/passwd").is_none());
+    assert_eq!(
+        pdf_core::submit_target("mailto:a@b.c?subject=%+1").unwrap(),
+        pdf_core::SubmitTarget::Mail("mailto:a@b.c?subject=%25%2B1".into())
+    );
     // a confirmação destaca quem recebe
     let t = pdf_core::submit_target("https://Exemplo.com.br/f").unwrap();
     assert_eq!(t.recipient(), "exemplo.com.br");
     let t = pdf_core::submit_target("mailto:rh%40x.y?subject=a").unwrap();
     assert_eq!(t.recipient(), "rh@x.y");
+    // todos os que recebem aparecem, também cc e bcc (oculto), e o + do endereço fica
+    let t = pdf_core::submit_target("mailto:rh@x.y?bcc=spy@evil.com&CC=ana+rh@x.y").unwrap();
+    assert_eq!(
+        t,
+        pdf_core::SubmitTarget::Mail("mailto:rh@x.y?bcc=spy%40evil.com&cc=ana%2Brh%40x.y".into())
+    );
+    assert_eq!(
+        t.recipient(),
+        "rh@x.y · cópia oculta (bcc): spy@evil.com · cópia (cc): ana+rh@x.y"
+    );
 }

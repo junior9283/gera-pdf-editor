@@ -111,14 +111,17 @@ impl SubmitTarget {
                 .and_then(|u| u.host_str().map(str::to_string))
                 .unwrap_or_default(),
             Self::Mail(u) => {
-                let to = u
-                    .trim_start_matches("mailto:")
-                    .split('?')
-                    .next()
-                    .unwrap_or("");
-                url::form_urlencoded::parse(to.as_bytes())
-                    .map(|(k, _)| k.into_owned())
-                    .collect()
+                let rest = u.trim_start_matches("mailto:");
+                let (to, query) = rest.split_once('?').unwrap_or((rest, ""));
+                let mut out = percent_decode(to);
+                for (k, v) in mail_pairs(query) {
+                    match k.as_str() {
+                        "cc" => out.push_str(&format!(" · cópia (cc): {v}")),
+                        "bcc" => out.push_str(&format!(" · cópia oculta (bcc): {v}")),
+                        _ => {}
+                    }
+                }
+                out
             }
         }
     }
@@ -177,10 +180,10 @@ fn mail_target(parsed: &url::Url) -> Option<SubmitTarget> {
     {
         return None;
     }
-    let kept: Vec<String> = parsed
-        .query_pairs()
-        .filter(|(k, _)| matches!(k.to_ascii_lowercase().as_str(), "subject" | "cc" | "bcc"))
-        .map(|(k, v)| format!("{}={}", k.to_ascii_lowercase(), mail_encode(&v)))
+    let kept: Vec<String> = mail_pairs(parsed.query().unwrap_or(""))
+        .into_iter()
+        .filter(|(k, _)| matches!(k.as_str(), "subject" | "cc" | "bcc"))
+        .map(|(k, v)| format!("{k}={}", mail_encode(&v)))
         .collect();
     let query = if kept.is_empty() {
         String::new()
@@ -188,6 +191,43 @@ fn mail_target(parsed: &url::Url) -> Option<SubmitTarget> {
         format!("?{}", kept.join("&"))
     };
     Some(SubmitTarget::Mail(format!("mailto:{to}{query}")))
+}
+
+/// Parâmetros de um mailto (chave em minúsculas). Sem a regra do formulário: o + é literal
+/// (ana+rh@x.y), como lê o programa de e-mail.
+fn mail_pairs(query: &str) -> Vec<(String, String)> {
+    query
+        .split('&')
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let (k, v) = p.split_once('=').unwrap_or((p, ""));
+            (percent_decode(k).to_lowercase(), percent_decode(v))
+        })
+        .collect()
+}
+
+/// Decodifica %XX (UTF-8 com substituição se inválido).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut k = 0;
+    while k < b.len() {
+        let hex = b
+            .get(k + 1..k + 3)
+            .filter(|h| h.iter().all(u8::is_ascii_hexdigit))
+            .and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok());
+        match (b[k], hex) {
+            (b'%', Some(v)) => {
+                out.push(v);
+                k += 3;
+            }
+            (c, _) => {
+                out.push(c);
+                k += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Codificação de um valor de mailto (espaço como %20: o + ali é literal).
