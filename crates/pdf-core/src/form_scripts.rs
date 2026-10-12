@@ -126,7 +126,7 @@ impl FieldCalc {
 }
 
 /// Maior script de código de barras reconhecido (a lista de campos pode ser longa).
-const MAX_BARCODE_SCRIPT: usize = 1024 * 1024;
+const MAX_BARCODE_SCRIPT: usize = 512 * 1024;
 
 /// Começo do script do código de barras que o app grava (Calcular).
 const BARCODE_MARK: &str = "/* Gera PDF Editor: código de barras */";
@@ -1066,7 +1066,8 @@ pub fn parse_calc(js: &str) -> FieldCalc {
         };
         let names = js_t.contains("n.join");
         let c = FieldCalc::Barcode { fields, names };
-        return if js_chunks(js_t) == js_chunks(&calc_script(&c)) {
+        // exatamente o que o app escreve (comparação linear e barata, mesmo com listas longas)
+        return if js_t == calc_script(&c).trim() {
             c
         } else {
             FieldCalc::Custom

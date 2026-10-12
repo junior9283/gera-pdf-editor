@@ -604,6 +604,10 @@ impl PdfDoc {
     /// recusado, com o aviso do Acrobat) e os cálculos que dependem dele. Desfazer volta tudo
     /// numa etapa.
     pub fn set_field(&mut self, page: i32, id: i32, value: &str) -> Result<()> {
+        self.with_barcode_budget(|d| d.set_field_pass(page, id, value))
+    }
+
+    fn set_field_pass(&mut self, page: i32, id: i32, value: &str) -> Result<()> {
         let field = info(&self.widget(page, id)?, page)?;
         let raw = if field.kind.is_textual() {
             let named = |msg: String| {
@@ -634,6 +638,10 @@ impl PdfDoc {
     /// Ação Redefinir formulário: os campos `fields` (ou todos, sem nenhum); com `exclude`, todos
     /// menos eles. Recalcula depois (desfazer por instantâneo).
     pub fn reset_fields(&mut self, fields: &[String], exclude: bool) -> Result<()> {
+        self.with_barcode_budget(|d| d.reset_fields_pass(fields, exclude))
+    }
+
+    fn reset_fields_pass(&mut self, fields: &[String], exclude: bool) -> Result<()> {
         let all = fields.is_empty() && !exclude;
         let before = self.snapshot()?;
         for p in 0..self.page_count()? {

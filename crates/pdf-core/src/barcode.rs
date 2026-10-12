@@ -308,7 +308,10 @@ impl PdfDoc {
         {
             for p in 0..self.page_count()? {
                 for mut w in self.inner.load_pdf_page(p)?.widgets() {
-                    let _ = w.update();
+                    // os códigos são desenhados pelo app (o texto do MuPDF seria jogado fora)
+                    if read_options(&w.annotation().object()).is_none() {
+                        let _ = w.update();
+                    }
                 }
             }
             acro.dict_delete("NeedAppearances")?;
@@ -327,13 +330,21 @@ impl PdfDoc {
     }
 
     /// Roda `f` com o orçamento de uma passada (no máximo `MAX_PER_PASS` códigos codificados).
+    /// Dentro de outra passada, usa o que sobrou dela: uma operação que redesenha muitas páginas
+    /// não ganha um orçamento novo a cada página.
     pub(crate) fn with_barcode_budget<T>(
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<T>,
     ) -> Result<T> {
-        let saved = std::mem::replace(&mut self.barcode_budget, MAX_PER_PASS);
+        let saved = self.barcode_budget;
+        self.barcode_budget = saved.min(MAX_PER_PASS);
         let out = f(self);
-        self.barcode_budget = saved;
+        // devolve o que a passada de dentro não gastou só se esta era a de fora
+        self.barcode_budget = if saved > MAX_PER_PASS {
+            saved
+        } else {
+            self.barcode_budget
+        };
         out
     }
 }

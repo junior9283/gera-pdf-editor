@@ -766,6 +766,12 @@ impl PdfDoc {
 
     /// Aplica uma alteração do Preparar formulário.
     pub fn prepare(&mut self, op: PrepareOp) -> Result<()> {
+        // a operação inteira é uma passada (um orçamento de códigos de barras, mesmo redesenhando
+        // muitas páginas)
+        self.with_barcode_budget(|d| d.prepare_pass(op))
+    }
+
+    fn prepare_pass(&mut self, op: PrepareOp) -> Result<()> {
         match op {
             PrepareOp::Add {
                 page,

@@ -1587,11 +1587,12 @@ impl PdfDoc {
 
     /// Desfaz a última operação; devolve as páginas mudadas (vazio se não havia o que desfazer).
     pub fn undo(&mut self) -> Result<Changed> {
-        self.step(true)
+        // os códigos de barras regravados numa passada só
+        self.with_barcode_budget(|d| d.step(true))
     }
 
     pub fn redo(&mut self) -> Result<Changed> {
-        self.step(false)
+        self.with_barcode_budget(|d| d.step(false))
     }
 
     /// Desfaz (`back`) ou refaz um passo; o passo contrário vai para a outra pilha. Em erro,
