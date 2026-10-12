@@ -111,11 +111,99 @@ pub fn submit_target(url: &str) -> Option<SubmitTarget> {
     let (scheme, rest) = url.split_once(':')?;
     match scheme.to_ascii_lowercase().as_str() {
         "http" | "https" => {
-            let host = rest.strip_prefix("//")?.split(['/', '?', '#']).next()?;
-            (!host.is_empty()).then(|| SubmitTarget::Http(url.to_string()))
+            let authority = rest
+                .strip_prefix("//")?
+                .split(['/', '?', '#', '\\'])
+                .next()?;
+            public_host(authority).then(|| SubmitTarget::Http(url.to_string()))
         }
         "mailto" if !rest.is_empty() => Some(SubmitTarget::Mail(url.to_string())),
         _ => None,
+    }
+}
+
+/// O host de `user@host:porta` é público: nada de localhost, nomes sem domínio (intranet), `.local`
+/// nem IP de loopback, rede privada ou link-local, em qualquer grafia (127.1, 2130706433, 0x7f…).
+fn public_host(authority: &str) -> bool {
+    let host_port = authority.rsplit('@').next().unwrap_or_default();
+    let host = match host_port.strip_prefix('[') {
+        Some(v6) => match v6.split_once(']').and_then(|(ip, _)| ip.parse().ok()) {
+            Some(ip) => return is_public_ip(std::net::IpAddr::V6(ip)),
+            None => return false,
+        },
+        None => host_port.split(':').next().unwrap_or_default(),
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if let Some(ip) = legacy_ipv4(&host) {
+        return is_public_ip(std::net::IpAddr::V4(ip));
+    }
+    let last = host.rsplit('.').next().unwrap_or_default();
+    host.contains('.')
+        && !last.is_empty()
+        && !last.bytes().all(|b| b.is_ascii_digit())
+        && !matches!(
+            last,
+            "localhost" | "local" | "internal" | "lan" | "home" | "localdomain"
+        )
+}
+
+/// IPv4 na grafia que os resolvedores aceitam (inet_aton): 1 a 4 partes em decimal, octal ou hex.
+fn legacy_ipv4(host: &str) -> Option<std::net::Ipv4Addr> {
+    let parts: Vec<u64> = host
+        .split('.')
+        .map(|p| {
+            if let Some(h) = p.strip_prefix("0x").or_else(|| p.strip_prefix("0X")) {
+                u64::from_str_radix(h, 16).ok()
+            } else if p.len() > 1 && p.starts_with('0') {
+                u64::from_str_radix(&p[1..], 8).ok()
+            } else {
+                p.parse().ok()
+            }
+        })
+        .collect::<Option<_>>()?;
+    let (last, head) = parts.split_last()?;
+    if head.len() > 3 || head.iter().any(|&p| p > 255) || *last >= 1u64 << (8 * (4 - head.len())) {
+        return None;
+    }
+    let n = head
+        .iter()
+        .enumerate()
+        .fold(*last, |n, (i, &p)| n | p << (24 - 8 * i));
+    Some(std::net::Ipv4Addr::from(n as u32))
+}
+
+/// Endereço da internet pública (não loopback, privado, link-local, CGNAT, multicast…).
+pub fn is_public_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            !(v4.is_unspecified()
+                || v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_multicast()
+                || a == 0
+                || a >= 240
+                || (a == 100 && (64..128).contains(&b))
+                || (a == 198 && (b == 18 || b == 19)))
+        }
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => is_public_ip(IpAddr::V4(v4)),
+            None => {
+                let first = v6.segments()[0];
+                !(v6.is_unspecified()
+                    || v6.is_loopback()
+                    || v6.is_multicast()
+                    || (first & 0xfe00) == 0xfc00
+                    || (first & 0xffc0) == 0xfe80
+                    || first == 0x64 // NAT64 64:ff9b::
+                    || first == 0x2002 // 6to4
+                    || first == 0x2001 && v6.segments()[1] == 0) // Teredo
+            }
+        },
     }
 }
 

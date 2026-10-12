@@ -312,3 +312,39 @@ fn submit_payloads_and_targets() {
         assert!(pdf_core::submit_target(bad).is_none(), "{bad}");
     }
 }
+
+#[test]
+fn submit_refuses_internal_addresses() {
+    // um PDF não pode fazer o app mandar dados para a própria máquina ou para a rede interna
+    for bad in [
+        "http://localhost/x",
+        "http://LOCALHOST.:8080/",
+        "http://app.localhost/",
+        "http://127.0.0.1/",
+        "http://127.1/",
+        "http://2130706433/",
+        "http://0x7f000001/",
+        "http://0/",
+        "http://10.0.0.5/admin",
+        "http://172.16.3.4/",
+        "http://192.168.0.1/",
+        "http://169.254.169.254/latest/meta-data",
+        "http://100.64.0.1/",
+        "http://[::1]/",
+        "http://[::ffff:127.0.0.1]/",
+        "http://[fe80::1]/",
+        "http://[fd00::1]/",
+        "http://user@127.0.0.1/",
+        "http://evil.com@192.168.0.1:80/",
+        "https://router.local/",
+    ] {
+        assert!(pdf_core::submit_target(bad).is_none(), "{bad}");
+    }
+    assert!(pdf_core::submit_target("https://user@exemplo.com.br:8443/f?x=1").is_some());
+    assert!(pdf_core::submit_target("http://8.8.8.8/").is_some());
+    assert!(!pdf_core::is_public_ip("10.1.2.3".parse().unwrap()));
+    assert!(pdf_core::is_public_ip("1.1.1.1".parse().unwrap()));
+    assert!(!pdf_core::is_public_ip(
+        "::ffff:192.168.1.1".parse().unwrap()
+    ));
+}
