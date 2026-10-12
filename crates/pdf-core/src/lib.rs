@@ -12,6 +12,7 @@ mod compare_report;
 mod compress;
 mod create_export;
 mod destinations;
+mod detect;
 mod digital_id;
 mod doc;
 mod edit_images;

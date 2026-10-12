@@ -105,6 +105,10 @@ pub enum PrepareOp {
         items: Vec<(i32, i32)>,
         to: i32,
     },
+    /// Detectar campos automaticamente nestas páginas (só acrescenta, numa etapa).
+    Detect {
+        pages: Vec<i32>,
+    },
     /// Ações da página (Abrir e Fechar página).
     SetPageActions {
         page: i32,
@@ -776,6 +780,7 @@ impl PdfDoc {
                     d.refresh_widgets(to, None)
                 })
             }
+            PrepareOp::Detect { pages } => self.detect_fields(&pages).map(drop),
             PrepareOp::SetPageActions { page, actions } => {
                 self.check_page(page)?;
                 self.with_snapshot(|d| d.write_page_actions(page, &actions))
@@ -795,6 +800,42 @@ impl PdfDoc {
                 })
             }
         }
+    }
+
+    /// Detecção automática de campos (como o Acrobat ao abrir o Preparar num documento sem
+    /// formulário): cria os campos achados, numa etapa do desfazer. Devolve quantos.
+    pub fn detect_fields(&mut self, pages: &[i32]) -> Result<usize> {
+        let mut found = Vec::new();
+        for &p in pages {
+            self.check_page(p)?;
+            found.extend(self.field_candidates(p)?.into_iter().map(|c| (p, c)));
+        }
+        if found.is_empty() {
+            return Ok(0);
+        }
+        self.with_snapshot(|d| {
+            let mut names = d.field_names()?;
+            for (page, c) in &found {
+                // nome do rótulo, sem repetir (nem virar nó de outro); sem rótulo, o automático
+                let name = match &c.name {
+                    Some(base) => {
+                        let free = |n: &str| {
+                            !names.iter().any(|x| {
+                                x == n || x.strip_prefix(n).is_some_and(|r| r.starts_with('.'))
+                            })
+                        };
+                        std::iter::once(base.clone())
+                            .chain((2..).map(|k| format!("{base} {k}")))
+                            .find(|n| free(n))
+                            .expect("sequência infinita")
+                    }
+                    None => d.auto_name(c.kind)?,
+                };
+                d.create_field(*page, c.rect, c.kind, &name, None)?;
+                names.push(name);
+            }
+            Ok(found.len())
+        })
     }
 
     /// O campo pode ser repetido? Um campo de assinatura já assinado não (como no Acrobat: a
