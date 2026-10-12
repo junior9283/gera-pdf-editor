@@ -433,6 +433,14 @@ impl PdfDoc {
             ));
         }
         let old = widget.value()?.unwrap_or_default();
+        // código de barras: só o valor e o desenho do código (o texto que o MuPDF montaria seria
+        // jogado fora, e montar texto longo é caro)
+        let mut obj = widget.annotation().object();
+        if let Some(o) = crate::barcode::read_options(&obj) {
+            field_head(&obj)?.dict_put("V", PdfObject::new_string(value)?)?;
+            self.draw_barcode(&mut obj, o)?;
+            return Ok(old);
+        }
         if is_button(&widget)? {
             set_buttons(&mut field_head(&widget.annotation().object())?, value)?;
             self.update_widgets()?;
@@ -450,14 +458,6 @@ impl PdfDoc {
                 return Err(PdfError::InvalidAnnotation(
                     "valor recusado pelo campo".into(),
                 ));
-            }
-            // código de barras: o MuPDF desenhou o texto; o app desenha o código
-            let mut obj = widget.annotation().object();
-            if let Some(o) = crate::barcode::read_options(&obj) {
-                // o MuPDF atualiza primeiro (senão refaria o texto por cima depois)
-                widget.update()?;
-                self.draw_barcode(&mut obj, o)?;
-                return Ok(old);
             }
         }
         widget.update()?;
@@ -492,6 +492,12 @@ impl PdfDoc {
     /// Os valores anteriores vão para `changes` à medida que mudam (um erro no meio não perde o
     /// que já foi gravado).
     pub(crate) fn recalculate(&mut self, changes: &mut Vec<(i32, i32, String)>) -> Result<()> {
+        // os códigos de barras recalculados com o orçamento de uma passada (um PDF com centenas
+        // deles não trava o preenchimento; os outros ficam com o valor novo e o desenho antigo)
+        self.with_barcode_budget(|d| d.recalculate_pass(changes))
+    }
+
+    fn recalculate_pass(&mut self, changes: &mut Vec<(i32, i32, String)>) -> Result<()> {
         let fields = self.all_fields()?;
         let order = self.calc_order(&fields)?;
         let start = changes.len();
@@ -545,13 +551,15 @@ impl PdfDoc {
     /// aparência mostra o formatado. `plain`: este widget também, mesmo sem Formatar (o Formatar
     /// dele acabou de mudar).
     pub(crate) fn redraw_values(&mut self, page: Option<i32>, plain: Option<i32>) -> Result<()> {
+        // os códigos de barras com o orçamento de uma passada
+        self.with_barcode_budget(|d| d.redraw_values_pass(page, plain))
+    }
+
+    fn redraw_values_pass(&mut self, page: Option<i32>, plain: Option<i32>) -> Result<()> {
         let pages = match page {
             Some(p) => p..p + 1,
             None => 0..self.page_count()?,
         };
-        // códigos de barras: no máximo alguns por passada (codificar é caro; um PDF hostil pode ter
-        // milhares); os outros ficam como estavam até o valor mudar
-        let mut barcodes = 0;
         for p in pages {
             for mut w in self.inner.load_pdf_page(p)?.widgets() {
                 if w.r#type()? != WidgetType::Text {
@@ -559,10 +567,9 @@ impl PdfDoc {
                 }
                 let mut obj = w.annotation().object();
                 if let Some(o) = crate::barcode::read_options(&obj) {
-                    if barcodes < crate::barcode::MAX_PER_PASS {
-                        barcodes += 1;
-                        self.draw_barcode(&mut obj, o)?;
-                    }
+                    // com o orçamento da passada (codificar é caro; um PDF hostil pode ter
+                    // milhares): os outros ficam como estavam até o valor mudar
+                    self.draw_barcode(&mut obj, o)?;
                     continue;
                 }
                 let head = field_head(&w.annotation().object())?;

@@ -125,6 +125,9 @@ impl FieldCalc {
     }
 }
 
+/// Maior script de código de barras reconhecido (a lista de campos pode ser longa).
+const MAX_BARCODE_SCRIPT: usize = 1024 * 1024;
+
 /// Começo do script do código de barras que o app grava (Calcular).
 const BARCODE_MARK: &str = "/* Gera PDF Editor: código de barras */";
 
@@ -1052,10 +1055,8 @@ pub fn parse_calc(js: &str) -> FieldCalc {
     if js_t.is_empty() {
         return FieldCalc::None;
     }
-    if js_t.len() > MAX_SCRIPT {
-        return FieldCalc::Custom;
-    }
-    if js_t.starts_with(BARCODE_MARK) {
+    // o script do código de barras do app tem teto próprio: a lista de campos pode ser longa
+    if js_t.starts_with(BARCODE_MARK) && js_t.len() <= MAX_BARCODE_SCRIPT {
         // só o script que o app escreve: a lista de campos e se leva os nomes
         let list = js_t
             .find("new Array")
@@ -1070,6 +1071,9 @@ pub fn parse_calc(js: &str) -> FieldCalc {
         } else {
             FieldCalc::Custom
         };
+    }
+    if js_t.len() > MAX_SCRIPT {
+        return FieldCalc::Custom;
     }
     if let (Some(a), Some(b)) = (js_t.find("BVCALC"), js_t.find("EVCALC")) {
         let expr = js_t.get(a + 6..b).unwrap_or("").trim();

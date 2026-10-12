@@ -23,6 +23,8 @@ pub(crate) struct Candidate {
     pub kind: NewFieldKind,
     /// Nome tirado do rótulo (sem rótulo, o automático).
     pub name: Option<String>,
+    /// Caixa alta (mais de 30 pt): campo de várias linhas.
+    pub multiline: bool,
 }
 
 /// Página com mais traços que isso é pulada (desenho técnico, PDF hostil).
@@ -54,6 +56,27 @@ fn overlaps(a: &PdfRect, b: &PdfRect) -> bool {
     }
     let area = |r: &PdfRect| (r.width() * r.height()).max(0.01);
     w * h > 0.2 * area(a).min(area(b))
+}
+
+/// Os dois têm interseção de verdade (mais de 0,5 pt nos dois sentidos)? Com os campos que já
+/// existem, nenhuma sobreposição é aceita.
+fn touches(a: &PdfRect, b: &PdfRect) -> bool {
+    a.x1.min(b.x1) - a.x0.max(b.x0) > 0.5 && a.y1.min(b.y1) - a.y0.max(b.y0) > 0.5
+}
+
+/// O mais baixo dos retângulos que ficam acima do campo (cruzando a faixa dele na horizontal e
+/// terminando acima da metade de baixo): até onde o campo pode subir. Sem nenhum, `floor`.
+fn blockers_above<'a>(
+    rect: &PdfRect,
+    others: impl Iterator<Item = &'a PdfRect>,
+    floor: f32,
+) -> f32 {
+    let mid = (rect.y0 + rect.y1) / 2.0;
+    others
+        .filter(|o| o.x1 > rect.x0 + 0.5 && o.x0 < rect.x1 - 0.5)
+        .filter(|o| o.y1 > rect.y0 && o.y1 <= mid && o.y0 < rect.y0)
+        .map(|o| o.y1)
+        .fold(floor, f32::max)
 }
 
 /// Uma palavra que é só sublinhado (a linha de escrever, não um rótulo).
@@ -228,10 +251,22 @@ pub(crate) fn detect_candidates(
             proposals.push((rect, false, None));
         }
     }
-    let mut taken: Vec<PdfRect> = existing.to_vec();
+    let mut taken: Vec<PdfRect> = Vec::new();
     let mut out = Vec::new();
     for (mut rect, checkbox, name) in proposals {
-        if out.len() >= MAX_FIELDS || taken.iter().any(|t| overlaps(t, &rect)) {
+        if out.len() >= MAX_FIELDS {
+            break;
+        }
+        // um campo existente logo acima (sobre a faixa da linha): o novo encolhe até ele
+        rect.y0 = rect.y0.max(blockers_above(
+            &rect,
+            existing.iter().chain(&taken),
+            rect.y0,
+        ));
+        if rect.height() < 8.0
+            || existing.iter().any(|t| touches(t, &rect))
+            || taken.iter().any(|t| overlaps(t, &rect))
+        {
             continue;
         }
         let name = name.or_else(|| {
@@ -247,10 +282,23 @@ pub(crate) fn detect_candidates(
             kind_of(name.as_deref())
         };
         if kind == NewFieldKind::Signature && rect.height() < SIGNATURE_H {
-            rect.y0 = rect.y1 - SIGNATURE_H;
+            // a assinatura cresce para cima, até o que estiver acima (campo ou texto)
+            let words_above = words.iter().filter(|w| !is_blank(w)).map(|w| &w.rect);
+            let top = blockers_above(
+                &PdfRect::new(rect.x0, rect.y1 - SIGNATURE_H, rect.x1, rect.y1),
+                existing.iter().chain(&taken).chain(words_above),
+                rect.y0,
+            );
+            rect.y0 = (rect.y1 - SIGNATURE_H).max(top);
         }
+        let multiline = kind == NewFieldKind::Text && rect.height() > 30.0;
         taken.push(rect);
-        out.push(Candidate { rect, kind, name });
+        out.push(Candidate {
+            rect,
+            kind,
+            name,
+            multiline,
+        });
     }
     out
 }
@@ -385,7 +433,8 @@ impl PdfDoc {
         let p = self.load(page)?;
         let shapes = Rc::new(RefCell::new(Vec::new()));
         let device = mupdf::Device::from_native(ShapeDevice(shapes.clone()))?;
-        p.run(&device, &mupdf::Matrix::IDENTITY)?;
+        // só o conteúdo da página: comentários e campos não são o formulário impresso
+        p.run_contents(&device, &mupdf::Matrix::IDENTITY)?;
         drop(device);
         let shapes = std::mem::take(&mut *shapes.borrow_mut());
         let words = crate::doc::page_words(&p)?;
@@ -492,5 +541,29 @@ mod tests {
         let cell = PdfRect::new(50.0, 400.0, 250.0, 420.0);
         let out = detect_candidates(&[Shape::Rect(cell), line(50.0, 250.0, 420.0)], &[], &[]);
         assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn signature_growth_does_not_overlap_and_existing_fields_block_any_overlap() {
+        // campo existente 12 pt acima da linha de assinatura: o campo cresce só até ele
+        let existing = [PdfRect::new(120.0, 480.0, 300.0, 498.0)];
+        let words = [word(50.0, 500.0, "Assinatura:")];
+        let out = detect_candidates(&[line(120.0, 300.0, 510.0)], &words, &existing);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(
+            out[0].rect.y0 >= 498.0,
+            "não invade o campo de cima: {:?}",
+            out[0].rect
+        );
+        // um campo existente que invade 2 pt da faixa já impede o novo
+        let small = [PdfRect::new(250.0, 108.0, 262.0, 120.0)];
+        assert!(detect_candidates(&[line(90.0, 300.0, 110.0)], &[], &small).is_empty());
+        // célula alta: várias linhas
+        let tall = detect_candidates(
+            &[Shape::Rect(PdfRect::new(50.0, 400.0, 250.0, 460.0))],
+            &[],
+            &[],
+        );
+        assert!(tall[0].multiline);
     }
 }

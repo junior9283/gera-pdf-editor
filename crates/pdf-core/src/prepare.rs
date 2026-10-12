@@ -887,7 +887,12 @@ impl PdfDoc {
                         .expect("sequência infinita"),
                     None => auto_name_in(c.kind, &names),
                 };
-                d.create_field_unrefreshed(*page, c.rect, c.kind, &name, None)?;
+                let id = d.create_field_unrefreshed(*page, c.rect, c.kind, &name, None)?;
+                if c.multiline {
+                    let mut obj = d.widget(*page, id)?.annotation().object();
+                    let flags = flags_of(&obj)?;
+                    obj.dict_put("Ff", int(flags | MULTILINE)?)?;
+                }
                 names.push(name);
                 if !touched.contains(page) {
                     touched.push(*page);

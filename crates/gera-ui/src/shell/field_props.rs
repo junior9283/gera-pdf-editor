@@ -76,19 +76,25 @@ pub(crate) struct BarcodeDraft {
     pub fields: Vec<String>,
     pub names: bool,
     pub options: pdf_core::BarcodeOptions,
+    /// O valor como veio (código de outro programa: o script dele fica se a aba Valor não for
+    /// mexida).
+    initial: (Vec<String>, bool),
+    foreign: bool,
 }
 
 impl BarcodeDraft {
     fn from(props: &FieldProps) -> Option<Self> {
         let options = props.barcode?;
-        let (fields, names) = match &props.calc {
-            FieldCalc::Barcode { fields, names } => (fields.clone(), *names),
-            _ => (Vec::new(), true),
+        let (fields, names, foreign) = match &props.calc {
+            FieldCalc::Barcode { fields, names } => (fields.clone(), *names, false),
+            _ => (Vec::new(), true, true),
         };
         Some(Self {
+            initial: (fields.clone(), names),
             fields,
             names,
             options,
+            foreign,
         })
     }
 
@@ -253,9 +259,14 @@ impl FieldPropsWindow {
         }
         props.actions = self.actions.list.clone();
         if let Some(b) = &self.barcode {
-            props.calc = FieldCalc::Barcode {
-                fields: b.fields.clone(),
-                names: b.names,
+            let touched = (b.fields.clone(), b.names) != b.initial;
+            props.calc = if b.foreign && !touched {
+                self.props.calc.clone()
+            } else {
+                FieldCalc::Barcode {
+                    fields: b.fields.clone(),
+                    names: b.names,
+                }
             };
             props.barcode = Some(b.options);
         }
@@ -942,6 +953,27 @@ mod draft_tests {
                 symbology: pdf_core::Symbology::Pdf417,
                 ecc: 5
             })
+        );
+    }
+
+    #[test]
+    fn ok_on_a_foreign_barcode_keeps_its_script() {
+        let props = FieldProps {
+            name: "BC".into(),
+            calc: FieldCalc::Custom,
+            barcode: Some(pdf_core::BarcodeOptions::default()),
+            ..Default::default()
+        };
+        let text = pdf_core::FieldKind::Text {
+            multiline: true,
+            password: false,
+            max_len: None,
+        };
+        let w = FieldPropsWindow::new(0, 1, &text, props, vec!["A".into()], 1);
+        assert_eq!(
+            w.built().calc,
+            FieldCalc::Custom,
+            "sem mexer na aba Valor, fica como está"
         );
     }
 

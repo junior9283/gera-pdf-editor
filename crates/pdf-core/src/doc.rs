@@ -65,6 +65,8 @@ pub struct PdfDoc {
     pub(crate) layer_view: std::collections::BTreeMap<i32, bool>,
     /// O `/D` das camadas do arquivo, guardado enquanto o da memória mostra o olho.
     pub(crate) layer_default: Option<crate::layers::LayerDefault>,
+    /// Códigos de barras que ainda podem ser codificados nesta passada (codificar é caro).
+    pub(crate) barcode_budget: usize,
 }
 
 /// Abre o arquivo e, se for protegido, autentica com `password`.
@@ -102,6 +104,7 @@ impl PdfDoc {
             added_fonts: Vec::new(),
             layer_view: Default::default(),
             layer_default: None,
+            barcode_budget: usize::MAX,
         };
         doc.signed_on_disk = doc.has_signatures().unwrap_or(false);
         // códigos de barras: o MuPDF os mostraria como texto (não marca o documento alterado)
@@ -1139,6 +1142,8 @@ impl PdfDoc {
         self.history = History::default();
         self.unsaved = false;
         self.signed_on_disk = self.has_signatures().unwrap_or(false);
+        // reaberto: os códigos de barras voltam a ser desenhados (como ao abrir)
+        let _ = self.draw_barcodes();
         self.reapply_layer_view()
     }
 

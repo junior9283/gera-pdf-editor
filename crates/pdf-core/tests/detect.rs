@@ -119,3 +119,27 @@ fn hostile_pages_finish_quickly() {
         assert!(t.elapsed().as_secs_f32() < 3.0, "{name}: {:?}", t.elapsed());
     }
 }
+
+#[test]
+fn comments_are_not_detected_as_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let objs = vec![
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".into(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[4 0 R 5 0 R]>>".into(),
+        // comentário Retângulo e uma tinta horizontal, com aparência
+        "<</Type/Annot/Subtype/Square/Rect[100 600 300 624]/C[1 0 0]/AP<</N 6 0 R>>>>".into(),
+        "<</Type/Annot/Subtype/Ink/Rect[100 500 400 502]/InkList[[100 501 400 501]]/AP<</N 7 0 R>>>>".into(),
+        "<</Type/XObject/Subtype/Form/BBox[100 600 300 624]/Length 26>>stream\n100 600 200 24 re S\nendstream".into(),
+        "<</Type/XObject/Subtype/Form/BBox[100 500 400 502]/Length 24>>stream\n100 501 m 400 501 l S\nendstream".into(),
+    ];
+    let path = dir.path().join("comentarios.pdf");
+    std::fs::write(&path, pdf_core::sample::pdf_from_objects(&objs)).unwrap();
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    assert_eq!(
+        d.detect_fields(&[0]).unwrap(),
+        0,
+        "{:?}",
+        d.fields(0).unwrap()
+    );
+}

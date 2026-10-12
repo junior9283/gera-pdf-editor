@@ -96,6 +96,9 @@ impl Default for BarcodeOptions {
 pub(crate) const MAX_PER_PASS: usize = 50;
 /// Maior valor desenhado (acima disso, o aviso no lugar do código).
 const MAX_VALUE: usize = 2_000;
+/// No Data Matrix, bem menos: o rxing entra em pânico perto de 1 558 palavras-código (o app
+/// aborta com pânico) e codifica números em tempo quadrático.
+const MAX_DATA_MATRIX: usize = 500;
 /// Chave da aparência desenhada (valor, opções e tamanho): igual, não codifica de novo.
 const KEY: &str = "GeraKey";
 /// Largura do módulo gravada no /PMD (em milésimos de polegada, como o Acrobat).
@@ -113,7 +116,7 @@ pub(crate) fn read_options(obj: &PdfObject) -> Option<BarcodeOptions> {
     let ecc = crate::pdf_obj::get(&pmd, "ECC")
         .and_then(|e| e.as_int().ok())
         .unwrap_or(1)
-        .max(0) as u8;
+        .clamp(0, 255) as u8;
     Some(BarcodeOptions { symbology, ecc }.clamped())
 }
 
@@ -147,7 +150,11 @@ const TOO_MUCH: &str = "Dados demais para o código de barras";
 
 /// Os módulos do código (linhas de `bool`, `true` = preto), ou o motivo de não caber.
 pub fn modules(o: BarcodeOptions, text: &str) -> std::result::Result<Vec<Vec<bool>>, String> {
-    if text.chars().count() > MAX_VALUE {
+    let limit = match o.symbology {
+        Symbology::DataMatrix => MAX_DATA_MATRIX,
+        _ => MAX_VALUE,
+    };
+    if text.chars().count() > limit {
         return Err(TOO_MUCH.into());
     }
     let o = o.clamped();
@@ -204,6 +211,25 @@ impl PdfDoc {
             .is_some_and(|n| crate::pdf_obj::text(&n, KEY) == key);
         if drawn {
             return Ok(());
+        }
+        // sem orçamento nesta passada: fica como está até o valor mudar; sem aparência nenhuma,
+        // só a borda (senão o MuPDF montaria o texto do valor a cada carga da página)
+        if self.barcode_budget == 0 {
+            if crate::pdf_obj::get(obj, "AP").is_none() {
+                let ops = format!("q 0.6 G 0.5 w 0.25 0.25 {} {} re S Q", w - 0.5, h - 0.5);
+                let res = self.inner.new_dict()?;
+                let stream = form_xobject(&mut self.inner, ops.as_bytes(), res, [0.0, 0.0, w, h])?;
+                let mut ap = self.inner.new_dict()?;
+                ap.dict_put("N", stream)?;
+                obj.dict_put("AP", ap)?;
+            }
+            return Ok(());
+        }
+        self.barcode_budget -= 1;
+        // o /PMD acompanha o tamanho do campo (em polegadas), como o Acrobat
+        if let Some(mut pmd) = obj.get_dict_inheritable("PMD")? {
+            pmd.dict_put("Width", PdfObject::new_real(w / 72.0)?)?;
+            pmd.dict_put("Height", PdfObject::new_real(h / 72.0)?)?;
         }
         let mut ops = format!("q 0.6 G 0.5 w 0.25 0.25 {} {} re S ", w - 0.5, h - 0.5);
         let mut res = self.inner.new_dict()?;
@@ -263,27 +289,51 @@ impl PdfDoc {
     }
 
     /// Desenha os códigos de barras do documento (ao abrir: o MuPDF os mostraria como texto).
+    /// Num documento assinado, nada muda (a aparência alterada apareceria como mudança depois da
+    /// assinatura).
     pub(crate) fn draw_barcodes(&mut self) -> Result<()> {
         // sem formulário, nada a fazer (não carrega as páginas)
-        let has_fields = crate::pdf_obj::get(&self.inner.catalog()?, "AcroForm")
-            .and_then(|a| crate::pdf_obj::get(&a, "Fields"))
-            .is_some_and(|f| f.len().unwrap_or(0) > 0);
-        if !has_fields {
+        let Some(mut acro) = crate::pdf_obj::get(&self.inner.catalog()?, "AcroForm") else {
+            return Ok(());
+        };
+        let has_fields =
+            crate::pdf_obj::get(&acro, "Fields").is_some_and(|f| f.len().unwrap_or(0) > 0);
+        if !has_fields || self.signed_on_disk {
             return Ok(());
         }
-        let mut drawn = 0;
-        for p in 0..self.page_count()? {
-            for w in self.inner.load_pdf_page(p)?.widgets() {
-                let mut obj = w.annotation().object();
-                if let Some(o) = read_options(&obj) {
-                    if drawn >= MAX_PER_PASS {
-                        return Ok(());
-                    }
-                    drawn += 1;
-                    self.draw_barcode(&mut obj, o)?;
+        // /NeedAppearances: o MuPDF refaria as aparências (os códigos viram texto) a cada carga de
+        // página; como o Acrobat ao salvar, gera as aparências e tira a marca
+        if crate::pdf_obj::get(&acro, "NeedAppearances")
+            .is_some_and(|n| n.as_bool().unwrap_or(false))
+        {
+            for p in 0..self.page_count()? {
+                for mut w in self.inner.load_pdf_page(p)?.widgets() {
+                    let _ = w.update();
                 }
             }
+            acro.dict_delete("NeedAppearances")?;
         }
-        Ok(())
+        self.with_barcode_budget(|d| {
+            for p in 0..d.page_count()? {
+                for w in d.inner.load_pdf_page(p)?.widgets() {
+                    let mut obj = w.annotation().object();
+                    if let Some(o) = read_options(&obj) {
+                        d.draw_barcode(&mut obj, o)?;
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Roda `f` com o orçamento de uma passada (no máximo `MAX_PER_PASS` códigos codificados).
+    pub(crate) fn with_barcode_budget<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let saved = std::mem::replace(&mut self.barcode_budget, MAX_PER_PASS);
+        let out = f(self);
+        self.barcode_budget = saved;
+        out
     }
 }
