@@ -271,6 +271,36 @@ const MAX_FIELDS: usize = 10_000;
 const MAX_DEPTH: usize = 32;
 /// Mais arquivos numa planilha.
 const MAX_MERGE: usize = 1_000;
+/// Maior nome completo de campo e o total lido de um arquivo (nomes + valores): um arquivo
+/// pequeno com um nome pai enorme ou um valor compartilhado não multiplica a memória.
+const MAX_NAME: usize = 4 * 1024;
+const MAX_OUTPUT: usize = 8 * 1024 * 1024;
+
+/// Os campos lidos de um arquivo de dados, com os tetos de nome e de total.
+#[derive(Default)]
+struct Collected {
+    out: Vec<(String, String)>,
+    bytes: usize,
+}
+
+impl Collected {
+    /// Guarda o campo (nome longo demais fica de fora); recusa o arquivo acima do total.
+    fn push(&mut self, name: String, value: String) -> Result<()> {
+        if name.len() > MAX_NAME {
+            return Ok(());
+        }
+        self.bytes += name.len() + value.len();
+        if self.bytes > MAX_OUTPUT {
+            return Err(refused("o arquivo de dados tem dados demais"));
+        }
+        self.out.push((name, value));
+        Ok(())
+    }
+
+    fn full(&self) -> bool {
+        self.out.len() >= MAX_FIELDS
+    }
+}
 
 /// Os valores dos campos (nome completo, valor), um por campo, na ordem do documento: sem
 /// botões de ação nem assinaturas.
@@ -318,7 +348,8 @@ fn xml_name(name: &str) -> (String, bool) {
     let mut out: String = name
         .chars()
         .map(|c| {
-            if c.is_alphanumeric() || matches!(c, '_' | '-') {
+            // letras e algarismos ASCII: "²" e afins não são NameChar do XML
+            if c.is_alphabetic() || c.is_ascii_digit() || matches!(c, '_' | '-') {
                 c
             } else {
                 '_'
@@ -498,13 +529,17 @@ impl PdfDoc {
     /// nome, numa etapa do desfazer; os cálculos são refeitos. Assinaturas e botões de ação não
     /// mudam.
     pub fn import_form_data(&mut self, path: &Path) -> Result<DataImport> {
+        if !self.security()?.permissions.forms {
+            return Err(refused("o documento não permite preencher formulários"));
+        }
         let values = read_data_file(path)?;
         // o primeiro widget de cada campo que recebe valor (um grupo de botões de opção grava uma
         // vez: o estado escolhido vale para todos)
         let mut by_name: std::collections::HashMap<String, (i32, i32)> =
             std::collections::HashMap::new();
         for f in self.all_fields()? {
-            if !matches!(f.kind, FieldKind::Button | FieldKind::Signature) {
+            // somente leitura conta como nome desconhecido (fica como está)
+            if !matches!(f.kind, FieldKind::Button | FieldKind::Signature) && !f.readonly {
                 by_name.entry(f.name).or_insert((f.page, f.id));
             }
         }
@@ -525,7 +560,7 @@ impl PdfDoc {
         }
         self.with_snapshot(|d| {
             for (page, id, value) in &writes {
-                d.write_field(*page, *id, value, true, None)?;
+                d.write_field(*page, *id, value, false, None)?;
             }
             d.recalculate(&mut Vec::new())
         })?;
@@ -535,6 +570,7 @@ impl PdfDoc {
     /// Nivelar: os campos (e, com `comments`, os comentários) viram parte da página, com a
     /// aparência que tinham, numa etapa do desfazer.
     pub fn flatten(&mut self, comments: bool) -> Result<()> {
+        self.require_modifiable("nivelar")?;
         self.with_snapshot(|d| Ok(d.inner.bake(comments, true)?))
     }
 }
@@ -544,8 +580,11 @@ pub(crate) fn read_data_file(path: &Path) -> Result<Vec<(String, String)>> {
     if std::fs::metadata(path)?.len() > MAX_BYTES {
         return Err(refused("o arquivo de dados é grande demais"));
     }
-    let bytes = std::fs::read(path)?;
-    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]).to_lowercase();
+    let mut bytes = std::fs::read(path)?;
+    if bytes.starts_with(b"\xEF\xBB\xBF") {
+        bytes.drain(..3);
+    }
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]).to_lowercase();
     let mut out = if bytes.starts_with(b"%FDF-") || bytes.starts_with(b"%PDF-") {
         read_fdf(bytes)?
     } else if head.contains("<xfdf") {
@@ -585,11 +624,11 @@ fn read_fdf(mut bytes: Vec<u8>) -> Result<Vec<(String, String)>> {
         .and_then(|r| r.get_dict("FDF").ok().flatten())
         .and_then(|f| f.get_dict("Fields").ok().flatten())
         .ok_or_else(|| refused("o FDF não tem campos"))?;
-    let mut out = Vec::new();
+    let mut out = Collected::default();
     let mut seen = std::collections::HashSet::new();
     let mut stack: Vec<(PdfObject, String, usize)> = vec![(fields, String::new(), 0)];
     while let Some((list, prefix, depth)) = stack.pop() {
-        if depth > MAX_DEPTH || out.len() >= MAX_FIELDS || !list.is_array()? {
+        if depth > MAX_DEPTH || out.full() || !list.is_array()? {
             continue;
         }
         for k in (0..list.len()?.min(MAX_FIELDS) as i32).rev() {
@@ -600,25 +639,32 @@ fn read_fdf(mut bytes: Vec<u8>) -> Result<Vec<(String, String)>> {
                 continue;
             }
             let part = crate::pdf_obj::text(&item, "T");
+            if prefix.len() + part.len() >= MAX_NAME {
+                continue; // nome (e os dos filhos) longo demais
+            }
             let name = match (prefix.is_empty(), part.is_empty()) {
                 (true, _) => part,
                 (false, true) => prefix.clone(),
                 (false, false) => format!("{prefix}.{part}"),
             };
-            if let Some(v) = item.get_dict("V")? {
+            // /V em lista (seleção múltipla) não tem como entrar num campo: fica de fora
+            if let Some(v) = item
+                .get_dict("V")?
+                .filter(|v| !v.is_array().unwrap_or(true))
+            {
                 let value = if v.is_name()? {
                     String::from_utf8_lossy(&v.as_name()?).into_owned()
                 } else {
                     v.as_string().unwrap_or_default()
                 };
-                out.push((name.clone(), value));
+                out.push(name.clone(), value)?;
             }
             if let Some(kids) = item.get_dict("Kids")? {
                 stack.push((kids, name, depth + 1));
             }
         }
     }
-    Ok(out)
+    Ok(out.out)
 }
 
 /// XFDF (`<field name>`/`<value>`) ou XML do Acrobat (um elemento por campo; `xfdf:original`
@@ -626,108 +672,163 @@ fn read_fdf(mut bytes: Vec<u8>) -> Result<Vec<(String, String)>> {
 fn read_xml(bytes: &[u8], xfdf: bool) -> Result<Vec<(String, String)>> {
     let mut reader = Reader::from_reader(bytes);
     let mut buf = Vec::new();
-    let mut out = Vec::new();
-    // pilha de nomes dos campos (XFDF) ou dos elementos (XML), com o texto de cada um
-    let mut stack: Vec<(String, String, bool)> = Vec::new();
-    let mut in_value = false;
-    let mut depth = 0usize;
+    let mut st = XmlFields {
+        xfdf,
+        ..Default::default()
+    };
     loop {
         let event = reader
             .read_event_into(&mut buf)
             .map_err(|_| refused("o XML do arquivo de dados não é válido"))?;
         match event {
-            Event::Start(e) => {
-                depth += 1;
-                if depth > MAX_DEPTH + 3 {
-                    return Err(refused("o arquivo de dados é fundo demais"));
-                }
-                let tag = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
-                let attr = |key: &[u8]| {
-                    e.attributes()
-                        .flatten()
-                        .find(|a| a.key.as_ref() == key)
-                        .and_then(|a| a.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok())
-                        .map(|v| v.into_owned())
-                };
-                if xfdf {
-                    match tag.as_str() {
-                        "field" => {
-                            stack.push((attr(b"name").unwrap_or_default(), String::new(), false))
-                        }
-                        "value" => in_value = true,
-                        _ => {}
-                    }
-                } else if depth > 1 {
-                    // o primeiro elemento é <fields>; os outros são campos
-                    let name = attr(b"xfdf:original").unwrap_or(tag);
-                    if let Some(parent) = stack.last_mut() {
-                        parent.2 = true;
-                    }
-                    stack.push((name, String::new(), false));
-                }
+            Event::Start(e) => st.open(&e)?,
+            // <campo/> e <value/>: um elemento sem texto (limpa o campo)
+            Event::Empty(e) => {
+                st.open(&e)?;
+                st.close(e.local_name().as_ref())?;
             }
             // o texto e as entidades (&amp; e &#38; vêm em eventos à parte)
-            Event::Text(_) | Event::GeneralRef(_) if !xfdf || in_value => {
-                let piece = match &event {
-                    Event::Text(t) => t.decode().map(|s| s.into_owned()).unwrap_or_default(),
-                    Event::GeneralRef(r) => {
-                        let c = match r.resolve_char_ref().ok().flatten() {
-                            Some(c) => Some(c),
-                            None => r.decode().ok().and_then(|n| crate::xfdf::entity(&n)),
-                        };
-                        c.map(String::from).unwrap_or_default()
-                    }
-                    _ => String::new(),
+            Event::Text(t) => st.text(&t.decode().map(|s| s.into_owned()).unwrap_or_default()),
+            Event::GeneralRef(r) => {
+                let c = match r.resolve_char_ref().ok().flatten() {
+                    Some(c) => Some(c),
+                    None => r.decode().ok().and_then(|n| crate::xfdf::entity(&n)),
                 };
-                if let Some(top) = stack.last_mut() {
-                    if top.1.len() < MAX_VALUE {
-                        top.1.push_str(&piece);
-                    }
-                }
+                st.text(&c.map(String::from).unwrap_or_default());
             }
-            Event::End(e) => {
-                depth = depth.saturating_sub(1);
-                let tag = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
-                let full = |stack: &[(String, String, bool)]| {
-                    stack
-                        .iter()
-                        .map(|s| s.0.as_str())
-                        .collect::<Vec<_>>()
-                        .join(".")
-                };
-                if xfdf {
-                    match tag.as_str() {
-                        "value" => {
-                            in_value = false;
-                            if let Some(top) = stack.last_mut() {
-                                top.2 = true; // tem valor
-                            }
-                        }
-                        "field" => {
-                            let name = full(&stack);
-                            if let Some((_, text, true)) = stack.pop() {
-                                out.push((name, text));
-                            }
-                        }
-                        _ => {}
-                    }
-                } else if depth >= 1 && !stack.is_empty() {
-                    // só folhas (sem elementos filhos) são campos com valor
-                    let name = full(&stack);
-                    if let Some((_, text, false)) = stack.pop() {
-                        out.push((name, text.trim().to_string()));
-                    }
-                }
-                if out.len() >= MAX_FIELDS {
-                    break;
-                }
-            }
+            Event::End(e) => st.close(e.local_name().as_ref())?,
             Event::Eof => break,
             _ => {}
         }
+        if st.found.full() {
+            break;
+        }
         buf.clear();
     }
-    Ok(out)
+    Ok(st.found.out)
+}
+
+/// Um elemento aberto: nome do campo (XFDF) ou do elemento (XML), o texto e, no XFDF, se tem
+/// `<value>`; no XML, se tem elementos filhos.
+struct Open {
+    name: String,
+    text: String,
+    flag: bool,
+}
+
+#[derive(Default)]
+struct XmlFields {
+    xfdf: bool,
+    stack: Vec<Open>,
+    in_value: bool,
+    depth: usize,
+    found: Collected,
+}
+
+impl XmlFields {
+    fn open(&mut self, e: &quick_xml::events::BytesStart) -> Result<()> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH + 3 {
+            return Err(refused("o arquivo de dados é fundo demais"));
+        }
+        let attr = |key: &[u8]| {
+            e.attributes()
+                .flatten()
+                .find(|a| a.key.as_ref() == key)
+                .and_then(|a| a.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok())
+                .map(|v| v.into_owned())
+        };
+        let tag = e.local_name();
+        let name = if self.xfdf {
+            match tag.as_ref() {
+                b"field" => attr(b"name").unwrap_or_default(),
+                b"value" => {
+                    self.in_value = true;
+                    return Ok(());
+                }
+                _ => return Ok(()),
+            }
+        } else if self.depth > 1 {
+            // o primeiro elemento é <fields>; os outros são campos
+            if let Some(parent) = self.stack.last_mut() {
+                parent.flag = true;
+            }
+            attr(b"xfdf:original")
+                .unwrap_or_else(|| String::from_utf8_lossy(tag.as_ref()).into_owned())
+        } else {
+            return Ok(());
+        };
+        self.stack.push(Open {
+            name,
+            text: String::new(),
+            flag: false,
+        });
+        Ok(())
+    }
+
+    fn text(&mut self, piece: &str) {
+        if self.xfdf && !self.in_value {
+            return;
+        }
+        if let Some(top) = self.stack.last_mut() {
+            if top.text.len() < MAX_VALUE {
+                top.text.push_str(piece);
+            }
+        }
+    }
+
+    fn close(&mut self, tag: &[u8]) -> Result<()> {
+        self.depth = self.depth.saturating_sub(1);
+        if self.xfdf {
+            match tag {
+                b"value" => {
+                    self.in_value = false;
+                    if let Some(top) = self.stack.last_mut() {
+                        top.flag = true; // tem valor
+                    }
+                }
+                b"field" => {
+                    let name = self.full_name();
+                    if let Some(Open {
+                        text, flag: true, ..
+                    }) = self.stack.pop()
+                    {
+                        self.push(name, text)?;
+                    }
+                }
+                _ => {}
+            }
+        } else if self.depth >= 1 && !self.stack.is_empty() {
+            // só folhas (sem elementos filhos) são campos com valor
+            let name = self.full_name();
+            if let Some(Open {
+                text, flag: false, ..
+            }) = self.stack.pop()
+            {
+                self.push(name, text.trim().to_string())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Os nomes da pilha unidos por ponto; `None` acima do teto (sem montar o nome enorme).
+    fn full_name(&self) -> Option<String> {
+        let len: usize = self.stack.iter().map(|o| o.name.len() + 1).sum();
+        (len <= MAX_NAME + 1).then(|| {
+            self.stack
+                .iter()
+                .map(|o| o.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".")
+        })
+    }
+
+    fn push(&mut self, name: Option<String>, value: String) -> Result<()> {
+        match name {
+            Some(name) => self.found.push(name, value),
+            None => Ok(()),
+        }
+    }
 }
 
 /// Mescla os dados de vários arquivos (PDF de formulário, FDF, XFDF, XML ou TXT) numa planilha
@@ -779,7 +880,8 @@ pub fn merge_form_data(files: &[std::path::PathBuf], dest: &Path) -> Result<usiz
         } else {
             s.to_string()
         };
-        if s.contains([',', '"', '\n', '\r']) {
+        // ";" e tabulação também: o Excel em pt-BR separa por ";"
+        if s.contains([',', ';', '\t', '"', '\n', '\r']) {
             format!("\"{}\"", s.replace('"', "\"\""))
         } else {
             s

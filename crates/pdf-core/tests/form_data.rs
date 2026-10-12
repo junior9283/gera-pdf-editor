@@ -202,8 +202,128 @@ fn merge_never_overwrites_a_source() {
     d.export_form_data(&data, DataFormat::Xfdf).unwrap();
     let files = vec![path.clone(), data.clone()];
     for dest in [path.clone(), data.clone(), dir.path().join("planilha.pdf")] {
-        assert!(pdf_core::merge_form_data(&files, &dest).is_err(), "{dest:?}");
+        assert!(
+            pdf_core::merge_form_data(&files, &dest).is_err(),
+            "{dest:?}"
+        );
     }
-    assert!(std::fs::read(&path).unwrap().starts_with(b"%PDF"), "o PDF ficou intacto");
+    assert!(
+        std::fs::read(&path).unwrap().starts_with(b"%PDF"),
+        "o PDF ficou intacto"
+    );
     assert!(pdf_core::merge_form_data(&files, &dir.path().join("p.CSV")).is_ok());
+}
+
+#[test]
+fn huge_names_do_not_blow_up_memory() {
+    // ~1 MB de nome pai × 10 000 filhos: sem teto, ~10 GB de nomes completos
+    let dir = tempfile::tempdir().unwrap();
+    let big = "A".repeat(1_000_000);
+    let xml = format!(
+        "<fields><{big}>{}</{big}></fields>",
+        "<b></b>".repeat(10_000)
+    );
+    let xfdf = format!(
+        "<xfdf><fields><field name=\"{big}\">{}</field></fields></xfdf>",
+        "<field name=\"\"><value></value></field>".repeat(10_000)
+    );
+    let fdf = format!(
+        "%FDF-1.2\n1 0 obj<</FDF<</Fields[<</T({big})/Kids[{}]>>]>>>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n",
+        "<</V(x)>>".repeat(10_000)
+    );
+    // um valor indireto de ~1 MB repetido em 10 000 campos também multiplicaria a memória
+    let shared = format!(
+        "%FDF-1.2\n1 0 obj<</FDF<</Fields[{}]>>>>endobj\n2 0 obj({})endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n",
+        (0..10_000).map(|k| format!("<</T(c{k})/V 2 0 R>>")).collect::<String>(),
+        "v".repeat(1_000_000)
+    );
+    for (name, text) in [
+        ("a.xml", xml),
+        ("a.xfdf", xfdf),
+        ("a.fdf", fdf),
+        ("b.fdf", shared),
+    ] {
+        let p = dir.path().join(name);
+        std::fs::write(&p, text).unwrap();
+        let csv = dir.path().join(format!("{name}.csv"));
+        let t = std::time::Instant::now();
+        let r = pdf_core::merge_form_data(&[p], &csv);
+        assert!(t.elapsed().as_secs_f32() < 5.0, "{name}: {:?}", t.elapsed());
+        if r.is_ok() {
+            let size = std::fs::metadata(&csv).unwrap().len();
+            assert!(size < 16 * 1024 * 1024, "{name}: planilha de {size} bytes");
+        }
+    }
+}
+
+#[test]
+fn import_respects_read_only_and_form_permission() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, mut d) = form(&dir);
+    let f = d.fields(0).unwrap();
+    let cidade = f.iter().find(|x| x.name == "Cidade").unwrap().id;
+    let mut props = d.field_props(0, cidade).unwrap();
+    props.readonly = true;
+    d.set_field_props(0, cidade, &props).unwrap();
+    let data = dir.path().join("d.txt");
+    std::fs::write(&data, "Nome\tCidade\nOutro\tOlinda\n").unwrap();
+    let r = d.import_form_data(&data).unwrap();
+    assert_eq!((r.filled, r.skipped), (1, 1), "somente leitura não muda");
+    assert_eq!(value(&d, "Cidade"), "Recife");
+    assert_eq!(value(&d, "Nome"), "Outro");
+}
+
+#[test]
+fn csv_cells_with_semicolons_are_quoted() {
+    // Excel em pt-BR separa por ";": sem aspas, a segunda parte viraria fórmula
+    let dir = tempfile::tempdir().unwrap();
+    let txt = dir.path().join("f.txt");
+    std::fs::write(&txt, "A\tB\na;=1+2\tok\n").unwrap();
+    let csv = dir.path().join("p.csv");
+    pdf_core::merge_form_data(&[txt], &csv).unwrap();
+    let text = std::fs::read_to_string(&csv).unwrap();
+    assert_eq!(text.lines().nth(1).unwrap(), "\"a;=1+2\",ok");
+}
+
+#[test]
+fn empty_elements_bom_and_array_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, mut d) = form(&dir);
+    // <value/> limpa o campo; BOM no começo não confunde o formato
+    let x = dir.path().join("v.xfdf");
+    std::fs::write(
+        &x,
+        "\u{FEFF}<?xml version=\"1.0\"?><!-- comentário -->\n<xfdf><fields><field name=\"Cidade\"><value/></field><field name=\"Nome\"><value>Bia</value></field></fields></xfdf>",
+    )
+    .unwrap();
+    let r = d.import_form_data(&x).unwrap();
+    assert_eq!(r.filled, 2);
+    assert_eq!(value(&d, "Cidade"), "");
+    assert_eq!(value(&d, "Nome"), "Bia");
+    let m = dir.path().join("v.xml");
+    std::fs::write(&m, "\u{FEFF}<fields><Nome>Caio</Nome><Cidade/></fields>").unwrap();
+    d.import_form_data(&m).unwrap();
+    assert_eq!(value(&d, "Nome"), "Caio");
+    // /V em lista (seleção múltipla): o campo de texto não é apagado
+    let f = dir.path().join("a.fdf");
+    std::fs::write(
+        &f,
+        "%FDF-1.2\n1 0 obj<</FDF<</Fields[<</T(Nome)/V[(a)(b)]>><</T(Cidade)/V(Natal)>>]>>>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n",
+    )
+    .unwrap();
+    d.import_form_data(&f).unwrap();
+    assert_eq!(value(&d, "Nome"), "Caio");
+    assert_eq!(value(&d, "Cidade"), "Natal");
+    // nome com "²" vira um nome XML válido (o original fica em xfdf:original)
+    let out = dir.path().join("o.xml");
+    d.add_field(
+        0,
+        PdfRect::new(100.0, 400.0, 250.0, 422.0),
+        NewFieldKind::Text,
+        "m²",
+    )
+    .unwrap();
+    d.export_form_data(&out, DataFormat::Xml).unwrap();
+    let text = std::fs::read_to_string(&out).unwrap();
+    assert!(text.contains("<m_ xfdf:original=\"m²\""), "{text}");
 }

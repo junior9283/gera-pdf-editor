@@ -445,3 +445,11 @@ fn a_hidden_signature_field_is_not_signed() {
     let d = PdfDoc::open(&path, None).unwrap();
     assert!(d.signatures().unwrap().is_empty());
 }
+
+#[test]
+fn flattening_a_signed_document_is_refused() {
+    let (_d, path) = signed(0);
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    assert!(d.flatten(false).is_err());
+    assert!(d.flatten(true).is_err());
+}
