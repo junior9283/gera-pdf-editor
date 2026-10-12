@@ -131,3 +131,33 @@ Data: 2026-10-12 · Etapa da avaliação para a 1.0 (lacunas F01 e o resto da F0
 - **E2E:**
   - abrir o Preparar num PDF sem campos → campos detectados;
   - código de barras QR com dois campos, preencher e ver o código mudar.
+
+## Decisões tomadas na execução
+
+6. **Detecção:**
+   - o rótulo é procurado à esquerda e depois acima (na caixa de seleção, à direita primeiro);
+   - só o conteúdo da página entra (comentários não);
+   - nenhuma sobreposição com campos existentes: o candidato encolhe até o campo de cima;
+   - a assinatura cresce até o que estiver acima;
+   - caixas com mais de 30 pt viram campos de várias linhas.
+7. **Tetos da detecção:** traços (também dentro de um caminho), palavras, consultas ao texto e
+   campos existentes. Uma página hostil termina em menos de 1 s.
+8. **Valor do código de barras:**
+   - é um Calcular reconhecido (`FieldCalc::Barcode`), que entra na ordem de cálculo e no
+     desfazer;
+   - o script é conferido por igualdade exata com o que o app escreve.
+9. **Aparência do código:**
+   - desenhada pelo app, com zona de silêncio e codificação UTF-8;
+   - uma chave (valor, opções e tamanho) evita recodificar;
+   - o /V é gravado sem o texto do MuPDF.
+10. **Orçamento:** 50 códigos codificados por operação inteira (abrir, Preparar, preencher,
+    redefinir, desfazer e refazer). Fora do orçamento, o código fica como estava, ou só com a borda.
+11. **Data Matrix com teto de 500 caracteres.** O codificador entra em pânico perto de 1 558
+    palavras-código, e o release aborta com pânico.
+12. **Ao abrir:**
+    - documento assinado não é tocado;
+    - com /NeedAppearances, as aparências são geradas e a marca é tirada;
+    - Reverter redesenha os códigos.
+13. **Código de outro programa:** o OK nas propriedades sem mexer na aba Valor mantém o script
+    dele.
+14. **Barra do Preparar:** rótulos curtos (Texto, Caixa, Opção…), com o nome completo na dica.
