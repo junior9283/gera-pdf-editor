@@ -634,14 +634,20 @@ fn data_menu_routes_requests() {
         path: data.clone(),
         format: pdf_core::DataFormat::Xfdf,
     });
-    assert!(matches!(recv(&w), Response::FormDataExported { count: 1, .. }));
+    assert!(matches!(
+        recv(&w),
+        Response::FormDataExported { count: 1, .. }
+    ));
     // mesclar (sem documento envolvido) e um arquivo ruim
     let csv = d.path().join("m.csv");
     w.send(Request::MergeFormData {
         files: vec![data.clone()],
         dest: csv.clone(),
     });
-    assert!(matches!(recv(&w), Response::FormDataMerged { count: 1, .. }));
+    assert!(matches!(
+        recv(&w),
+        Response::FormDataMerged { count: 1, .. }
+    ));
     assert!(std::fs::read_to_string(&csv).unwrap().contains("Ana"));
     let bad = d.path().join("ruim.xfdf");
     std::fs::write(&bad, "<<< não é xml").unwrap();

@@ -48,8 +48,9 @@ pub struct Autofill {
 }
 
 impl Autofill {
-    /// Lembra o que foi digitado em `field`. Senha nunca; só números, só com a opção.
-    pub fn learn(&mut self, field: &str, value: &str, password: bool) {
+    /// Lembra o que foi digitado em `field`. Senha nunca; só números, só com a opção. Devolve se
+    /// a lista mudou.
+    pub fn learn(&mut self, field: &str, value: &str, password: bool) -> bool {
         let value = value.trim();
         if self.mode == AutofillMode::Off
             || password
@@ -57,8 +58,12 @@ impl Autofill {
             || value.chars().count() > MAX_LEN
             || value.contains(['\n', '\r'])
             || (!self.numbers && is_numeric(value))
+            || self
+                .entries
+                .first()
+                .is_some_and(|e| e.value == value && e.field == field)
         {
-            return;
+            return false;
         }
         self.entries
             .retain(|e| !(e.value == value && e.field == field));
@@ -70,6 +75,7 @@ impl Autofill {
             },
         );
         self.entries.truncate(MAX_ENTRIES);
+        true
     }
 
     /// Sugestões para o que já foi digitado (sem repetir e sem o próprio texto).
@@ -82,11 +88,9 @@ impl Autofill {
         let matches =
             |e: &&Entry| e.value != typed && e.value.to_lowercase().starts_with(&typed_low);
         // Avançado: primeiro as do mesmo campo; com o campo vazio, só elas
-        let same = self.entries.iter().filter(|e| advanced && e.field == field);
-        let rest = self
-            .entries
-            .iter()
-            .filter(|e| !typed.is_empty() && !(advanced && e.field == field));
+        let own = |e: &&Entry| advanced && e.field == field;
+        let same = self.entries.iter().filter(own);
+        let rest = self.entries.iter().filter(|e| !typed.is_empty() && !own(e));
         let mut out: Vec<&str> = Vec::new();
         for e in same.chain(rest).filter(matches) {
             if !out.contains(&e.value.as_str()) {

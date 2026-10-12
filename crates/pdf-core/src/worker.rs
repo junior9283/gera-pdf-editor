@@ -151,7 +151,8 @@ pub enum Request {
         comments: bool,
     },
     /// Enviar formulário (já confirmado): monta os dados; responde `SubmitReady` ou
-    /// `SubmitFailed`. No mailto, o corpo é o texto `nome=valor`.
+    /// `SubmitFailed`. No mailto, o `SubmitReady` traz o endereço final, com o texto
+    /// `nome=valor` no corpo.
     Submit {
         target: crate::SubmitTarget,
         format: crate::SubmitFormat,
@@ -818,13 +819,21 @@ impl State {
                 self.edit(send, |d| d.flatten(comments).map(|()| Changed::Document))
             }
             Request::Submit { target, format } => send(
-                match self.with_doc(|d| match target {
-                    crate::SubmitTarget::Mail(_) => {
-                        Ok((d.submit_text()?.into_bytes(), "text/plain"))
-                    }
-                    crate::SubmitTarget::Http(_) => d.submit_payload(format),
+                // mailto: o endereço final já leva os dados no corpo
+                match self.with_doc(|d| match &target {
+                    crate::SubmitTarget::Mail(base) => Ok((
+                        crate::SubmitTarget::Mail(crate::form_data::mail_with_body(
+                            base,
+                            &d.submit_text()?,
+                        )),
+                        Vec::new(),
+                        "text/plain",
+                    )),
+                    crate::SubmitTarget::Http(_) => d
+                        .submit_payload(format)
+                        .map(|(b, t)| (target.clone(), b, t)),
                 }) {
-                    Ok((body, content_type)) => Response::SubmitReady {
+                    Ok((target, body, content_type)) => Response::SubmitReady {
                         target,
                         body,
                         content_type,

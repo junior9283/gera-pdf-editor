@@ -62,13 +62,6 @@ fn public_only(netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
     Ok(addrs)
 }
 
-/// O endereço mailto com os dados no corpo (codificação de URL, espaço como %20).
-pub fn mail_url(base: &str, body: &str) -> String {
-    let encoded = pdf_core::mail_encode(body);
-    let sep = if base.contains('?') { '&' } else { '?' };
-    format!("{base}{sep}body={encoded}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,17 +71,5 @@ mod tests {
         assert!(public_only("127.0.0.1:80").is_err());
         assert!(public_only("[::1]:443").is_err());
         assert!(public_only("8.8.8.8:80").is_ok());
-    }
-
-    #[test]
-    fn mail_body_goes_in_the_url() {
-        assert_eq!(
-            mail_url("mailto:rh@x.y", "Nome: Ana & Bia"),
-            "mailto:rh@x.y?body=Nome%3A%20Ana%20%26%20Bia"
-        );
-        assert_eq!(
-            mail_url("mailto:a@b?subject=Oi", "x"),
-            "mailto:a@b?subject=Oi&body=x"
-        );
     }
 }

@@ -99,8 +99,8 @@ pub enum DocEvent {
     NeedSaveAs,
     /// Clique num link para fora do documento (endereço, outro arquivo ou bloqueado).
     OpenLink(pdf_core::LinkTarget),
-    /// O preenchimento automático aprendeu uma entrada: a lista nova (vai para as preferências).
-    Autofill(app_state::autofill::Autofill),
+    /// O preenchimento automático aprendeu uma entrada (campo, valor): vai para as preferências.
+    Autofill(String, String),
     /// O arquivo pede para abrir em tela cheia (`/PageMode /FullScreen`).
     FullScreen,
     /// Anexo PDF gravado na pasta privada: abrir numa aba, sem lugar escolhido (Salvar pergunta).
@@ -1611,11 +1611,8 @@ impl DocTab {
                         self.sending =
                             Some(crate::submit::post(url, body, content_type.to_string()));
                     }
-                    pdf_core::SubmitTarget::Mail(base) => {
-                        let text = String::from_utf8_lossy(&body);
-                        ctx.open_url(egui::OpenUrl::new_tab(crate::submit::mail_url(
-                            &base, &text,
-                        )));
+                    pdf_core::SubmitTarget::Mail(url) => {
+                        ctx.open_url(egui::OpenUrl::new_tab(url));
                         self.status = "Os dados foram para o programa de e-mail.".into();
                     }
                 },
@@ -3481,17 +3478,8 @@ impl DocTab {
                 self.picking = Some(PickFor::MergeDest(files));
             }
             (Some(PickFor::MergeDest(files)), Picked::SaveTo(dest)) => {
-                // a planilha não pode ir por cima de um dos arquivos escolhidos
-                let csv = dest
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("csv"));
-                if !csv || files.iter().any(|f| same_file(f, &dest)) {
-                    self.status =
-                        "A planilha precisa de um nome .csv que não seja um dos arquivos a mesclar."
-                            .into();
-                } else {
-                    self.worker.send(Request::MergeFormData { files, dest });
-                }
+                // o núcleo recusa um destino que não seja .csv ou que seja um dos arquivos
+                self.worker.send(Request::MergeFormData { files, dest });
             }
             (Some(PickFor::ImportComments), Picked::Open(files)) => {
                 if let Some(path) = files.into_iter().next() {
@@ -3671,31 +3659,28 @@ impl DocTab {
     /// sobre a seleção.
     fn run_arrange_with(&mut self, ctx: &egui::Context, cmd: crate::prepare::ArrangeCmd) {
         use crate::prepare::ArrangeCmd as C;
-        if !matches!(cmd, C::ExportData | C::ImportData | C::MergeData) {
-            return self.run_arrange(cmd);
-        }
+        let pick = match cmd {
+            C::ExportData => PickFor::ExportFormData,
+            C::ImportData => PickFor::ImportFormData,
+            C::MergeData => PickFor::MergeSources,
+            other => return self.run_arrange(other),
+        };
         if self.files.busy() {
             return;
         }
-        self.picking = Some(match cmd {
-            C::ExportData => {
+        match pick {
+            PickFor::ExportFormData => {
                 let stem = self
                     .path
                     .file_stem()
                     .map_or("documento".into(), |s| s.to_string_lossy());
                 let dest = self.path.with_file_name(format!("{stem}_dados.fdf"));
                 self.files.save_form_data(ctx, dest);
-                PickFor::ExportFormData
             }
-            C::ImportData => {
-                self.files.pick_form_data(ctx);
-                PickFor::ImportFormData
-            }
-            _ => {
-                self.files.pick_data_sources(ctx);
-                PickFor::MergeSources
-            }
-        });
+            PickFor::ImportFormData => self.files.pick_form_data(ctx),
+            _ => self.files.pick_data_sources(ctx),
+        }
+        self.picking = Some(pick);
     }
 
     /// Executa um pedido sobre a seleção do Preparar (menu, tecla ou Editar).
@@ -4121,13 +4106,13 @@ impl DocTab {
         }
     }
 
-    /// Nome do usuário: vai para os carimbos dinâmicos e, no worker, como autor das anotações.
-    /// Repetir o mesmo nome não manda nada (a Identidade já o aplica antes de avisar a casca).
     /// A lista e o modo do preenchimento automático (das preferências).
     pub fn set_autofill(&mut self, autofill: &app_state::autofill::Autofill) {
         self.form.autofill.clone_from(autofill);
     }
 
+    /// Nome do usuário: vai para os carimbos dinâmicos e, no worker, como autor das anotações.
+    /// Repetir o mesmo nome não manda nada (a Identidade já o aplica antes de avisar a casca).
     pub fn set_author(&mut self, author: Option<String>) {
         if self.edit.author != author {
             self.edit.author = author.clone();
@@ -4332,9 +4317,8 @@ impl DocTab {
             self.prepare.props_for = Some((page, id));
             self.worker.send(Request::FieldProps { page, id });
         }
-        if std::mem::take(&mut self.form.learned) {
-            self.events
-                .push(DocEvent::Autofill(self.form.autofill.clone()));
+        if let Some((field, value)) = self.form.learned.take() {
+            self.events.push(DocEvent::Autofill(field, value));
         }
         for action in field_actions {
             match action {
@@ -4727,14 +4711,6 @@ fn outline_shown<'a>(
         }
     }
     std::borrow::Cow::Owned(nodes)
-}
-
-/// Os dois caminhos são o mesmo arquivo (também por link ou caminho relativo)?
-fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
-    }
 }
 
 #[cfg(test)]

@@ -18,6 +18,8 @@ struct TextDraft {
     password: bool,
     /// Sugestão marcada com as setas.
     suggest: Option<usize>,
+    /// Sugestões calculadas para este texto (refeitas só quando o texto muda).
+    suggested: Option<(String, Vec<String>)>,
 }
 
 /// O que o usuário pediu nos campos.
@@ -67,9 +69,10 @@ pub struct FormState {
     hover: Option<(i32, i32)>,
     /// Campo com o foco no quadro anterior (Em foco e Fora de foco).
     focus_prev: Option<(i32, i32)>,
-    /// Preenchimento automático (cópia das preferências; `learned` avisa que a lista mudou).
+    /// Preenchimento automático (cópia das preferências) e a entrada nova a repassar (campo,
+    /// valor).
     pub autofill: app_state::autofill::Autofill,
-    pub learned: bool,
+    pub learned: Option<(String, String)>,
 }
 
 /// Uma ação disparada sem clique (abrir ou fechar página, mouse entra ou sai, foco) pode rodar?
@@ -159,7 +162,7 @@ impl Default for FormState {
             hover: None,
             focus_prev: None,
             autofill: Default::default(),
-            learned: false,
+            learned: None,
         }
     }
 }
@@ -211,9 +214,9 @@ impl FormState {
         if d.text == d.original {
             return None;
         }
-        let before = self.autofill.entries.first().cloned();
-        self.autofill.learn(&d.name, &d.text, d.password);
-        self.learned |= self.autofill.entries.first() != before.as_ref();
+        if self.autofill.learn(&d.name, &d.text, d.password) {
+            self.learned = Some((d.name, d.text.clone()));
+        }
         Some(FieldAction::Set {
             page: d.page,
             id: d.id,
@@ -437,6 +440,7 @@ fn open(st: &mut FormState, f: &FieldInfo, out: &mut Vec<FieldAction>) {
                 name: f.name.clone(),
                 password: matches!(f.kind, FieldKind::Text { password: true, .. }),
                 suggest: None,
+                suggested: None,
             })
         }
         FieldKind::Combo { .. } | FieldKind::List { .. } => {
@@ -525,11 +529,15 @@ fn text_overlay(
     let suggestions: Vec<String> = if password || multiline || !(resp.has_focus() || d.focused) {
         Vec::new()
     } else {
-        st.autofill
-            .suggestions(&d.name, &d.text)
-            .into_iter()
-            .map(str::to_string)
-            .collect()
+        if d.suggested.as_ref().is_none_or(|(t, _)| *t != d.text) {
+            let list = st.autofill.suggestions(&d.name, &d.text);
+            let list = list.into_iter().map(str::to_string).collect();
+            d.suggested = Some((d.text.clone(), list));
+        }
+        d.suggested
+            .as_ref()
+            .map(|(_, l)| l.clone())
+            .unwrap_or_default()
     };
     if resp.changed() {
         d.suggest = None;
@@ -830,6 +838,7 @@ mod tests {
             name: "nome".into(),
             password,
             suggest: None,
+            suggested: None,
         }
     }
 
@@ -840,16 +849,16 @@ mod tests {
             ..Default::default()
         };
         assert!(st.commit().is_some());
-        assert!(!st.learned && st.autofill.entries.is_empty());
+        assert!(st.learned.is_none() && st.autofill.entries.is_empty());
         st.draft = Some(draft("Ana Lima", false));
         assert!(st.commit().is_some());
-        assert!(st.learned);
+        assert_eq!(st.learned, Some(("nome".into(), "Ana Lima".into())));
         assert_eq!(st.autofill.suggestions("x", "an"), ["Ana Lima"]);
         // mesmo valor de novo: a lista não muda (não regrava as preferências)
-        st.learned = false;
+        st.learned = None;
         st.draft = Some(draft("Ana Lima", false));
         st.commit();
-        assert!(!st.learned);
+        assert!(st.learned.is_none());
     }
 
     use super::*;

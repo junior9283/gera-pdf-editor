@@ -54,7 +54,6 @@ pub enum Picked {
 }
 
 /// Imagens que o MuPDF lê (Criar PDF, Editar PDF).
-pub const FORM_DATA_EXTS: &[&str] = &["fdf", "xfdf", "xml", "txt"];
 pub const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "tif", "tiff", "bmp", "gif"];
 
 /// "Salvar como" de PDF partindo de `suggested` (pasta e nome); sem extensão, ganha ".pdf".
@@ -62,13 +61,40 @@ fn save_dialog(suggested: &std::path::Path) -> Option<PathBuf> {
     let dialog = rfd::FileDialog::new()
         .set_title("Salvar como")
         .add_filter("PDF", &["pdf"]);
-    suggest(dialog, suggested).save_file_or_e2e().map(|p| {
-        if p.extension().is_some() {
-            p
-        } else {
-            p.with_extension("pdf")
-        }
-    })
+    suggest(dialog, suggested)
+        .save_file_or_e2e()
+        .map(|p| with_ext(p, "pdf"))
+}
+
+/// O caminho escolhido; sem extensão, ganha `ext`.
+fn with_ext(p: PathBuf, ext: &str) -> PathBuf {
+    if p.extension().is_some() {
+        p
+    } else {
+        p.with_extension(ext)
+    }
+}
+
+/// Um arquivo escolhido (ou cancelado).
+fn pick_one(dialog: rfd::FileDialog) -> Picked {
+    dialog
+        .pick_file_or_e2e()
+        .map_or(Picked::Cancelled, |p| Picked::Open(vec![p]))
+}
+
+/// Vários arquivos escolhidos (nenhum conta como cancelado).
+fn pick_many(dialog: rfd::FileDialog) -> Picked {
+    match dialog.pick_files_or_e2e() {
+        Some(p) if !p.is_empty() => Picked::Open(p),
+        _ => Picked::Cancelled,
+    }
+}
+
+/// Onde gravar, sugerindo `suggested`; sem extensão, ganha `ext`.
+fn save_with_ext(dialog: rfd::FileDialog, suggested: &std::path::Path, ext: &str) -> Picked {
+    suggest(dialog, suggested)
+        .save_file_or_e2e()
+        .map_or(Picked::Cancelled, |p| Picked::SaveTo(with_ext(p, ext)))
 }
 
 /// Pasta e nome iniciais do diálogo de gravação.
@@ -222,11 +248,12 @@ impl FileDialogs {
     /// Arquivo de dados do formulário (FDF, XFDF, XML ou TXT) para importar.
     pub fn pick_form_data(&mut self, ctx: &egui::Context) {
         self.spawn(ctx, move || {
-            rfd::FileDialog::new()
-                .set_title("Importar dados")
-                .add_filter("Dados do formulário (FDF, XFDF, XML, TXT)", FORM_DATA_EXTS)
-                .pick_file_or_e2e()
-                .map_or(Picked::Cancelled, |p| Picked::Open(vec![p]))
+            let exts = pdf_core::DataFormat::ALL.map(pdf_core::DataFormat::extension);
+            pick_one(
+                rfd::FileDialog::new()
+                    .set_title("Importar dados")
+                    .add_filter("Dados do formulário (FDF, XFDF, XML, TXT)", &exts),
+            )
         });
     }
 
@@ -237,32 +264,21 @@ impl FileDialogs {
             for f in pdf_core::DataFormat::ALL {
                 dialog = dialog.add_filter(f.label(), &[f.extension()]);
             }
-            suggest(dialog, &suggested)
-                .save_file_or_e2e()
-                .map_or(Picked::Cancelled, |p| {
-                    Picked::SaveTo(if p.extension().is_some() {
-                        p
-                    } else {
-                        p.with_extension("fdf")
-                    })
-                })
+            save_with_ext(dialog, &suggested, "fdf")
         });
     }
 
     /// Mesclar: os arquivos de dados ou formulários PDF (vários).
     pub fn pick_data_sources(&mut self, ctx: &egui::Context) {
         self.spawn(ctx, move || {
-            match rfd::FileDialog::new()
-                .set_title("Mesclar arquivos de dados numa planilha")
-                .add_filter(
-                    "Formulários e dados (PDF, FDF, XFDF)",
-                    &["pdf", "fdf", "xfdf"],
-                )
-                .pick_files_or_e2e()
-            {
-                Some(p) if !p.is_empty() => Picked::Open(p),
-                _ => Picked::Cancelled,
-            }
+            pick_many(
+                rfd::FileDialog::new()
+                    .set_title("Mesclar arquivos de dados numa planilha")
+                    .add_filter(
+                        "Formulários e dados (PDF, FDF, XFDF)",
+                        &["pdf", "fdf", "xfdf"],
+                    ),
+            )
         });
     }
 
@@ -272,15 +288,7 @@ impl FileDialogs {
             let dialog = rfd::FileDialog::new()
                 .set_title("Salvar planilha")
                 .add_filter("Planilha CSV", &["csv"]);
-            suggest(dialog, &suggested)
-                .save_file_or_e2e()
-                .map_or(Picked::Cancelled, |p| {
-                    Picked::SaveTo(if p.extension().is_some() {
-                        p
-                    } else {
-                        p.with_extension("csv")
-                    })
-                })
+            save_with_ext(dialog, &suggested, "csv")
         });
     }
 

@@ -2866,6 +2866,7 @@ dependencies = [
  "mupdf",
  "p12-keystore",
  "p256",
+ "percent-encoding",
  "quick-xml",
  "rand 0.8.8",
  "regex",

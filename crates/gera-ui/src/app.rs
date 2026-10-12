@@ -385,11 +385,10 @@ impl GeraApp {
                     }
                     DocEvent::Run(cmd) => to_run.push(cmd),
                     DocEvent::OpenAttachment(path) => attachments.push(path),
-                    DocEvent::Autofill(list) => {
-                        self.prefs.autofill = list;
-                        self.prefs_dirty = true;
-                        for doc in &mut self.docs {
-                            doc.set_autofill(&self.prefs.autofill);
+                    DocEvent::Autofill(field, value) => {
+                        if self.prefs.autofill.learn(&field, &value, false) {
+                            self.prefs_dirty = true;
+                            self.sync_autofill();
                         }
                     }
                     DocEvent::OpenLink(target) => {
@@ -1142,6 +1141,13 @@ impl eframe::App for GeraApp {
 }
 
 impl GeraApp {
+    /// O preenchimento automático das preferências vale em todas as abas.
+    fn sync_autofill(&mut self) {
+        for doc in &mut self.docs {
+            doc.set_autofill(&self.prefs.autofill);
+        }
+    }
+
     /// Preferências: OK aplica (tema e nome passam às abas), Cancelar descarta.
     fn preferences_window(&mut self, ctx: &egui::Context) {
         let Some(ok) = self.preferences.as_mut().and_then(|d| d.show(ctx)) else {
@@ -1161,13 +1167,12 @@ impl GeraApp {
         let (dark, author) = (new.dark, new.author.clone());
         let (theme_changed, author_changed) =
             (dark != self.prefs.dark, author != self.prefs.author);
-        if new.autofill != self.prefs.autofill {
-            for doc in &mut self.docs {
-                doc.set_autofill(&new.autofill);
-            }
-        }
+        let autofill_changed = new.autofill != self.prefs.autofill;
         self.prefs = new;
         self.prefs_dirty = true;
+        if autofill_changed {
+            self.sync_autofill();
+        }
         if forget || fewer {
             if forget {
                 self.recents.clear();

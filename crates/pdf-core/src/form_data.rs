@@ -4,6 +4,7 @@
 use crate::doc::PdfDoc;
 use crate::error::{refused, Result};
 use crate::forms::FieldKind;
+use crate::properties_edit::xml_escape;
 use mupdf::pdf::{PdfDocument, PdfObject, PdfWriteOptions};
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -24,13 +25,7 @@ impl DataFormat {
     /// Pela extensão do arquivo.
     pub fn from_path(path: &Path) -> Option<Self> {
         let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-        Some(match ext.as_str() {
-            "fdf" => Self::Fdf,
-            "xfdf" => Self::Xfdf,
-            "xml" => Self::Xml,
-            "txt" => Self::Txt,
-            _ => return None,
-        })
+        Self::ALL.into_iter().find(|f| f.extension() == ext)
     }
 
     pub fn extension(self) -> &'static str {
@@ -85,13 +80,7 @@ impl SubmitFormat {
 
     /// Pelo /Flags; `None` se há outros bits que o app não reproduz (a ação fica como está).
     pub(crate) fn from_flags(flags: i32) -> Option<Self> {
-        Some(match flags {
-            0 => Self::Fdf,
-            4 => Self::Html,
-            32 => Self::Xfdf,
-            256 => Self::Pdf,
-            _ => return None,
-        })
+        Self::ALL.into_iter().find(|f| f.flags() == flags)
     }
 }
 
@@ -111,10 +100,11 @@ impl SubmitTarget {
                 .and_then(|u| u.host_str().map(str::to_string))
                 .unwrap_or_default(),
             Self::Mail(u) => {
-                let rest = u.trim_start_matches("mailto:");
-                let (to, query) = rest.split_once('?').unwrap_or((rest, ""));
-                let mut out = percent_decode(to);
-                for (k, v) in mail_pairs(query) {
+                let Ok(parsed) = url::Url::parse(u) else {
+                    return String::new();
+                };
+                let mut out = percent_decode(parsed.path());
+                for (k, v) in mail_pairs(parsed.query().unwrap_or("")) {
                     match k.as_str() {
                         "cc" => out.push_str(&format!(" · cópia (cc): {v}")),
                         "bcc" => out.push_str(&format!(" · cópia oculta (bcc): {v}")),
@@ -206,28 +196,17 @@ fn mail_pairs(query: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Decodifica %XX (UTF-8 com substituição se inválido).
+/// Decodifica %XX (UTF-8 com substituição se inválido; o + fica literal).
 fn percent_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut k = 0;
-    while k < b.len() {
-        let hex = b
-            .get(k + 1..k + 3)
-            .filter(|h| h.iter().all(u8::is_ascii_hexdigit))
-            .and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok());
-        match (b[k], hex) {
-            (b'%', Some(v)) => {
-                out.push(v);
-                k += 3;
-            }
-            (c, _) => {
-                out.push(c);
-                k += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
+    percent_encoding::percent_decode_str(s)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
+/// O mailto com os dados no corpo (o mailto não leva anexo).
+pub(crate) fn mail_with_body(base: &str, body: &str) -> String {
+    let sep = if base.contains('?') { '&' } else { '?' };
+    format!("{base}{sep}body={}", mail_encode(body))
 }
 
 /// Codificação de um valor de mailto (espaço como %20: o + ali é literal).
@@ -272,17 +251,7 @@ pub fn is_public_ip(ip: std::net::IpAddr) -> bool {
 
 /// Codificação de formulário (application/x-www-form-urlencoded).
 pub fn form_encode(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' => {
-                out.push(b as char)
-            }
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
 /// Resultado de importar: campos preenchidos e nomes que o formulário não tem.
@@ -306,16 +275,17 @@ const MAX_MERGE: usize = 1_000;
 /// Os valores dos campos (nome completo, valor), um por campo, na ordem do documento: sem
 /// botões de ação nem assinaturas.
 fn values_of(doc: &PdfDoc) -> Result<Vec<(String, String)>> {
-    let mut out: Vec<(String, String)> = Vec::new();
-    for f in doc.all_fields()? {
-        if matches!(f.kind, FieldKind::Button | FieldKind::Signature) || f.name.is_empty() {
-            continue;
-        }
-        if !out.iter().any(|(n, _)| *n == f.name) {
-            out.push((f.name, f.value));
-        }
-    }
-    Ok(out)
+    let mut seen = std::collections::HashSet::new();
+    Ok(doc
+        .all_fields()?
+        .into_iter()
+        .filter(|f| {
+            !matches!(f.kind, FieldKind::Button | FieldKind::Signature)
+                && !f.name.is_empty()
+                && seen.insert(f.name.clone())
+        })
+        .map(|f| (f.name, f.value))
+        .collect())
 }
 
 /// Árvore de nomes hierárquicos ("a.b") para o FDF, o XFDF e o XML.
@@ -340,10 +310,6 @@ impl Node {
         }
         node.value = Some(value.to_string());
     }
-}
-
-fn xml_escape(s: &str) -> String {
-    quick_xml::escape::escape(s).into_owned()
 }
 
 /// Nome de elemento XML a partir do nome do campo (o original vai em `xfdf:original` quando
@@ -490,7 +456,6 @@ impl PdfDoc {
         Ok((bytes, values.len()))
     }
 
-    /// O que a ação Enviar formulário manda, e o tipo do conteúdo.
     /// Os dados como texto, uma linha `nome=valor` por campo (o corpo do e-mail do mailto).
     pub fn submit_text(&self) -> Result<String> {
         Ok(values_of(self)?
@@ -499,6 +464,7 @@ impl PdfDoc {
             .collect())
     }
 
+    /// O que a ação Enviar formulário manda, e o tipo do conteúdo.
     pub fn submit_payload(&self, format: SubmitFormat) -> Result<(Vec<u8>, &'static str)> {
         Ok(match format {
             SubmitFormat::Fdf => (
@@ -565,9 +531,7 @@ impl PdfDoc {
         })?;
         Ok(DataImport { filled, skipped })
     }
-}
 
-impl PdfDoc {
     /// Nivelar: os campos (e, com `comments`, os comentários) viram parte da página, com a
     /// aparência que tinham, numa etapa do desfazer.
     pub fn flatten(&mut self, comments: bool) -> Result<()> {
@@ -740,22 +704,19 @@ fn read_xml(bytes: &[u8], xfdf: bool) -> Result<Vec<(String, String)>> {
                             }
                         }
                         "field" => {
-                            if let Some(top) = stack.last() {
-                                if top.2 {
-                                    out.push((full(&stack), top.1.clone()));
-                                }
+                            let name = full(&stack);
+                            if let Some((_, text, true)) = stack.pop() {
+                                out.push((name, text));
                             }
-                            stack.pop();
                         }
                         _ => {}
                     }
-                } else if !stack.is_empty() && depth >= 1 {
-                    let top = stack.last().expect("não vazia");
+                } else if depth >= 1 && !stack.is_empty() {
                     // só folhas (sem elementos filhos) são campos com valor
-                    if !top.2 {
-                        out.push((full(&stack), top.1.trim().to_string()));
+                    let name = full(&stack);
+                    if let Some((_, text, false)) = stack.pop() {
+                        out.push((name, text.trim().to_string()));
                     }
-                    stack.pop();
                 }
                 if out.len() >= MAX_FIELDS {
                     break;
@@ -775,6 +736,15 @@ fn read_xml(bytes: &[u8], xfdf: bool) -> Result<Vec<(String, String)>> {
 pub fn merge_form_data(files: &[std::path::PathBuf], dest: &Path) -> Result<usize> {
     if files.len() > MAX_MERGE {
         return Err(refused("arquivos demais para uma planilha"));
+    }
+    // a planilha é um .csv novo, nunca por cima de um dos arquivos a mesclar
+    let csv = dest
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("csv"));
+    if !csv || files.iter().any(|f| crate::pages::same_file(f, dest)) {
+        return Err(refused(
+            "a planilha precisa de um nome .csv que não seja um dos arquivos a mesclar",
+        ));
     }
     let mut columns: Vec<String> = Vec::new();
     let mut known: std::collections::HashSet<String> = std::collections::HashSet::new();

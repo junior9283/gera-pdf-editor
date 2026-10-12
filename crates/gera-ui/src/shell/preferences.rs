@@ -231,11 +231,18 @@ fn forms_page(ui: &mut egui::Ui, a: &mut app_state::autofill::Autofill) {
     ui.add_space(6.0);
     ui.label(format!("Entradas lembradas ({}):", a.entries.len()));
     let mut remove = None;
+    let row = ui.spacing().interact_size.y;
     egui::ScrollArea::vertical()
         .id_salt("lista-preenchimento")
         .max_height(200.0)
-        .show(ui, |ui| {
-            for (k, e) in a.entries.iter().enumerate() {
+        .show_rows(ui, row, a.entries.len(), |ui, rows| {
+            for (k, e) in a
+                .entries
+                .iter()
+                .enumerate()
+                .skip(rows.start)
+                .take(rows.len())
+            {
                 ui.horizontal(|ui| {
                     if ui.small_button("Excluir").clicked() {
                         remove = Some(k);

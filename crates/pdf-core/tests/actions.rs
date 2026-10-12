@@ -404,3 +404,38 @@ fn submit_target_is_canonical_and_mailto_is_restricted() {
         "rh@x.y · cópia oculta (bcc): spy@evil.com · cópia (cc): ana+rh@x.y"
     );
 }
+
+#[test]
+fn mail_body_goes_in_the_url() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = common::write_sample(&dir, "m.pdf", 1, 0);
+    let w = pdf_core::Worker::spawn(|| {});
+    w.send(pdf_core::Request::Open {
+        path,
+        password: None,
+    });
+    let recv = || {
+        w.rx.recv_timeout(std::time::Duration::from_secs(20))
+            .unwrap()
+    };
+    assert!(matches!(recv(), pdf_core::Response::Opened(_)));
+    for (base, url) in [
+        ("mailto:rh@x.y", "mailto:rh@x.y?body="),
+        ("mailto:a@b.c?subject=Oi", "mailto:a@b.c?subject=Oi&body="),
+    ] {
+        w.send(pdf_core::Request::Submit {
+            target: pdf_core::submit_target(base).unwrap(),
+            format: pdf_core::SubmitFormat::Fdf,
+        });
+        match recv() {
+            pdf_core::Response::SubmitReady { target, .. } => {
+                assert_eq!(target, pdf_core::SubmitTarget::Mail(url.into()))
+            }
+            other => panic!("esperava SubmitReady, veio {other:?}"),
+        }
+    }
+    assert_eq!(
+        pdf_core::mail_encode("Nome: Ana & Bia"),
+        "Nome%3A%20Ana%20%26%20Bia"
+    );
+}

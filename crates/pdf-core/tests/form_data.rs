@@ -193,3 +193,17 @@ fn merging_many_wide_files_is_fast() {
     pdf_core::merge_form_data(&files, &dir.path().join("p.csv")).unwrap();
     assert!(t.elapsed().as_secs_f32() < 3.0, "{:?}", t.elapsed());
 }
+
+#[test]
+fn merge_never_overwrites_a_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, d) = form(&dir);
+    let data = dir.path().join("d.xfdf");
+    d.export_form_data(&data, DataFormat::Xfdf).unwrap();
+    let files = vec![path.clone(), data.clone()];
+    for dest in [path.clone(), data.clone(), dir.path().join("planilha.pdf")] {
+        assert!(pdf_core::merge_form_data(&files, &dest).is_err(), "{dest:?}");
+    }
+    assert!(std::fs::read(&path).unwrap().starts_with(b"%PDF"), "o PDF ficou intacto");
+    assert!(pdf_core::merge_form_data(&files, &dir.path().join("p.CSV")).is_ok());
+}
