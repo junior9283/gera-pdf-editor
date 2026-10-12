@@ -64,6 +64,18 @@ pub struct FormState {
     focus_prev: Option<(i32, i32)>,
 }
 
+/// Uma ação disparada sem clique (abrir ou fechar página, mouse entra ou sai, foco) pode rodar?
+/// Só mostrar/ocultar campos, e navegar ao abrir uma página: links, arquivos, imprimir, tela
+/// cheia, itens de menu e Redefinir pedem o clique do usuário (um PDF não age sozinho).
+pub fn auto_allowed(action: &pdf_core::ActionKind, page_open: bool) -> bool {
+    use pdf_core::ActionKind as A;
+    match action {
+        A::ShowHide { .. } => true,
+        A::GoTo { .. } => page_open,
+        _ => false,
+    }
+}
+
 /// O clique num campo com ações: Mouse para baixo e Mouse para cima (como no Acrobat).
 pub fn click_actions(f: &FieldInfo) -> Vec<FieldAction> {
     use pdf_core::FieldTrigger as T;
@@ -770,6 +782,37 @@ mod tests {
                 }
             ]
         ));
+    }
+
+    #[test]
+    fn automatic_triggers_only_show_hide_or_navigate_once() {
+        use pdf_core::ActionKind as A;
+        let hide = A::ShowHide {
+            fields: vec!["x".into()],
+            hide: true,
+        };
+        assert!(auto_allowed(&hide, false));
+        assert!(
+            auto_allowed(&A::GoTo { page: 1 }, true),
+            "abrir página pode navegar"
+        );
+        assert!(
+            !auto_allowed(&A::GoTo { page: 1 }, false),
+            "passar o mouse não navega"
+        );
+        for a in [
+            A::Uri("https://x.y".into()),
+            A::Launch("a.pdf".into()),
+            A::Reset {
+                fields: vec![],
+                exclude: false,
+            },
+            A::Named("Print".into()),
+            A::Named("NextPage".into()),
+            A::ImportIcon,
+        ] {
+            assert!(!auto_allowed(&a, true), "{a:?} só com clique");
+        }
     }
 
     #[test]

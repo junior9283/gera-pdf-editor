@@ -225,6 +225,9 @@ pub struct DocTab {
     /// Ações de abrir e fechar página (só das páginas que as têm) e a página da última vez.
     page_actions: Vec<(i32, Vec<(pdf_core::PageTrigger, pdf_core::ActionKind)>)>,
     action_page: Option<i32>,
+    /// Página aonde uma ação de abrir página levou: lá, as ações de navegar não rodam de novo
+    /// (duas páginas que se mandam uma para a outra não ficam pulando).
+    auto_jump: Option<i32>,
     /// Estado do histórico de edições no worker.
     history: HistoryState,
     /// O motor de PDF (thread do worker) parou; já avisado.
@@ -414,6 +417,7 @@ impl DocTab {
             field_triggers: Vec::new(),
             page_actions: Vec::new(),
             action_page: None,
+            auto_jump: None,
             history: HistoryState::default(),
             engine_stopped: false,
             outline: Vec::new(),
@@ -3599,15 +3603,20 @@ impl DocTab {
     fn run_field_triggers(&mut self, ctx: &egui::Context) {
         use pdf_core::PageTrigger;
         let filling = !self.prepare_tools || self.prepare.preview;
+        use crate::fields::auto_allowed;
+        use pdf_core::FieldTrigger as T;
         let mut todo: Vec<(i32, i32, pdf_core::ActionKind)> = Vec::new();
+        let mut skipped = false;
         for (page, id, trigger) in std::mem::take(&mut self.field_triggers) {
+            let clicked = matches!(trigger, T::MouseUp | T::MouseDown);
             if let Some(f) = self.fields.iter().find(|f| f.page == page && f.id == id) {
-                todo.extend(
-                    f.actions
-                        .iter()
-                        .filter(|(t, _)| *t == trigger)
-                        .map(|(_, a)| (page, id, a.clone())),
-                );
+                for (_, a) in f.actions.iter().filter(|(t, _)| *t == trigger) {
+                    if clicked || auto_allowed(a, false) {
+                        todo.push((page, id, a.clone()));
+                    } else {
+                        skipped = true;
+                    }
+                }
             }
         }
         let current = self.last.current_page as i32;
@@ -3622,10 +3631,27 @@ impl DocTab {
             };
             let mut page_todo = of(self.action_page, PageTrigger::Close);
             page_todo.extend(of(Some(current), PageTrigger::Open));
-            todo.extend(page_todo.into_iter().map(|a| (current, -1, a)));
+            // chegou aqui por uma ação de abrir página: não salta de novo
+            let jumped_here = self.auto_jump.take() == Some(current);
+            for a in page_todo {
+                let navigate = matches!(a, pdf_core::ActionKind::GoTo { .. });
+                if auto_allowed(&a, true) && !(navigate && jumped_here) {
+                    if let pdf_core::ActionKind::GoTo { page } = a {
+                        self.auto_jump = Some(page);
+                    }
+                    todo.push((current, -1, a));
+                } else if !(navigate && jumped_here) {
+                    skipped = true;
+                }
+            }
             self.action_page = Some(current);
         } else if !filling {
             self.action_page = None;
+        }
+        if skipped {
+            self.status =
+                "Por segurança, ações que o documento dispara sozinho (links, arquivos, imprimir, redefinir) não rodam sem um clique."
+                    .into();
         }
         for (page, id, action) in todo {
             self.run_action(ctx, page, id, action);
