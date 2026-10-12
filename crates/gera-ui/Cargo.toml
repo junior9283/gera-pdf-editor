@@ -16,6 +16,8 @@ rfd = "0.17"
 arboard = "3.6"
 png = "0.18"
 chrono = { version = "0.4.38", default-features = false, features = ["clock"] }
+# Enviar formulário (http/https): MIT/Apache, rustls
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
 eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
 
 [dev-dependencies]

@@ -10,6 +10,9 @@ flate2 = "1"
 mupdf = { version = "0.8", default-features = false, features = ["base14-fonts", "system-fonts", "docx-output", "tesseract"] }
 quick-xml = "0.41"
 thiserror = "2"
+# Enviar formulário: o mesmo analisador de URL do envio (ureq), MIT/Apache
+url = "2.5"
+percent-encoding = "2.3"
 # assinatura digital (v3d): CMS/PKCS#7, X.509, PKCS#12 — RustCrypto, MIT/Apache
 aes = "0.8"
 cbc = "0.1"

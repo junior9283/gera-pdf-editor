@@ -186,6 +186,7 @@ impl GeraApp {
             let mut doc = DocTab::new(ctx, path.clone(), self.prefs.dark);
             doc.thumbs.width = self.prefs.thumb_width;
             doc.set_author(self.prefs.author.clone());
+            doc.set_autofill(&self.prefs.autofill);
             let key = path.to_string_lossy();
             doc.open_view = crate::doc_tab::OpenView {
                 mode: self.prefs.default_mode,
@@ -384,6 +385,12 @@ impl GeraApp {
                     }
                     DocEvent::Run(cmd) => to_run.push(cmd),
                     DocEvent::OpenAttachment(path) => attachments.push(path),
+                    DocEvent::Autofill(field, value) => {
+                        if self.prefs.autofill.learn(&field, &value, false) {
+                            self.prefs_dirty = true;
+                            self.sync_autofill();
+                        }
+                    }
                     DocEvent::OpenLink(target) => {
                         use crate::links::Outcome;
                         match crate::links::outcome(&target, &self.prefs.link_sites) {
@@ -1134,6 +1141,13 @@ impl eframe::App for GeraApp {
 }
 
 impl GeraApp {
+    /// O preenchimento automático das preferências vale em todas as abas.
+    fn sync_autofill(&mut self) {
+        for doc in &mut self.docs {
+            doc.set_autofill(&self.prefs.autofill);
+        }
+    }
+
     /// Preferências: OK aplica (tema e nome passam às abas), Cancelar descarta.
     fn preferences_window(&mut self, ctx: &egui::Context) {
         let Some(ok) = self.preferences.as_mut().and_then(|d| d.show(ctx)) else {
@@ -1143,9 +1157,17 @@ impl GeraApp {
             return;
         };
         let forget = draft.forget_recents;
-        let Some(new) = draft.finish(ok) else {
+        // a lista não editada na janela fica como está agora (o que foi aprendido enquanto a
+        // janela estava aberta não se perde)
+        let list_kept = draft.prefs.autofill.entries == draft.entries_at_open;
+        let Some(mut new) = draft.finish(ok) else {
             return; // Cancelar
         };
+        if list_kept {
+            new.autofill
+                .entries
+                .clone_from(&self.prefs.autofill.entries);
+        }
         if new == self.prefs && !forget {
             return;
         }
@@ -1153,8 +1175,12 @@ impl GeraApp {
         let (dark, author) = (new.dark, new.author.clone());
         let (theme_changed, author_changed) =
             (dark != self.prefs.dark, author != self.prefs.author);
+        let autofill_changed = new.autofill != self.prefs.autofill;
         self.prefs = new;
         self.prefs_dirty = true;
+        if autofill_changed {
+            self.sync_autofill();
+        }
         if forget || fewer {
             if forget {
                 self.recents.clear();

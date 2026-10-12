@@ -441,7 +441,7 @@ fn font_info(font: &PdfObject) -> Option<FontInfo> {
 }
 
 /// Texto escapado para XML (sem os caracteres de controle que o XML 1.0 proíbe).
-fn xml_escape(s: &str) -> String {
+pub(crate) fn xml_escape(s: &str) -> String {
     s.chars()
         .filter(|&c| !c.is_control() || matches!(c, '\t' | '\n' | '\r'))
         .collect::<String>()

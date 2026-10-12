@@ -99,6 +99,8 @@ pub enum DocEvent {
     NeedSaveAs,
     /// Clique num link para fora do documento (endereço, outro arquivo ou bloqueado).
     OpenLink(pdf_core::LinkTarget),
+    /// O preenchimento automático aprendeu uma entrada (campo, valor): vai para as preferências.
+    Autofill(String, String),
     /// O arquivo pede para abrir em tela cheia (`/PageMode /FullScreen`).
     FullScreen,
     /// Anexo PDF gravado na pasta privada: abrir numa aba, sem lugar escolhido (Salvar pergunta).
@@ -246,6 +248,11 @@ pub struct DocTab {
     pub(crate) prepare: crate::prepare::PrepareState,
     /// Janela Duplicar ou Criar várias cópias do Preparar.
     arrange_dialog: Option<crate::shell::arrange_dialogs::ArrangeDialog>,
+    /// Enviar formulário: aguardando a confirmação (endereço e formato) e o envio http em curso.
+    submit_confirm: Option<(pdf_core::SubmitTarget, pdf_core::SubmitFormat)>,
+    sending: Option<crate::submit::Sending>,
+    /// Envio confirmado, à espera dos dados do worker (um segundo Enviar não sai em dobro).
+    submit_waiting: bool,
     /// Campos copiados no Preparar: os nomes a pôr na área de transferência do sistema.
     prepare_copied: Option<String>,
     /// Linha Editar PDF aberta (as imagens viram objetos editáveis).
@@ -346,6 +353,11 @@ enum PickFor {
     ExportComments(Option<Vec<(i32, i32)>>),
     /// Comentários → Importar arquivo de dados.
     ImportComments,
+    /// Dados do formulário: onde exportar, o que importar, as fontes e o destino do Mesclar.
+    ExportFormData,
+    ImportFormData,
+    MergeSources,
+    MergeDest(Vec<PathBuf>),
     /// Carimbo personalizado: o PDF ou a imagem de origem.
     StampSource,
 }
@@ -434,6 +446,9 @@ impl DocTab {
             prepare_tools: false,
             prepare: Default::default(),
             arrange_dialog: None,
+            submit_confirm: None,
+            sending: None,
+            submit_waiting: false,
             prepare_copied: None,
             edit_pdf_tools: false,
             edit_pdf: Default::default(),
@@ -1589,6 +1604,54 @@ impl DocTab {
                     self.status = format!("Não foi possível ler as propriedades: {msg}");
                 }
                 Response::Exported { dest } => self.send_to_printer(ctx, dest),
+                // sem envio confirmado à espera (ex.: o documento foi reaberto): nada sai
+                Response::SubmitReady { .. } if !self.submit_waiting => {}
+                Response::SubmitReady {
+                    target,
+                    body,
+                    content_type,
+                } => {
+                    self.submit_waiting = false;
+                    match target {
+                        pdf_core::SubmitTarget::Http(url) => {
+                            self.status = "Enviando o formulário…".into();
+                            self.sending =
+                                Some(crate::submit::post(url, body, content_type.to_string()));
+                        }
+                        pdf_core::SubmitTarget::Mail(url) => {
+                            ctx.open_url(egui::OpenUrl::new_tab(url));
+                            self.status = "Os dados foram para o programa de e-mail.".into();
+                        }
+                    }
+                }
+                Response::FormDataExported { path, count } => {
+                    self.status = format!(
+                        "{count} campos exportados em {}",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    );
+                }
+                Response::FormDataImported(r) => {
+                    self.status = match r.skipped {
+                        0 => format!("Dados importados: {} campos preenchidos.", r.filled),
+                        n => format!(
+                            "Dados importados: {} campos preenchidos; {n} nomes do arquivo não existem neste formulário.",
+                            r.filled
+                        ),
+                    };
+                }
+                Response::FormDataMerged { dest, count } => {
+                    self.status = format!(
+                        "{count} arquivos mesclados na planilha {}",
+                        dest.file_name().unwrap_or_default().to_string_lossy()
+                    );
+                }
+                Response::FormDataFailed(msg) => {
+                    self.status = format!("Dados do formulário: {msg}");
+                }
+                Response::SubmitFailed(msg) => {
+                    self.submit_waiting = false;
+                    self.status = format!("Não foi possível enviar o formulário: {msg}");
+                }
                 Response::ExportFailed(msg) => {
                     self.print_pending = None;
                     self.status = format!("Não foi possível preparar a impressão: {msg}");
@@ -2527,15 +2590,16 @@ impl DocTab {
         self.run_field_triggers(ui.ctx());
         // pedidos do menu de contexto (e do menu Organizar)
         for cmd in std::mem::take(&mut self.prepare.cmds) {
-            self.run_arrange(cmd);
+            self.run_arrange_with(ui.ctx(), cmd);
         }
         if let Some(text) = self.prepare_copied.take() {
             ui.ctx().copy_text(text);
         }
         self.arrange_window(ui.ctx());
+        self.submit_window(ui.ctx());
         self.field_alert_window(ui.ctx());
         self.stamp_windows(ui.ctx());
-        self.poll_files();
+        self.poll_files(ui.ctx());
         self.identity_window(ui);
         self.pick_attachment_for_comment(ui.ctx());
         self.send_edits();
@@ -3297,7 +3361,7 @@ impl DocTab {
     }
 
     /// O arquivo ou a pasta escolhidos no seletor do Organizar/Dividir.
-    fn poll_files(&mut self) {
+    fn poll_files(&mut self, ctx: &egui::Context) {
         use crate::organize::{Dialog, Purpose};
         let Some(picked) = self.files.poll() else {
             return;
@@ -3400,6 +3464,31 @@ impl DocTab {
                 {
                     d.set_source(path);
                 }
+            }
+            // o formato vem da extensão; outra extensão (um .pdf, por engano) é recusada
+            (Some(PickFor::ExportFormData), Picked::SaveTo(path)) => {
+                match pdf_core::DataFormat::from_path(&path) {
+                    Some(format) => self.worker.send(Request::ExportFormData { path, format }),
+                    None => {
+                        self.status =
+                            "Exportar dados: use a extensão .fdf, .xfdf, .xml ou .txt.".into()
+                    }
+                }
+            }
+            (Some(PickFor::ImportFormData), Picked::Open(files)) => {
+                if let Some(path) = files.into_iter().next() {
+                    self.worker.send(Request::ImportFormData { path });
+                }
+            }
+            (Some(PickFor::MergeSources), Picked::Open(files)) => {
+                let dir = files.first().and_then(|f| f.parent()).map(PathBuf::from);
+                let dest = dir.unwrap_or_default().join("dados_mesclados.csv");
+                self.files.save_csv(ctx, dest);
+                self.picking = Some(PickFor::MergeDest(files));
+            }
+            (Some(PickFor::MergeDest(files)), Picked::SaveTo(dest)) => {
+                // o núcleo recusa um destino que não seja .csv ou que seja um dos arquivos
+                self.worker.send(Request::MergeFormData { files, dest });
             }
             (Some(PickFor::ImportComments), Picked::Open(files)) => {
                 if let Some(path) = files.into_iter().next() {
@@ -3575,6 +3664,34 @@ impl DocTab {
         }
     }
 
+    /// Pedido do menu: os de dados do formulário abrem um seletor de arquivo; os outros agem
+    /// sobre a seleção.
+    fn run_arrange_with(&mut self, ctx: &egui::Context, cmd: crate::prepare::ArrangeCmd) {
+        use crate::prepare::ArrangeCmd as C;
+        let pick = match cmd {
+            C::ExportData => PickFor::ExportFormData,
+            C::ImportData => PickFor::ImportFormData,
+            C::MergeData => PickFor::MergeSources,
+            other => return self.run_arrange(other),
+        };
+        if self.files.busy() {
+            return;
+        }
+        match pick {
+            PickFor::ExportFormData => {
+                let stem = self
+                    .path
+                    .file_stem()
+                    .map_or("documento".into(), |s| s.to_string_lossy());
+                let dest = self.path.with_file_name(format!("{stem}_dados.fdf"));
+                self.files.save_form_data(ctx, dest);
+            }
+            PickFor::ImportFormData => self.files.pick_form_data(ctx),
+            _ => self.files.pick_data_sources(ctx),
+        }
+        self.picking = Some(pick);
+    }
+
     /// Executa um pedido sobre a seleção do Preparar (menu, tecla ou Editar).
     pub(crate) fn run_arrange(&mut self, cmd: crate::prepare::ArrangeCmd) {
         use crate::prepare::ArrangeCmd as C;
@@ -3614,6 +3731,16 @@ impl DocTab {
                 self.status =
                     "Detecção automática de campos: os campos achados aparecem nas páginas (Desfazer tira todos)."
                         .into();
+            }
+            C::Flatten(comments) => {
+                self.prepare.selection.clear();
+                self.worker.send(Request::Flatten { comments });
+                self.status = if comments {
+                    "Campos e comentários nivelados: agora fazem parte da página (Desfazer volta)."
+                } else {
+                    "Campos nivelados: agora fazem parte da página (Desfazer volta)."
+                }
+                .into();
             }
             C::Props => {
                 if let Some((page, id)) = anchor {
@@ -3754,6 +3881,15 @@ impl DocTab {
                 }
             }
             A::ImportIcon => self.pick_button_icon(ctx, page, id),
+            A::Submit { url, format } => match pdf_core::submit_target(&url) {
+                Some(target) => self.submit_confirm = Some((target, format)),
+                None => {
+                    self.status = format!(
+                        "Envio recusado: o endereço «{}» não é http, https ou mailto, ou é da rede interna.",
+                        crate::links::safe_display(&url)
+                    )
+                }
+            },
             A::JavaScript(_) => {
                 self.status = "Este formulário tem JavaScript que o app não executa.".into()
             }
@@ -3779,6 +3915,68 @@ impl DocTab {
     /// Número de páginas do documento aberto (0 antes de abrir).
     fn page_total(&self) -> usize {
         self.view.as_ref().map_or(0, |v| v.sizes.len())
+    }
+
+    /// Confirmação do Enviar formulário (sempre, mostrando o endereço) e o resultado do envio.
+    fn submit_window(&mut self, ctx: &egui::Context) {
+        if let Some(sending) = &self.sending {
+            match sending.poll() {
+                Some(Ok(_)) => {
+                    self.sending = None;
+                    self.status = "Formulário enviado.".into();
+                }
+                Some(Err(e)) => {
+                    self.sending = None;
+                    self.status = format!(
+                        "Não foi possível enviar o formulário: {}",
+                        crate::links::safe_display(&e)
+                    );
+                }
+                None => ctx.request_repaint_after(std::time::Duration::from_millis(200)),
+            }
+        }
+        let Some((target, format)) = &self.submit_confirm else {
+            return;
+        };
+        let (url, what) = match target {
+            pdf_core::SubmitTarget::Http(u) => (u, format!("os dados em {}", format.label())),
+            pdf_core::SubmitTarget::Mail(u) => (u, "os dados no corpo de um e-mail".to_string()),
+        };
+        let mut choice = None;
+        egui::Modal::new(egui::Id::new("enviar-formulario")).show(ctx, |ui| {
+            ui.heading("Enviar formulário");
+            ui.label(format!("O documento quer enviar {what} para:"));
+            ui.label(
+                egui::RichText::new(crate::links::safe_display(&target.recipient()))
+                    .strong()
+                    .size(16.0),
+            );
+            ui.label("Endereço completo:");
+            ui.monospace(crate::links::safe_display(url));
+            ui.label("Envie só se você confia neste documento e neste endereço.");
+            ui.horizontal(|ui| {
+                if ui.button("Enviar").clicked() {
+                    choice = Some(true);
+                }
+                if ui.button("Cancelar").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                {
+                    choice = Some(false);
+                }
+            });
+        });
+        match choice {
+            Some(true) => {
+                let (target, format) = self.submit_confirm.take().unwrap();
+                if self.sending.is_some() || self.submit_waiting {
+                    self.status = "Já há um envio em andamento.".into();
+                } else {
+                    self.submit_waiting = true;
+                    self.worker.send(Request::Submit { target, format });
+                }
+            }
+            Some(false) => self.submit_confirm = None,
+            None => {}
+        }
     }
 
     /// Janela Duplicar ou Criar várias cópias (com a prévia na página).
@@ -3916,6 +4114,11 @@ impl DocTab {
             }
             Err(e) => self.status = format!("Não foi possível criar o resumo: {e}"),
         }
+    }
+
+    /// A lista e o modo do preenchimento automático (das preferências).
+    pub fn set_autofill(&mut self, autofill: &app_state::autofill::Autofill) {
+        self.form.autofill.clone_from(autofill);
     }
 
     /// Nome do usuário: vai para os carimbos dinâmicos e, no worker, como autor das anotações.
@@ -4123,6 +4326,9 @@ impl DocTab {
         if let Some((page, id)) = open_props {
             self.prepare.props_for = Some((page, id));
             self.worker.send(Request::FieldProps { page, id });
+        }
+        if let Some((field, value)) = self.form.learned.take() {
+            self.events.push(DocEvent::Autofill(field, value));
         }
         for action in field_actions {
             match action {
@@ -5015,5 +5221,27 @@ mod tests {
         replace_pages(&mut all, &[1], vec![a(1, 3), a(1, 5)]);
         let ids: Vec<_> = all.iter().map(|x| x.id).collect();
         assert_eq!(ids, [1, 3, 5, 4]);
+    }
+
+    #[test]
+    fn submit_asks_first_and_refuses_internal_addresses() {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_pages(1);
+        let submit = |url: &str| pdf_core::ActionKind::Submit {
+            url: url.into(),
+            format: pdf_core::SubmitFormat::Xfdf,
+        };
+        tab.run_action(&ctx, 0, 1, submit("http://192.168.0.1/x"));
+        assert!(tab.submit_confirm.is_none() && tab.status.contains("recusado"));
+        tab.run_action(&ctx, 0, 1, submit("https://exemplo.com.br/f"));
+        // nada sai antes do Enviar da confirmação
+        assert!(tab.sending.is_none());
+        assert_eq!(
+            tab.submit_confirm,
+            Some((
+                pdf_core::SubmitTarget::Http("https://exemplo.com.br/f".into()),
+                pdf_core::SubmitFormat::Xfdf
+            ))
+        );
     }
 }

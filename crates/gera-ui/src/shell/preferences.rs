@@ -9,16 +9,18 @@ enum Category {
     General,
     PageDisplay,
     Documents,
+    Forms,
     Identity,
     Security,
     Appearance,
 }
 
 impl Category {
-    const ALL: [Category; 6] = [
+    const ALL: [Category; 7] = [
         Category::General,
         Category::PageDisplay,
         Category::Documents,
+        Category::Forms,
         Category::Identity,
         Category::Security,
         Category::Appearance,
@@ -29,6 +31,7 @@ impl Category {
             Category::General => "Geral",
             Category::PageDisplay => "Exibição de página",
             Category::Documents => "Documentos",
+            Category::Forms => "Formulários",
             Category::Identity => "Identidade",
             Category::Security => "Segurança",
             Category::Appearance => "Aparência",
@@ -45,6 +48,8 @@ pub struct PrefsDraft {
     pub forget_recents: bool,
     /// Nome como está sendo digitado (aparado só no OK).
     pub author_text: String,
+    /// Lista do preenchimento automático ao abrir (para saber se foi editada).
+    pub entries_at_open: Vec<app_state::autofill::Entry>,
 }
 
 impl PrefsDraft {
@@ -54,6 +59,7 @@ impl PrefsDraft {
             category: Category::default(),
             forget_recents: false,
             author_text: prefs.author.clone().unwrap_or_default(),
+            entries_at_open: prefs.autofill.entries.clone(),
         }
     }
 
@@ -164,6 +170,7 @@ impl PrefsDraft {
                     "Esquecer os documentos recentes (ao clicar em OK)",
                 );
             }
+            Category::Forms => forms_page(ui, &mut p.autofill),
             Category::Identity => {
                 ui.label("Nome (autor dos comentários e linha dos carimbos dinâmicos):");
                 ui.text_edit_singleline(&mut self.author_text);
@@ -202,6 +209,57 @@ impl PrefsDraft {
                 ui.checkbox(&mut p.dark, "Modo escuro");
             }
         }
+    }
+}
+
+/// Formulários ▸ Preenchimento automático (como no Acrobat): modo, números e a lista lembrada.
+fn forms_page(ui: &mut egui::Ui, a: &mut app_state::autofill::Autofill) {
+    use app_state::autofill::AutofillMode;
+    ui.horizontal(|ui| {
+        ui.label("Preenchimento automático:");
+        egui::ComboBox::from_id_salt("preenchimento-automatico")
+            .selected_text(a.mode.label())
+            .show_ui(ui, |ui| {
+                for m in AutofillMode::ALL {
+                    ui.selectable_value(&mut a.mode, m, m.label());
+                }
+            });
+    });
+    ui.weak(match a.mode {
+        AutofillMode::Off => "Nada é lembrado nem sugerido.",
+        AutofillMode::Basic => "Sugere as entradas já digitadas que começam com o que você digita.",
+        AutofillMode::Advanced => "Sugere também pelo nome do campo, já ao entrar num campo vazio.",
+    });
+    ui.checkbox(&mut a.numbers, "Lembrar dados numéricos");
+    ui.add_space(6.0);
+    ui.label(format!("Entradas lembradas ({}):", a.entries.len()));
+    let mut remove = None;
+    let row = ui.spacing().interact_size.y;
+    egui::ScrollArea::vertical()
+        .id_salt("lista-preenchimento")
+        .max_height(200.0)
+        .show_rows(ui, row, a.entries.len(), |ui, rows| {
+            for (k, e) in a
+                .entries
+                .iter()
+                .enumerate()
+                .skip(rows.start)
+                .take(rows.len())
+            {
+                ui.horizontal(|ui| {
+                    if ui.small_button("Excluir").clicked() {
+                        remove = Some(k);
+                    }
+                    ui.label(crate::links::safe_display(&e.value));
+                    ui.weak(crate::links::safe_display(&e.field));
+                });
+            }
+        });
+    if let Some(k) = remove {
+        a.entries.remove(k);
+    }
+    if !a.entries.is_empty() && ui.button("Apagar tudo").clicked() {
+        a.entries.clear();
     }
 }
 

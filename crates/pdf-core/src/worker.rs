@@ -132,6 +132,31 @@ pub enum Request {
         fields: Vec<String>,
         exclude: bool,
     },
+    /// Dados do formulário: exportar em `path` (`FormDataExported` ou `FormDataFailed`).
+    ExportFormData {
+        path: PathBuf,
+        format: crate::DataFormat,
+    },
+    /// Importar os dados de `path` (uma etapa do desfazer; `FormDataImported`).
+    ImportFormData {
+        path: PathBuf,
+    },
+    /// Mesclar vários arquivos de dados numa planilha CSV (`FormDataMerged`).
+    MergeFormData {
+        files: Vec<PathBuf>,
+        dest: PathBuf,
+    },
+    /// Nivelar os campos (e, com `comments`, os comentários) na página.
+    Flatten {
+        comments: bool,
+    },
+    /// Enviar formulário (já confirmado): monta os dados; responde `SubmitReady` ou
+    /// `SubmitFailed`. No mailto, o `SubmitReady` traz o endereço final, com o texto
+    /// `nome=valor` no corpo.
+    Submit {
+        target: crate::SubmitTarget,
+        format: crate::SubmitFormat,
+    },
     /// Campo Imagem: a figura do arquivo vira o ícone do botão.
     SetButtonIcon {
         page: i32,
@@ -368,6 +393,22 @@ pub enum Response {
     Exported {
         dest: PathBuf,
     },
+    SubmitReady {
+        target: crate::SubmitTarget,
+        body: Vec<u8>,
+        content_type: &'static str,
+    },
+    SubmitFailed(String),
+    FormDataExported {
+        path: PathBuf,
+        count: usize,
+    },
+    FormDataImported(crate::DataImport),
+    FormDataMerged {
+        dest: PathBuf,
+        count: usize,
+    },
+    FormDataFailed(String),
     ExportFailed(String),
     /// As anotações mudaram (edição, desfazer ou refazer): páginas mudadas (a renderizar de
     /// novo), as anotações visíveis delas e o estado do histórico.
@@ -748,6 +789,58 @@ impl State {
                     Err(e) => Response::OcrFailed(e),
                 });
             }
+            Request::ExportFormData { path, format } => {
+                send(match self.with_doc(|d| d.export_form_data(&path, format)) {
+                    Ok(count) => Response::FormDataExported { path, count },
+                    Err(e) => Response::FormDataFailed(e),
+                })
+            }
+            Request::ImportFormData { path } => {
+                let mut report = None;
+                self.edit_or(
+                    send,
+                    |d| {
+                        report = Some(d.import_form_data(&path)?);
+                        Ok(Changed::Document)
+                    },
+                    |e| Response::FormDataFailed(e.to_string()),
+                );
+                if let Some(r) = report {
+                    send(Response::FormDataImported(r));
+                }
+            }
+            Request::MergeFormData { files, dest } => {
+                send(match crate::merge_form_data(&files, &dest) {
+                    Ok(count) => Response::FormDataMerged { dest, count },
+                    Err(e) => Response::FormDataFailed(e.to_string()),
+                })
+            }
+            Request::Flatten { comments } => {
+                self.edit(send, |d| d.flatten(comments).map(|()| Changed::Document))
+            }
+            Request::Submit { target, format } => send(
+                // mailto: o endereço final já leva os dados no corpo
+                match self.with_doc(|d| match &target {
+                    crate::SubmitTarget::Mail(base) => Ok((
+                        crate::SubmitTarget::Mail(crate::form_data::mail_with_body(
+                            base,
+                            &d.submit_text()?,
+                        )),
+                        Vec::new(),
+                        "text/plain",
+                    )),
+                    crate::SubmitTarget::Http(_) => d
+                        .submit_payload(format)
+                        .map(|(b, t)| (target.clone(), b, t)),
+                }) {
+                    Ok((target, body, content_type)) => Response::SubmitReady {
+                        target,
+                        body,
+                        content_type,
+                    },
+                    Err(e) => Response::SubmitFailed(e),
+                },
+            ),
             Request::Export { format } => send(match self.with_doc(|d| d.export(format)) {
                 Ok(files) => Response::ExportedTo(files),
                 Err(e) => Response::ExportToFailed(e),

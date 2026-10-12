@@ -13,6 +13,13 @@ struct TextDraft {
     focused: bool,
     /// Calendário aberto (campo de data): (ano, mês) mostrado.
     calendar: Option<(i32, u32)>,
+    /// Nome do campo e se é senha (o preenchimento automático nunca guarda senha).
+    name: String,
+    password: bool,
+    /// Sugestão marcada com as setas.
+    suggest: Option<usize>,
+    /// Sugestões calculadas para este texto (refeitas só quando o texto muda).
+    suggested: Option<(String, Vec<String>)>,
 }
 
 /// O que o usuário pediu nos campos.
@@ -62,6 +69,10 @@ pub struct FormState {
     hover: Option<(i32, i32)>,
     /// Campo com o foco no quadro anterior (Em foco e Fora de foco).
     focus_prev: Option<(i32, i32)>,
+    /// Preenchimento automático (cópia das preferências) e a entrada nova a repassar (campo,
+    /// valor).
+    pub autofill: app_state::autofill::Autofill,
+    pub learned: Option<(String, String)>,
 }
 
 /// Uma ação disparada sem clique (abrir ou fechar página, mouse entra ou sai, foco) pode rodar?
@@ -150,6 +161,8 @@ impl Default for FormState {
             hover_now: None,
             hover: None,
             focus_prev: None,
+            autofill: Default::default(),
+            learned: None,
         }
     }
 }
@@ -193,7 +206,18 @@ impl FormState {
     /// Confirma o texto em edição (antes de salvar, imprimir ou abrir outro campo).
     pub fn commit(&mut self) -> Option<FieldAction> {
         let d = self.draft.take()?;
-        (d.text != d.original).then_some(FieldAction::Set {
+        self.finish(d)
+    }
+
+    /// Fecha o rascunho: o valor novo vai para o campo e para o preenchimento automático.
+    fn finish(&mut self, d: TextDraft) -> Option<FieldAction> {
+        if d.text == d.original {
+            return None;
+        }
+        if self.autofill.learn(&d.name, &d.text, d.password) {
+            self.learned = Some((d.name, d.text.clone()));
+        }
+        Some(FieldAction::Set {
             page: d.page,
             id: d.id,
             value: d.text,
@@ -413,6 +437,10 @@ fn open(st: &mut FormState, f: &FieldInfo, out: &mut Vec<FieldAction>) {
                 original: pdf_core::edit_text(&f.format, &f.value),
                 focused: false,
                 calendar: None,
+                name: f.name.clone(),
+                password: matches!(f.kind, FieldKind::Text { password: true, .. }),
+                suggest: None,
+                suggested: None,
             })
         }
         FieldKind::Combo { .. } | FieldKind::List { .. } => {
@@ -497,6 +525,30 @@ fn text_overlay(
         egui::Stroke::new(1.5, ui.visuals().selection.stroke.color),
         egui::StrokeKind::Outside,
     );
+    // preenchimento automático: a lista abaixo do campo (setas e Enter, ou clique)
+    let suggestions: Vec<String> = if password || multiline || !(resp.has_focus() || d.focused) {
+        Vec::new()
+    } else {
+        if d.suggested.as_ref().is_none_or(|(t, _)| *t != d.text) {
+            let list = st.autofill.suggestions(&d.name, &d.text);
+            let list = list.into_iter().map(str::to_string).collect();
+            d.suggested = Some((d.text.clone(), list));
+        }
+        d.suggested
+            .as_ref()
+            .map(|(_, l)| l.clone())
+            .unwrap_or_default()
+    };
+    if resp.changed() {
+        d.suggest = None;
+    }
+    if let Some(value) = suggestion_list(ui, d, &suggestions, r) {
+        d.text = limited(&value, max_len);
+        d.suggest = None;
+        d.focused = true;
+        resp.request_focus();
+        return;
+    }
     if resp.has_focus() {
         d.focused = true;
         return;
@@ -513,17 +565,66 @@ fn text_overlay(
             i.modifiers.shift,
         )
     });
-    let d = st.draft.take().expect("rascunho existe");
-    if !esc && d.text != d.original {
-        out.push(FieldAction::Set {
-            page: d.page,
-            id: d.id,
-            value: limited(&d.text, max_len),
-        });
+    let mut d = st.draft.take().expect("rascunho existe");
+    // Enter com uma sugestão marcada: ela entra no campo
+    if let Some(k) = d
+        .suggest
+        .filter(|_| ui.input(|i| i.key_pressed(egui::Key::Enter)))
+    {
+        if let Some(v) = suggestions.get(k) {
+            d.text = v.clone();
+        }
+    }
+    let key = (d.page, d.id);
+    if !esc {
+        d.text = limited(&d.text, max_len);
+        out.extend(st.finish(d));
     }
     if tab {
-        st.tab(fields, (d.page, d.id), shift);
+        st.tab(fields, key, shift);
     }
+}
+
+/// A lista de sugestões abaixo do campo; as setas marcam. Devolve a clicada.
+fn suggestion_list(
+    ui: &mut egui::Ui,
+    d: &mut TextDraft,
+    suggestions: &[String],
+    r: egui::Rect,
+) -> Option<String> {
+    if suggestions.is_empty() {
+        d.suggest = None;
+        return None;
+    }
+    let n = suggestions.len();
+    let (down, up) = ui.input_mut(|i| {
+        (
+            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+        )
+    });
+    if down {
+        d.suggest = Some(d.suggest.map_or(0, |k| (k + 1) % n));
+    } else if up {
+        d.suggest = Some(d.suggest.map_or(n - 1, |k| (k + n - 1) % n));
+    }
+    let mut picked = None;
+    egui::Area::new(egui::Id::new(("sugestoes", d.page, d.id)))
+        .fixed_pos(r.left_bottom() + egui::vec2(0.0, 2.0))
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(r.width().max(120.0));
+                for (k, v) in suggestions.iter().enumerate() {
+                    let item = ui.selectable_label(d.suggest == Some(k), v.as_str());
+                    // no aperto do botão: o clique tira o foco do campo antes de soltar
+                    if item.hovered() && ui.input(|i| i.pointer.primary_pressed()) {
+                        picked = Some(v.clone());
+                    }
+                }
+            });
+        });
+    picked
 }
 
 /// Botão do calendário ao lado do campo e o calendário aberto. Devolve a data escolhida.
@@ -725,6 +826,41 @@ pub fn bar(ui: &mut egui::Ui, st: &mut FormState) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    fn draft(text: &str, password: bool) -> TextDraft {
+        TextDraft {
+            page: 0,
+            id: 1,
+            text: text.into(),
+            original: String::new(),
+            focused: true,
+            calendar: None,
+            name: "nome".into(),
+            password,
+            suggest: None,
+            suggested: None,
+        }
+    }
+
+    #[test]
+    fn typed_values_are_learned_but_never_passwords() {
+        let mut st = FormState {
+            draft: Some(draft("segredo", true)),
+            ..Default::default()
+        };
+        assert!(st.commit().is_some());
+        assert!(st.learned.is_none() && st.autofill.entries.is_empty());
+        st.draft = Some(draft("Ana Lima", false));
+        assert!(st.commit().is_some());
+        assert_eq!(st.learned, Some(("nome".into(), "Ana Lima".into())));
+        assert_eq!(st.autofill.suggestions("x", "an"), ["Ana Lima"]);
+        // mesmo valor de novo: a lista não muda (não regrava as preferências)
+        st.learned = None;
+        st.draft = Some(draft("Ana Lima", false));
+        st.commit();
+        assert!(st.learned.is_none());
+    }
+
     use super::*;
     use pdf_core::PdfRect;
 
