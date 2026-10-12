@@ -459,7 +459,7 @@ fn begin(e: &BytesStart) -> Option<XfdfAnnot> {
 }
 
 /// Entidades do XML que valem dentro do texto (as declaradas no DOCTYPE não são expandidas).
-fn entity(name: &str) -> Option<char> {
+pub(crate) fn entity(name: &str) -> Option<char> {
     Some(match name {
         "amp" => '&',
         "lt" => '<',
