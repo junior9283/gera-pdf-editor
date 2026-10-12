@@ -63,3 +63,59 @@ fn huge_page_is_skipped_fast() {
     assert_eq!(d.detect_fields(&[0]).unwrap(), 0);
     assert!(t.elapsed().as_secs_f32() < 5.0, "{:?}", t.elapsed());
 }
+
+#[test]
+fn hostile_pages_finish_quickly() {
+    let dir = tempfile::tempdir().unwrap();
+    // um único caminho com 200 mil retângulos (o teto não pode ser só por caminho) e 40 mil
+    // palavras de sublinhado
+    let mut path = String::new();
+    for k in 0..200_000 {
+        path.push_str(&format!("{} {} 12 12 re ", k % 500, (k / 500) % 700));
+    }
+    path.push_str("S ");
+    let mut text = String::from("BT /F1 4 Tf 0 0 Td ");
+    for k in 0..40_000 {
+        text.push_str(&format!(
+            "({}) Tj 0 {} Td ",
+            "_____ ",
+            if k % 100 == 0 { 7 } else { 0 }
+        ));
+    }
+    text.push_str("ET");
+    // logo abaixo do teto de traços: 19 mil caixas de campo, com 40 mil palavras comuns
+    let mut both = String::new();
+    for k in 0..19_000 {
+        both.push_str(&format!("{} {} 50 20 re S ", (k % 10) * 55, (k / 10) % 700));
+    }
+    both.push_str("BT /F1 3 Tf 0 0 Td ");
+    for k in 0..40_000 {
+        both.push_str(&format!(
+            "(a ) Tj 0 {} Td ",
+            if k % 200 == 0 { 4 } else { 0 }
+        ));
+    }
+    both.push_str("ET");
+    for (name, content) in [
+        ("caminho.pdf", path),
+        ("palavras.pdf", text),
+        ("ambos.pdf", both),
+    ] {
+        let objs = vec![
+            "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>".into(),
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R\
+             /Resources<</Font<</F1 5 0 R>>>>>>"
+                .into(),
+            format!("<</Length {}>>stream\n{content}\nendstream", content.len()),
+            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".into(),
+        ];
+        let p = dir.path().join(name);
+        std::fs::write(&p, pdf_core::sample::pdf_from_objects(&objs)).unwrap();
+        let mut d = PdfDoc::open(&p, None).unwrap();
+        let t = std::time::Instant::now();
+        let n = d.detect_fields(&[0]).unwrap();
+        assert!(n <= 400, "{name}: {n}");
+        assert!(t.elapsed().as_secs_f32() < 3.0, "{name}: {:?}", t.elapsed());
+    }
+}

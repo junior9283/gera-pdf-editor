@@ -27,6 +27,11 @@ pub(crate) struct Candidate {
 
 /// Página com mais traços que isso é pulada (desenho técnico, PDF hostil).
 pub(crate) const MAX_SHAPES: usize = 20_000;
+/// Palavras, propostas analisadas e campos existentes por página, no máximo (o custo cresce com o
+/// produto deles).
+const MAX_WORDS: usize = 20_000;
+const MAX_PROPOSALS: usize = 2_000;
+const MAX_EXISTING: usize = 2_000;
 /// Campos detectados por página, no máximo.
 const MAX_FIELDS: usize = 400;
 /// Altura do campo de texto sobre uma linha.
@@ -154,14 +159,24 @@ pub(crate) fn detect_candidates(
     words: &[Word],
     existing: &[PdfRect],
 ) -> Vec<Candidate> {
-    if shapes.len() > MAX_SHAPES {
+    // página hostil (ou desenho técnico): grande demais para olhar campo a campo
+    if shapes.len() > MAX_SHAPES || words.len() > MAX_WORDS || existing.len() > MAX_EXISTING {
         return Vec::new();
     }
-    let has_text = |r: &PdfRect| words.iter().any(|w| !is_blank(w) && center_in(&w.rect, r));
+    // cada consulta ao texto percorre as palavras: o número de consultas também tem teto
+    let checks = std::cell::Cell::new(0usize);
+    let has_text = |r: &PdfRect| {
+        checks.set(checks.get() + 1);
+        words.iter().any(|w| !is_blank(w) && center_in(&w.rect, r))
+    };
+    let full = || checks.get() >= MAX_PROPOSALS;
     // (retângulo, é caixa de seleção, nome que veio junto do sublinhado)
     let mut proposals: Vec<(PdfRect, bool, Option<String>)> = Vec::new();
     let mut lines: Vec<(f32, f32, f32)> = Vec::new();
     for s in shapes {
+        if full() {
+            break;
+        }
         match *s {
             Shape::Rect(r) => {
                 let (w, h) = (r.width(), r.height());
@@ -187,6 +202,9 @@ pub(crate) fn detect_candidates(
     }
     // "_____" no texto: o campo sobre a sequência (o texto antes dela, na mesma palavra, é o rótulo)
     for w in words {
+        if proposals.len() >= MAX_PROPOSALS {
+            break;
+        }
         let chars: Vec<char> = w.text.chars().collect();
         let Some(start) = chars.iter().position(|c| *c == '_') else {
             continue;
@@ -203,6 +221,9 @@ pub(crate) fn detect_candidates(
         proposals.push((rect, false, clean(&prefix)));
     }
     for (x0, x1, y) in lines {
+        if full() || proposals.len() >= MAX_PROPOSALS {
+            break;
+        }
         let rect = PdfRect::new(x0, y - LINE_FIELD_H, x1, y - 0.5);
         if !has_text(&rect) {
             proposals.push((rect, false, None));
@@ -247,6 +268,10 @@ struct Collector {
 impl Collector {
     fn flush(&mut self) {
         let pts = std::mem::take(&mut self.sub);
+        // um caminho só com milhões de pedaços: para no teto (a página é pulada)
+        if self.out.len() > MAX_SHAPES {
+            return;
+        }
         match pts.len() {
             2 => self.out.push(Shape::Line {
                 a: pts[0],
