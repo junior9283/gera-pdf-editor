@@ -22,10 +22,11 @@ pub enum FieldAction {
         id: i32,
         value: String,
     },
-    /// Botão com a ação Redefinir formulário (página e id do botão).
-    Reset {
+    /// Executar as ações do campo para este gatilho (clique, mouse entra e sai, foco).
+    Run {
         page: i32,
         id: i32,
+        trigger: pdf_core::FieldTrigger,
     },
     /// Campo de assinatura clicado (página e retângulo do campo).
     Sign {
@@ -56,6 +57,25 @@ pub struct FormState {
     pub notes: pdf_core::FormNotes,
     /// Valor recusado pelo campo: o aviso (janela, como o alerta do Acrobat).
     pub alert: Option<String>,
+    /// Campo sob o mouse neste quadro e no anterior (Mouse entra e Mouse sai).
+    pub hover_now: Option<(i32, i32)>,
+    hover: Option<(i32, i32)>,
+    /// Campo com o foco no quadro anterior (Em foco e Fora de foco).
+    focus_prev: Option<(i32, i32)>,
+}
+
+/// O clique num campo com ações: Mouse para baixo e Mouse para cima (como no Acrobat).
+pub fn click_actions(f: &FieldInfo) -> Vec<FieldAction> {
+    use pdf_core::FieldTrigger as T;
+    [T::MouseDown, T::MouseUp]
+        .into_iter()
+        .filter(|t| f.actions.iter().any(|(x, _)| x == t))
+        .map(|trigger| FieldAction::Run {
+            page: f.page,
+            id: f.id,
+            trigger,
+        })
+        .collect()
 }
 
 /// O texto digitado, se a Tecla do campo o aceita; senão o de antes (a tecla não entra).
@@ -105,11 +125,34 @@ impl Default for FormState {
             combo_text: String::new(),
             notes: Default::default(),
             alert: None,
+            hover_now: None,
+            hover: None,
+            focus_prev: None,
         }
     }
 }
 
 impl FormState {
+    /// Mouse entra e sai e Em foco e Fora de foco desde o quadro anterior (chamar uma vez por
+    /// quadro, depois das páginas).
+    pub fn trigger_events(&mut self) -> Vec<(i32, i32, pdf_core::FieldTrigger)> {
+        use pdf_core::FieldTrigger as T;
+        let mut out = Vec::new();
+        let now = self.hover_now.take();
+        if now != self.hover {
+            out.extend(self.hover.map(|(p, id)| (p, id, T::MouseExit)));
+            out.extend(now.map(|(p, id)| (p, id, T::MouseEnter)));
+            self.hover = now;
+        }
+        let focus = self.draft.as_ref().map(|d| (d.page, d.id)).or(self.focused);
+        if focus != self.focus_prev {
+            out.extend(self.focus_prev.map(|(p, id)| (p, id, T::Blur)));
+            out.extend(focus.map(|(p, id)| (p, id, T::Focus)));
+            self.focus_prev = focus;
+        }
+        out
+    }
+
     /// Um campo (caixa, opção, lista) tem o foco do teclado: o Espaço e o Enter são dele.
     pub fn has_focus(&self) -> bool {
         self.focused.is_some()
@@ -263,9 +306,13 @@ pub fn on_page(
                 surrender_egui_focus(ui);
             }
         }
+        if resp.hovered() {
+            st.hover_now = Some(key);
+        }
         if resp.clicked() {
             st.focused = Some(key);
             open(st, f, &mut out);
+            out.extend(click_actions(f));
         }
         if st.focused == Some(key)
             && ui.input(|i| i.pointer.any_pressed())
@@ -287,6 +334,7 @@ pub fn on_page(
                 ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter));
             if activate && !resp.clicked() {
                 open(st, f, &mut out);
+                out.extend(click_actions(f));
             }
             // consumido: senão o campo seguinte, no mesmo quadro, veria o mesmo Tab e passaria adiante
             let shift = ui.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
@@ -344,10 +392,6 @@ fn open(st: &mut FormState, f: &FieldInfo, out: &mut Vec<FieldAction>) {
                 calendar: None,
             })
         }
-        FieldKind::Button { reset: true } => out.push(FieldAction::Reset {
-            page: f.page,
-            id: f.id,
-        }),
         FieldKind::Combo { .. } | FieldKind::List { .. } => {
             st.choices = Some((f.page, f.id));
             st.combo_text = f.value.clone();
@@ -699,12 +743,59 @@ mod tests {
     }
 
     #[test]
-    fn a_reset_button_asks_to_clear_the_form() {
-        let mut st = FormState::default();
-        let mut out = Vec::new();
-        let b = f(1, 0, 0.0, 0.0, "Limpar", FieldKind::Button { reset: true });
-        open(&mut st, &b, &mut out);
-        assert!(matches!(out[..], [FieldAction::Reset { .. }]));
+    fn button_click_runs_mouse_up_actions() {
+        use pdf_core::{ActionKind, FieldTrigger as T};
+        let mut b = f(1, 0, 0.0, 0.0, "Limpar", FieldKind::Button { reset: true });
+        assert!(click_actions(&b).is_empty(), "sem ações, nada a executar");
+        b.actions = vec![(T::MouseUp, ActionKind::Named("NextPage".into()))];
+        assert!(matches!(
+            click_actions(&b)[..],
+            [FieldAction::Run {
+                trigger: T::MouseUp,
+                ..
+            }]
+        ));
+        b.actions
+            .push((T::MouseDown, ActionKind::Named("Print".into())));
+        assert!(matches!(
+            click_actions(&b)[..],
+            [
+                FieldAction::Run {
+                    trigger: T::MouseDown,
+                    ..
+                },
+                FieldAction::Run {
+                    trigger: T::MouseUp,
+                    ..
+                }
+            ]
+        ));
+    }
+
+    #[test]
+    fn hover_runs_enter_and_exit() {
+        use pdf_core::FieldTrigger as T;
+        let mut st = FormState {
+            hover_now: Some((0, 1)),
+            ..Default::default()
+        };
+        assert_eq!(st.trigger_events(), vec![(0, 1, T::MouseEnter)]);
+        st.hover_now = Some((0, 1));
+        assert!(st.trigger_events().is_empty(), "continua sobre o mesmo");
+        st.hover_now = Some((0, 2));
+        assert_eq!(
+            st.trigger_events(),
+            vec![(0, 1, T::MouseExit), (0, 2, T::MouseEnter)]
+        );
+        assert_eq!(
+            st.trigger_events(),
+            vec![(0, 2, T::MouseExit)],
+            "saiu de todos"
+        );
+        st.focused = Some((0, 3));
+        assert_eq!(st.trigger_events(), vec![(0, 3, T::Focus)]);
+        st.focused = None;
+        assert_eq!(st.trigger_events(), vec![(0, 3, T::Blur)]);
     }
 
     fn f(id: i32, page: i32, y: f32, x: f32, name: &str, kind: FieldKind) -> FieldInfo {

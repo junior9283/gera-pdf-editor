@@ -232,7 +232,10 @@ fn hidden_widgets_are_marked_hidden() {
     let d = PdfDoc::open(&path, None).unwrap();
     // listado (o Preparar mostra e o cálculo usa), mas oculto: o preenchimento o pula
     let f = d.fields(0).unwrap();
-    assert!(f.iter().find(|f| f.name == "nome").is_some_and(|f| f.hidden));
+    assert!(f
+        .iter()
+        .find(|f| f.name == "nome")
+        .is_some_and(|f| f.hidden));
 }
 
 #[test]

@@ -171,6 +171,8 @@ pub struct DocTab {
     layers_panel: crate::layers_panel::LayersPanel,
     /// Diálogo Rótulos de página aberto.
     labels_dialog: Option<crate::page_labels_dialog::PageLabelsDialog>,
+    /// Propriedades da página (ações de abrir e fechar).
+    page_props: Option<crate::shell::page_props::PagePropsWindow>,
     /// Usar números lógicos de página (preferência; o app atualiza).
     pub(crate) logical_pages: bool,
     /// Texto da caixa de página com rótulos (enquanto se digita).
@@ -218,6 +220,11 @@ pub struct DocTab {
     pub(crate) annots: Vec<AnnotInfo>,
     /// Campos de formulário de todas as páginas.
     pub(crate) fields: Vec<pdf_core::FieldInfo>,
+    /// Gatilhos de ações de campo a executar (página, id, gatilho).
+    field_triggers: Vec<(i32, i32, pdf_core::FieldTrigger)>,
+    /// Ações de abrir e fechar página (só das páginas que as têm) e a página da última vez.
+    page_actions: Vec<(i32, Vec<(pdf_core::PageTrigger, pdf_core::ActionKind)>)>,
+    action_page: Option<i32>,
     /// Estado do histórico de edições no worker.
     history: HistoryState,
     /// O motor de PDF (thread do worker) parou; já avisado.
@@ -382,6 +389,7 @@ impl DocTab {
             thumbs: Default::default(),
             copy_pending: None,
             labels_dialog: None,
+            page_props: None,
             destinations_panel: Default::default(),
             layers_panel: Default::default(),
             logical_pages: true,
@@ -403,6 +411,9 @@ impl DocTab {
             edit: EditState::default(),
             annots: Vec::new(),
             fields: Vec::new(),
+            field_triggers: Vec::new(),
+            page_actions: Vec::new(),
+            action_page: None,
             history: HistoryState::default(),
             engine_stopped: false,
             outline: Vec::new(),
@@ -1184,6 +1195,7 @@ impl DocTab {
             self.worker.send(r);
         }
         self.form.notes = summary.form_notes;
+        self.page_actions = summary.page_actions.clone();
         self.outline = summary.outline;
         self.links = summary.links;
         self.attachments = summary.attachments;
@@ -1661,6 +1673,7 @@ impl DocTab {
                                         &f.kind,
                                         props,
                                         self.field_names(),
+                                        self.view.as_ref().map_or(0, |v| v.sizes.len()),
                                     ));
                             }
                             (Err(e), _) => {
@@ -2402,6 +2415,19 @@ impl DocTab {
                 }
             }
         }
+        let names = self.field_names();
+        if let Some(done) = self
+            .page_props
+            .as_mut()
+            .and_then(|w| w.show(ui.ctx(), &names))
+        {
+            if let (Some(w), Some(actions)) = (self.page_props.take(), done) {
+                self.send_prepare(pdf_core::PrepareOp::SetPageActions {
+                    page: w.page,
+                    actions,
+                });
+            }
+        }
         if let Some(ok) = self.labels_dialog.as_mut().and_then(|d| d.show(ui.ctx())) {
             if let Some(d) = self.labels_dialog.take().filter(|_| ok) {
                 let (from, to, new) = d.request();
@@ -2474,6 +2500,7 @@ impl DocTab {
         self.sign_window(ui.ctx());
         self.split_window(ui);
         self.calc_order_window(ui.ctx());
+        self.run_field_triggers(ui.ctx());
         // pedidos do menu de contexto (e do menu Organizar)
         for cmd in std::mem::take(&mut self.prepare.cmds) {
             self.run_arrange(cmd);
@@ -2715,6 +2742,18 @@ impl DocTab {
                 ThumbAction::Zoom(width) => self.events.push(DocEvent::ThumbWidth(width)),
                 ThumbAction::CopyTo { pages, target } => self.copy_pages(pages, target),
                 ThumbAction::DragOut(pages) => self.events.push(DocEvent::DragPagesOut(pages)),
+                ThumbAction::PageProps(page) => {
+                    let total = self.view.as_ref().map_or(0, |v| v.sizes.len());
+                    let actions = self
+                        .page_actions
+                        .iter()
+                        .find(|(p, _)| *p == page)
+                        .map(|(_, a)| a.clone())
+                        .unwrap_or_default();
+                    self.page_props = Some(crate::shell::page_props::PagePropsWindow::new(
+                        page, actions, total,
+                    ));
+                }
                 ThumbAction::Labels(pages) => {
                     let total = self.view.as_ref().map_or(0, |v| v.sizes.len());
                     self.labels_dialog = Some(crate::page_labels_dialog::PageLabelsDialog::new(
@@ -3555,6 +3594,103 @@ impl DocTab {
         }
     }
 
+    /// Executa as ações de campo pedidas neste quadro (clique, mouse entra e sai, foco) e as de
+    /// abrir e fechar página quando a página atual muda (fora do Preparar, como no Acrobat).
+    fn run_field_triggers(&mut self, ctx: &egui::Context) {
+        use pdf_core::PageTrigger;
+        let filling = !self.prepare_tools || self.prepare.preview;
+        let mut todo: Vec<(i32, i32, pdf_core::ActionKind)> = Vec::new();
+        for (page, id, trigger) in std::mem::take(&mut self.field_triggers) {
+            if let Some(f) = self.fields.iter().find(|f| f.page == page && f.id == id) {
+                todo.extend(
+                    f.actions
+                        .iter()
+                        .filter(|(t, _)| *t == trigger)
+                        .map(|(_, a)| (page, id, a.clone())),
+                );
+            }
+        }
+        let current = self.last.current_page as i32;
+        if filling && self.view.is_some() && self.action_page != Some(current) {
+            let of = |p: Option<i32>, t: PageTrigger| -> Vec<pdf_core::ActionKind> {
+                self.page_actions
+                    .iter()
+                    .filter(|(page, _)| Some(*page) == p)
+                    .flat_map(|(_, list)| list.iter().filter(|(x, _)| *x == t))
+                    .map(|(_, a)| a.clone())
+                    .collect()
+            };
+            let mut page_todo = of(self.action_page, PageTrigger::Close);
+            page_todo.extend(of(Some(current), PageTrigger::Open));
+            todo.extend(page_todo.into_iter().map(|a| (current, -1, a)));
+            self.action_page = Some(current);
+        } else if !filling {
+            self.action_page = None;
+        }
+        for (page, id, action) in todo {
+            self.run_action(ctx, page, id, action);
+        }
+    }
+
+    /// Uma ação de campo ou de página. JavaScript e as ações que o app não executa só avisam.
+    fn run_action(
+        &mut self,
+        ctx: &egui::Context,
+        page: i32,
+        id: i32,
+        action: pdf_core::ActionKind,
+    ) {
+        use pdf_core::ActionKind as A;
+        match action {
+            A::GoTo { page } => self.jump(page, None),
+            A::ShowHide { fields, hide } => self.worker.send(Request::ShowFields {
+                names: fields,
+                hide,
+            }),
+            A::Reset { fields, exclude } => {
+                self.worker.send(Request::ResetFields { fields, exclude })
+            }
+            A::Named(n) => match n.as_str() {
+                "NextPage" => self.run(ctx, DocCommand::NextPage),
+                "PrevPage" => self.run(ctx, DocCommand::PrevPage),
+                "FirstPage" => self.run(ctx, DocCommand::FirstPage),
+                "LastPage" => self.run(ctx, DocCommand::LastPage),
+                "GoBack" => self.run(ctx, DocCommand::ViewBack),
+                "GoForward" => self.run(ctx, DocCommand::ViewForward),
+                "Find" => self.run(ctx, DocCommand::Find),
+                "Print" => self.events.push(DocEvent::Run(Command::Print)),
+                "FullScreen" => self.events.push(DocEvent::Run(Command::FullScreen)),
+                other => {
+                    self.status = format!(
+                        "O item de menu «{}» ainda não é executado pelo app.",
+                        crate::links::safe_display(other)
+                    )
+                }
+            },
+            A::Uri(_) | A::Launch(_) => {
+                // as mesmas regras e avisos dos links: só endereços permitidos e só PDF
+                if let Some(target) = pdf_core::action_link(&action, &self.path) {
+                    self.events.push(DocEvent::OpenLink(target));
+                }
+            }
+            A::ImportIcon => self.pick_button_icon(page, id),
+            A::JavaScript(_) => {
+                self.status = "Este formulário tem JavaScript que o app não executa.".into()
+            }
+            A::Other { kind, .. } => {
+                self.status = format!(
+                    "A ação «{}» ainda não é executada pelo app.",
+                    crate::links::safe_display(&kind)
+                )
+            }
+        }
+    }
+
+    /// Campo Imagem: escolher a figura do botão (Tarefa 6).
+    fn pick_button_icon(&mut self, _page: i32, _id: i32) {
+        self.status = "Escolher a imagem do botão ainda não está disponível.".into();
+    }
+
     /// Janela Duplicar ou Criar várias cópias (com a prévia na página).
     fn arrange_window(&mut self, ctx: &egui::Context) {
         let pages = self.view.as_ref().map_or(0, |v| v.sizes.len());
@@ -3903,9 +4039,9 @@ impl DocTab {
                 crate::fields::FieldAction::Set { page, id, value } => {
                     self.worker.send(Request::SetField { page, id, value })
                 }
-                // botão Redefinir formulário: limpa na hora (como o Acrobat; o desfazer volta)
-                crate::fields::FieldAction::Reset { page, id } => {
-                    self.worker.send(Request::PressReset { page, id })
+                // ações do campo (botões, Mouse para cima…): executadas depois, com a aba livre
+                crate::fields::FieldAction::Run { page, id, trigger } => {
+                    self.field_triggers.push((page, id, trigger))
                 }
                 // como no Acrobat: com Preencher e assinar ativo, o campo recebe a assinatura
                 // manuscrita; senão, o campo vazio abre a assinatura com ID digital
@@ -3931,6 +4067,9 @@ impl DocTab {
                 }
             }
         }
+        // Mouse entra e sai, Em foco e Fora de foco
+        let events = self.form.trigger_events();
+        self.field_triggers.extend(events);
         let now = ui.input(|i| i.time);
         if self.last.turn != 0 && now - self.turned_at > 0.25 && view.turn(self.last.turn) {
             self.turned_at = now;

@@ -32,6 +32,10 @@ pub struct FieldPropsWindow {
     calc: CalcDraft,
     /// Os outros campos do documento (para o Calcular).
     names: Vec<String>,
+    /// Aba Ações e os campos que as ações podem citar (todos, inclusive este).
+    actions: crate::shell::actions_editor::ActionsEditor<pdf_core::FieldTrigger>,
+    all_names: Vec<String>,
+    pages: usize,
 }
 
 impl FieldPropsWindow {
@@ -41,6 +45,7 @@ impl FieldPropsWindow {
         kind: &FieldKind,
         props: FieldProps,
         names: Vec<String>,
+        pages: usize,
     ) -> Self {
         let kind = match kind {
             FieldKind::Text { .. } => Kind::Text,
@@ -59,6 +64,12 @@ impl FieldPropsWindow {
             format: FormatDraft::from(&props.format),
             validate: ValidateDraft::from(&props.validate),
             calc: CalcDraft::from(&props.calc),
+            actions: crate::shell::actions_editor::ActionsEditor::new(
+                props.actions.clone(),
+                &pdf_core::FieldTrigger::ALL,
+            ),
+            all_names: names.clone(),
+            pages,
             names: names.into_iter().filter(|n| *n != props.name).collect(),
             max_len: props.max_len.map_or_else(String::new, |n| n.to_string()),
             props,
@@ -82,20 +93,22 @@ impl FieldPropsWindow {
     }
 
     fn contents(&mut self, ui: &mut egui::Ui) -> Option<Option<FieldProps>> {
+        let mut tabs = vec![(Tab::General, "Geral"), (Tab::Actions, "Ações")];
         if self.kind == Kind::Text {
-            ui.horizontal(|ui| {
-                for (tab, label) in [
-                    (Tab::General, "Geral"),
-                    (Tab::Format, "Formatar"),
-                    (Tab::Validate, "Validar"),
-                    (Tab::Calculate, "Calcular"),
-                ] {
-                    ui.selectable_value(&mut self.tab, tab, label);
-                }
-            });
-            ui.separator();
+            tabs.extend([
+                (Tab::Format, "Formatar"),
+                (Tab::Validate, "Validar"),
+                (Tab::Calculate, "Calcular"),
+            ]);
         }
+        ui.horizontal(|ui| {
+            for (tab, label) in tabs {
+                ui.selectable_value(&mut self.tab, tab, label);
+            }
+        });
+        ui.separator();
         match self.tab {
+            Tab::Actions => self.actions.ui(ui, &self.all_names, self.pages),
             Tab::Format => self.format.ui(ui),
             Tab::Validate => self.validate.ui(ui),
             Tab::Calculate => self.calc.ui(ui, &self.names),
@@ -112,6 +125,7 @@ impl FieldPropsWindow {
                     props.validate = self.validate.validate();
                     props.calc = self.calc.calc();
                 }
+                props.actions = self.actions.list.clone();
                 out = Some(Some(props));
             }
             if ui.button("Cancelar").clicked() {
@@ -496,6 +510,7 @@ impl CalcDraft {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     General,
+    Actions,
     Format,
     Validate,
     Calculate,

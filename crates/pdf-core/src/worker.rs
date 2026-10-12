@@ -126,10 +126,16 @@ pub enum Request {
     },
     /// Limpar formulário (valores padrão).
     ResetForm,
-    /// Clique num botão com a ação Redefinir formulário (só os campos da ação).
-    PressReset {
-        page: i32,
-        id: i32,
+    /// Ação Redefinir formulário: os campos `fields` (todos, se vazio); com `exclude`, todos
+    /// menos eles.
+    ResetFields {
+        fields: Vec<String>,
+        exclude: bool,
+    },
+    /// Ação Mostrar/ocultar campos (não entra no desfazer, como no Acrobat).
+    ShowFields {
+        names: Vec<String>,
+        hide: bool,
     },
     /// Preparar formulário: criar, editar, mover ou excluir um campo.
     Prepare(crate::PrepareOp),
@@ -691,8 +697,11 @@ impl State {
                 },
             ),
             Request::ResetForm => self.edit(send, |d| d.reset_form().map(|()| Changed::Document)),
-            Request::PressReset { page, id } => self.edit(send, |d| {
-                d.press_reset(page, id).map(|()| Changed::Document)
+            Request::ResetFields { fields, exclude } => self.edit(send, |d| {
+                d.reset_named(&fields, exclude).map(|()| Changed::Document)
+            }),
+            Request::ShowFields { names, hide } => self.edit(send, |d| {
+                d.show_fields(&names, hide).map(|_| Changed::Fields)
             }),
             Request::SignDigitally {
                 place,

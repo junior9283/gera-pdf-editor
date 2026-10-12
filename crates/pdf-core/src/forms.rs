@@ -644,6 +644,15 @@ impl PdfDoc {
         self.reset_fields(filter.as_ref())
     }
 
+    /// Ação Redefinir formulário: os campos `fields` (todos, se vazio); com `exclude`, todos menos
+    /// eles.
+    pub fn reset_named(&mut self, fields: &[String], exclude: bool) -> Result<()> {
+        if fields.is_empty() && !exclude {
+            return self.reset_fields(None);
+        }
+        self.reset_fields(Some(&(fields.to_vec(), exclude)))
+    }
+
     /// Limpar formulário: todos os campos voltam ao valor padrão (desfazer por instantâneo).
     pub fn reset_form(&mut self) -> Result<()> {
         self.reset_fields(None)

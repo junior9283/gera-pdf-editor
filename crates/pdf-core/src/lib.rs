@@ -69,6 +69,7 @@ pub use form_scripts::{
 };
 pub use forms::{FieldInfo, FieldKind, FormNotes};
 pub use layers::LayerNode;
+pub use links::action_link;
 pub use ocr::{tessdata_dir, OcrLanguage, OcrReport};
 pub use page_labels::{apply_labels, format_label, label_list, PageLabelRange, PageLabelStyle};
 pub use pagination::{
