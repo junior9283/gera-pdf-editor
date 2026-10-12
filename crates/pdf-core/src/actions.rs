@@ -95,6 +95,11 @@ pub enum ActionKind {
     JavaScript(String),
     /// Campo Imagem do Acrobat: escolher a imagem do botão (`event.target.buttonImportIcon();`).
     ImportIcon,
+    /// Enviar o formulário para um endereço (http, https ou mailto), no formato pedido.
+    Submit {
+        url: String,
+        format: crate::form_data::SubmitFormat,
+    },
     /// Outra ação (multimídia, 3D, Enviar…), preservada como estava: (tipo, objeto em texto).
     Other { kind: String, raw: String },
 }
@@ -120,6 +125,9 @@ impl ActionKind {
             Self::Launch(f) => format!("Abrir um arquivo: {f}"),
             Self::JavaScript(_) => "Executar um JavaScript (não executado pelo app)".into(),
             Self::ImportIcon => "Escolher a imagem do botão".into(),
+            Self::Submit { url, format } => {
+                format!("Enviar o formulário ({}) para {url}", format.label())
+            }
             Self::Other { kind, .. } => format!("Outra ação ({kind})"),
         }
     }
@@ -235,6 +243,21 @@ fn read_one(doc: &PdfDocument, a: &PdfObject) -> Result<ActionKind> {
                 .is_some_and(|f| f & 1 != 0),
         },
         "Named" => ActionKind::Named(name_of(a, "N").unwrap_or_default()),
+        // só /F e /Flags com o formato: com /Fields ou outros bits, fica como está (Other)
+        "SubmitForm" if a.get_dict("Fields")?.is_none() => {
+            let url = match a.get_dict("F")? {
+                Some(f) if f.is_dict()? => crate::pdf_obj::text(&f, "F"),
+                Some(f) => f.as_string().unwrap_or_default(),
+                None => String::new(),
+            };
+            let flags = crate::pdf_obj::get(a, "Flags")
+                .and_then(|f| f.as_int().ok())
+                .unwrap_or(0);
+            match crate::form_data::SubmitFormat::from_flags(flags) {
+                Some(format) => ActionKind::Submit { url, format },
+                None => other(a, &kind)?,
+            }
+        }
         "Launch" => {
             let file = match a.get_dict("F")? {
                 Some(f) if f.is_dict()? => f
@@ -395,6 +418,11 @@ fn action_obj(doc: &PdfDocument, a: &ActionKind) -> Result<Option<PdfObject>> {
         ActionKind::JavaScript(js) => {
             s(&mut d, "JavaScript")?;
             d.dict_put("JS", PdfObject::new_string(js)?)?;
+        }
+        ActionKind::Submit { url, format } => {
+            s(&mut d, "SubmitForm")?;
+            d.dict_put("F", PdfObject::new_string(url)?)?;
+            d.dict_put("Flags", PdfObject::new_int(format.flags())?)?;
         }
         ActionKind::ImportIcon => {
             s(&mut d, "JavaScript")?;

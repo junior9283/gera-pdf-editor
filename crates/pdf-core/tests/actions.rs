@@ -121,7 +121,7 @@ fn next_cycle_is_cut() {
 #[test]
 fn unknown_actions_are_kept() {
     let dir = tempfile::tempdir().unwrap();
-    let path = button_pdf(&dir, "<</S/SubmitForm/F(https://x.y/z)/Flags 4>>", &[]);
+    let path = button_pdf(&dir, "<</S/SubmitForm/F(https://x.y/z)/Flags 6>>", &[]);
     let mut d = PdfDoc::open(&path, None).unwrap();
     let id = d.fields(0).unwrap()[0].id;
     let mut p = d.field_props(0, id).unwrap();
@@ -245,4 +245,70 @@ fn a_go_to_outside_the_document_does_not_block_editing() {
     );
     p.actions.push((T::MouseEnter, A::Named("Print".into())));
     d.set_field_props(0, id, &p).unwrap();
+}
+
+#[test]
+fn submit_action_round_trips() {
+    use pdf_core::SubmitFormat as F;
+    let dir = tempfile::tempdir().unwrap();
+    let path = button_pdf(
+        &dir,
+        "<</S/SubmitForm/F(https://exemplo.com/recebe)/Flags 32>>",
+        &[],
+    );
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let f = d.fields(0).unwrap();
+    assert_eq!(
+        f[0].actions[0].1,
+        A::Submit {
+            url: "https://exemplo.com/recebe".into(),
+            format: F::Xfdf
+        }
+    );
+    let id = f[0].id;
+    let mut p = d.field_props(0, id).unwrap();
+    p.actions = vec![(
+        T::MouseUp,
+        A::Submit {
+            url: "mailto:rh@exemplo.com".into(),
+            format: F::Html,
+        },
+    )];
+    d.set_field_props(0, id, &p).unwrap();
+    d.save(&path).unwrap();
+    let d = PdfDoc::open(&path, None).unwrap();
+    assert_eq!(d.field_props(0, id).unwrap().actions, p.actions);
+}
+
+#[test]
+fn submit_payloads_and_targets() {
+    use pdf_core::SubmitFormat as F;
+    let (_d, _p, mut d) = doc(1);
+    let id = d
+        .add_field(0, r(100.0), NewFieldKind::Text, "Nome")
+        .unwrap();
+    d.set_field(0, id, "Ana & Bia").unwrap();
+    let (html, kind) = d.submit_payload(F::Html).unwrap();
+    assert_eq!(kind, "application/x-www-form-urlencoded");
+    assert_eq!(String::from_utf8(html).unwrap(), "Nome=Ana+%26+Bia");
+    let (xfdf, _) = d.submit_payload(F::Xfdf).unwrap();
+    assert!(String::from_utf8(xfdf)
+        .unwrap()
+        .contains("<value>Ana &amp; Bia</value>"));
+    let (fdf, kind) = d.submit_payload(F::Fdf).unwrap();
+    assert!(fdf.starts_with(b"%FDF-1.2") && kind == "application/vnd.fdf");
+    let (pdf, _) = d.submit_payload(F::Pdf).unwrap();
+    assert!(pdf.starts_with(b"%PDF-"));
+    // destinos: só http, https e mailto
+    assert!(pdf_core::submit_target("https://a.b/c").is_some());
+    assert!(pdf_core::submit_target("mailto:x@y.z").is_some());
+    for bad in [
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "ftp://a",
+        "relativo.php",
+        "",
+    ] {
+        assert!(pdf_core::submit_target(bad).is_none(), "{bad}");
+    }
 }

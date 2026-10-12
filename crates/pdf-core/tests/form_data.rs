@@ -164,13 +164,17 @@ fn flatten_bakes_fields_and_undo_restores() {
 fn spreadsheet_formulas_are_neutralized() {
     let dir = tempfile::tempdir().unwrap();
     let txt = dir.path().join("f.txt");
-    std::fs::write(&txt, "A\tB\tC\tD\tE\n=1+1\t+cmd\t-2\t@SUM(A1)\tnormal\n").unwrap();
+    std::fs::write(
+        &txt,
+        "A\tB\tC\tD\tE\tF\tG\n=1+1\t+cmd\t-2\t@SUM(A1)\tnormal\t =2\t|cmd\n",
+    )
+    .unwrap();
     let csv = dir.path().join("p.csv");
     pdf_core::merge_form_data(&[txt], &csv).unwrap();
     let text = std::fs::read_to_string(&csv).unwrap();
     assert_eq!(
         text.lines().nth(1).unwrap(),
-        "'=1+1,'+cmd,'-2,'@SUM(A1),normal"
+        "'=1+1,'+cmd,'-2,'@SUM(A1),normal,' =2,'|cmd"
     );
 }
 

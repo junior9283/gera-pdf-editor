@@ -52,6 +52,88 @@ impl DataFormat {
     }
 }
 
+/// Formato do Enviar formulário (bits de /Flags do /SubmitForm).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmitFormat {
+    Fdf,
+    Xfdf,
+    Html,
+    Pdf,
+}
+
+impl SubmitFormat {
+    pub const ALL: [SubmitFormat; 4] = [Self::Fdf, Self::Html, Self::Xfdf, Self::Pdf];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fdf => "FDF",
+            Self::Xfdf => "XFDF",
+            Self::Html => "HTML",
+            Self::Pdf => "PDF (o documento inteiro)",
+        }
+    }
+
+    /// Os bits de /Flags: ExportFormat (HTML), XFDF e SubmitPDF.
+    pub(crate) fn flags(self) -> i32 {
+        match self {
+            Self::Fdf => 0,
+            Self::Html => 4,
+            Self::Xfdf => 32,
+            Self::Pdf => 256,
+        }
+    }
+
+    /// Pelo /Flags; `None` se há outros bits que o app não reproduz (a ação fica como está).
+    pub(crate) fn from_flags(flags: i32) -> Option<Self> {
+        Some(match flags {
+            0 => Self::Fdf,
+            4 => Self::Html,
+            32 => Self::Xfdf,
+            256 => Self::Pdf,
+            _ => return None,
+        })
+    }
+}
+
+/// Para onde o Enviar formulário pode mandar: só http, https e mailto.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubmitTarget {
+    Http(String),
+    Mail(String),
+}
+
+/// O destino do Enviar, se permitido.
+pub fn submit_target(url: &str) -> Option<SubmitTarget> {
+    let url = url.trim();
+    if url.len() > 4096 || url.chars().any(char::is_control) {
+        return None;
+    }
+    let (scheme, rest) = url.split_once(':')?;
+    match scheme.to_ascii_lowercase().as_str() {
+        "http" | "https" => {
+            let host = rest.strip_prefix("//")?.split(['/', '?', '#']).next()?;
+            (!host.is_empty()).then(|| SubmitTarget::Http(url.to_string()))
+        }
+        "mailto" if !rest.is_empty() => Some(SubmitTarget::Mail(url.to_string())),
+        _ => None,
+    }
+}
+
+/// Codificação de formulário (application/x-www-form-urlencoded).
+pub fn form_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// Resultado de importar: campos preenchidos e nomes que o formulário não tem.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DataImport {
@@ -185,6 +267,13 @@ fn fdf_fields(doc: &mut PdfDocument, node: &Node) -> Result<PdfObject> {
 impl PdfDoc {
     /// Exporta os valores dos campos. Devolve quantos.
     pub fn export_form_data(&self, path: &Path, format: DataFormat) -> Result<usize> {
+        let (bytes, count) = self.form_data_bytes(format)?;
+        crate::doc::write_bytes_atomic(path, &bytes)?;
+        Ok(count)
+    }
+
+    /// Os dados no formato pedido e quantos campos.
+    pub(crate) fn form_data_bytes(&self, format: DataFormat) -> Result<(Vec<u8>, usize)> {
         let values = values_of(self)?;
         if values.is_empty() {
             return Err(refused("o documento não tem campos de formulário"));
@@ -247,8 +336,37 @@ impl PdfDoc {
                 format!("{}\n{}\n", names.join("\t"), vals.join("\t")).into_bytes()
             }
         };
-        crate::doc::write_bytes_atomic(path, &bytes)?;
-        Ok(values.len())
+        Ok((bytes, values.len()))
+    }
+
+    /// O que a ação Enviar formulário manda, e o tipo do conteúdo.
+    pub fn submit_payload(&self, format: SubmitFormat) -> Result<(Vec<u8>, &'static str)> {
+        Ok(match format {
+            SubmitFormat::Fdf => (
+                self.form_data_bytes(DataFormat::Fdf)?.0,
+                "application/vnd.fdf",
+            ),
+            SubmitFormat::Xfdf => (
+                self.form_data_bytes(DataFormat::Xfdf)?.0,
+                "application/vnd.adobe.xfdf",
+            ),
+            SubmitFormat::Html => {
+                let pairs: Vec<String> = values_of(self)?
+                    .iter()
+                    .map(|(n, v)| format!("{}={}", form_encode(n), form_encode(v)))
+                    .collect();
+                (
+                    pairs.join("&").into_bytes(),
+                    "application/x-www-form-urlencoded",
+                )
+            }
+            SubmitFormat::Pdf => {
+                let mut bytes = Vec::new();
+                self.inner
+                    .write_to_with_options(&mut bytes, PdfWriteOptions::default())?;
+                (bytes, "application/pdf")
+            }
+        })
     }
 
     /// Importa os valores de um arquivo de dados (FDF, XFDF, XML ou TXT) para os campos de mesmo
@@ -524,7 +642,10 @@ pub fn merge_form_data(files: &[std::path::PathBuf], dest: &Path) -> Result<usiz
     // aspas quando preciso; e uma fórmula ("=", "+", "-", "@"…) vira texto, senão a planilha a
     // executaria ao abrir
     let cell = |s: &str| {
-        let s = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        // também com espaços antes, e "|" (DDE no LibreOffice)
+        let risky =
+            s.starts_with(['\t', '\r']) || s.trim_start().starts_with(['=', '+', '-', '@', '|']);
+        let s = if risky {
             format!("'{s}")
         } else {
             s.to_string()
