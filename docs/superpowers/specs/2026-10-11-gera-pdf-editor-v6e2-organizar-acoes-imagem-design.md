@@ -206,3 +206,29 @@ essas ações. O novo campo **Imagem** recebe uma figura escolhida ao preencher.
   - botão com a ação "Mostrar/ocultar" que oculta um campo;
   - campo Imagem preenchido;
   - `P` visualizar.
+
+## Decisões tomadas na execução
+
+9. Divisão do resto da linha de formulários:
+   - v6e2: organizar, ações e campo Imagem;
+   - v6e3: detecção automática de campos e Código de barras;
+   - v6e4: dados do formulário, Enviar, nivelar e preenchimento automático.
+10. As teclas de uma letra do Preparar (L R T B H V, Shift+H/V, P, G) só valem com "Usar
+    aceleradores de tecla única", como no Acrobat. A aba as consome antes dos atalhos do app.
+11. Clicar sem Shift num campo já selecionado o torna âncora; o retângulo seleciona os campos
+    inteiros dentro dele. Organizar e Ordem ficam num menu "Organizar".
+12. Campos ocultos são listados (`FieldInfo.hidden`): o Preparar os mostra esmaecidos e o
+    preenchimento os pula.
+13. Mouse para cima é gravado em /A. Várias ações ficam numa cadeia /Next. Uma ação desconhecida
+    é preservada em texto, e um gatilho sem mudança não é regravado.
+14. Segurança das ações sem clique (abrir/fechar página, mouse entra/sai, foco):
+    - só mostram/ocultam campos;
+    - abrir página navega no máximo uma vez por documento; fechar página nunca navega;
+    - as ações de página exigem a permissão de preencher.
+15. Links e "Abrir um arquivo" das ações seguem as regras dos links: só esquemas permitidos e só
+    PDF.
+16. O app desenha a aparência dos botões com ícone e marca esses botões (/GeraAP). Só eles são
+    redesenhados; os de outros programas ficam intactos. A rotação /MK /R vale para o desenho.
+17. Colar é uma operação só (PrepareOp::Paste). Copiar também põe os nomes na área de
+    transferência do sistema, senão o Ctrl+V não chega ao app.
+18. Um campo de assinatura oculto não recebe assinatura, e um assinado não é copiado.
