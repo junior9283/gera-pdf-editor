@@ -26,6 +26,8 @@ pub enum NewFieldKind {
     Date,
     /// Campo Imagem: botão "somente ícone" que, ao preencher, pede a imagem.
     Image,
+    /// Código de barras (PDF417, QR Code, Data Matrix) com os valores dos outros campos.
+    Barcode,
 }
 
 impl NewFieldKind {
@@ -41,6 +43,7 @@ impl NewFieldKind {
             Self::Button => "Botão",
             Self::Date => "Data",
             Self::Image => "Imagem",
+            Self::Barcode => "Código de barras",
         }
     }
 }
@@ -163,6 +166,8 @@ pub struct FieldProps {
     pub behavior: u8,
     pub has_icon: bool,
     pub icon_path: Option<std::path::PathBuf>,
+    /// Código de barras: as opções do /PMD (`None` nos outros campos).
+    pub barcode: Option<crate::barcode::BarcodeOptions>,
     /// Ações do widget (aba Ações), na ordem dos gatilhos.
     pub actions: Vec<(crate::actions::FieldTrigger, crate::actions::ActionKind)>,
 }
@@ -179,6 +184,8 @@ const RADIO: i32 = 1 << 15;
 const COMBO: i32 = 1 << 17;
 const EDIT: i32 = 1 << 18;
 const PUSHBUTTON: i32 = 1 << 16;
+const NO_EXPORT: i32 = 1 << 2;
+const DO_NOT_SPELL_CHECK: i32 = 1 << 22;
 
 /// Deslocamento do campo colado na mesma página (como colar no Acrobat).
 const PASTE_OFFSET: (f32, f32) = (10.0, 10.0);
@@ -548,6 +555,9 @@ impl PdfDoc {
             if PdfDoc::drawn_by_app(&obj) {
                 self.draw_button(&mut obj)?;
             }
+            if crate::barcode::read_options(&obj).is_some() {
+                self.draw_barcode(&mut obj)?;
+            }
         }
         // o MuPDF redesenha com o /V cru: os campos com Formatar voltam a mostrar o formatado
         self.redraw_values(Some(page), plain)
@@ -625,6 +635,36 @@ impl PdfDoc {
                 set_aa(&mut self.inner, &mut w, "F", &f)?;
                 set_aa(&mut self.inner, &mut w, "K", &k)?;
             }
+            NewFieldKind::Barcode => {
+                // como o Acrobat: texto somente leitura, não exportar, várias linhas, sem
+                // verificar a ortografia; /PMD e o Calcular com todos os campos e os nomes
+                w.dict_put("FT", name_obj("Tx")?)?;
+                w.dict_put(
+                    "Ff",
+                    int(READ_ONLY | NO_EXPORT | MULTILINE | DO_NOT_SPELL_CHECK)?,
+                )?;
+                w.dict_put("V", PdfObject::new_string("")?)?;
+                crate::barcode::write_options(
+                    &mut self.inner,
+                    &mut w,
+                    crate::barcode::BarcodeOptions::default(),
+                    (rect.width(), rect.height()),
+                )?;
+                // os outros campos do formulário (o próprio ainda não tem nome aqui)
+                let fields = self
+                    .field_names()?
+                    .into_iter()
+                    .filter(|n| !n.is_empty() && n != name)
+                    .collect();
+                let calc = FieldCalc::Barcode {
+                    fields,
+                    names: true,
+                };
+                set_aa(&mut self.inner, &mut w, "C", &calc_script(&calc))?;
+                let mut acro_obj = acro.clone();
+                let mut co = child_or_new(&self.inner, &mut acro_obj, "CO", true)?;
+                co.array_push(me.clone())?;
+            }
             NewFieldKind::Image => {
                 w.dict_put("FT", name_obj("Btn")?)?;
                 w.dict_put("Ff", int(PUSHBUTTON)?)?;
@@ -686,6 +726,9 @@ impl PdfDoc {
         if kind == NewFieldKind::Image {
             // o campo Imagem é desenhado pelo app (o MuPDF não desenha ícones)
             self.draw_button(&mut annot.object())?;
+        }
+        if kind == NewFieldKind::Barcode {
+            self.draw_barcode(&mut annot.object())?;
         }
         Ok(id)
     }
@@ -1208,6 +1251,7 @@ impl PdfDoc {
             has_icon,
             icon_path: None,
             actions: crate::actions::read_field_actions(&self.inner, &obj)?,
+            barcode: crate::barcode::read_options(&obj),
             name: partial_name(&head)?,
             tooltip: text(head.get_dict("TU")?)?,
             required: flags & REQUIRED != 0,
@@ -1261,7 +1305,11 @@ impl PdfDoc {
                 "o valor de exportação não pode ter espaço nem barra",
             ));
         }
-        self.with_snapshot(|d| d.write_props(page, id, p, &name, target))
+        self.with_snapshot(|d| {
+            d.write_props(page, id, p, &name, target)?;
+            // como o Acrobat: o formulário é recalculado (um Calcular ou código de barras novo)
+            d.recalculate(&mut Vec::new())
+        })
     }
 
     fn write_props(
@@ -1320,6 +1368,15 @@ impl PdfDoc {
                     head.dict_put("V", PdfObject::new_string(&p.default)?)?;
                 }
                 self.write_scripts(&mut head, p, &before)?;
+                if let Some(o) = p.barcode.filter(|o| Some(*o) != before.barcode) {
+                    let r = PdfRect::from(self.widget(page, id)?.annotation().rect()?);
+                    crate::barcode::write_options(
+                        &mut self.inner,
+                        &mut head,
+                        o,
+                        (r.width(), r.height()),
+                    )?;
+                }
             }
             b"Ch" => {
                 if flags & COMBO != 0 {

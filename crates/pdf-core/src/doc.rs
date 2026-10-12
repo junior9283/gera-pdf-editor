@@ -104,6 +104,8 @@ impl PdfDoc {
             layer_default: None,
         };
         doc.signed_on_disk = doc.has_signatures().unwrap_or(false);
+        // códigos de barras: o MuPDF os mostraria como texto (não marca o documento alterado)
+        let _ = doc.draw_barcodes();
         // abrir digitando a senha de permissões libera tudo (como no Acrobat)
         if let Some(p) = password.filter(|p| !p.is_empty()) {
             doc.owner_unlocked = doc.unlock(p).is_ok();

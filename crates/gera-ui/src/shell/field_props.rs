@@ -557,7 +557,8 @@ impl CalcDraft {
                 (d.mode, d.op, d.fields) = (CalcMode::Simple, *op, fields.clone())
             }
             FieldCalc::Sfn(e) => (d.mode, d.sfn) = (CalcMode::Sfn, e.clone()),
-            FieldCalc::Custom => d.mode = CalcMode::Custom,
+            // o código de barras tem as abas próprias; aqui fica como está
+            FieldCalc::Custom | FieldCalc::Barcode { .. } => d.mode = CalcMode::Custom,
         }
         d
     }

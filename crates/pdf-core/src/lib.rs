@@ -4,6 +4,7 @@ pub mod sample;
 mod actions;
 mod annot_edit;
 mod attachments;
+mod barcode;
 mod button_icon;
 mod comment_summary;
 mod comments_io;
@@ -47,6 +48,7 @@ mod xfdf;
 pub use actions::{named_label, ActionKind, FieldTrigger, PageTrigger, NAMED_ITEMS};
 pub use annot_edit::{callout_end, dist_to_segment, MAX_VERTICES};
 pub use attachments::MAX_ATTACHMENT_BYTES;
+pub use barcode::{modules as barcode_modules, BarcodeOptions, Symbology};
 pub use button_icon::{BEHAVIORS, LAYOUTS};
 pub use comment_summary::{
     summarize_comments, SummaryFont, SummaryLayout, SummaryOptions, SummarySort,
@@ -65,10 +67,10 @@ pub use edit_images::{ImageEdit, PageImage};
 pub use edit_text::{PageTextBlock, MIN_TEXT_WIDTH, NEW_TEXT_SIZE, TEXT_MARGIN};
 pub use error::{PdfError, Result};
 pub use form_scripts::{
-    calc_fields, calc_script, commit_value, edit_text, evaluate, format_scripts, format_value,
-    keystroke_ok, loose_number, number_of, parse_calc, parse_format, parse_validate, sfn_ok,
-    validate as validate_field, validate_script, CalcOp, FieldCalc, FieldFormat, FieldValidate,
-    Formatted, MONTHS, TIME_FORMATS,
+    barcode_value, calc_fields, calc_script, commit_value, edit_text, evaluate, format_scripts,
+    format_value, keystroke_ok, loose_number, number_of, parse_calc, parse_format, parse_validate,
+    sfn_ok, validate as validate_field, validate_script, CalcOp, FieldCalc, FieldFormat,
+    FieldValidate, Formatted, MONTHS, TIME_FORMATS,
 };
 pub use forms::{FieldInfo, FieldKind, FormNotes};
 pub use layers::LayerNode;

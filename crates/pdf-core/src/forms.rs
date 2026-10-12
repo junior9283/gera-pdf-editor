@@ -451,6 +451,14 @@ impl PdfDoc {
                     "valor recusado pelo campo".into(),
                 ));
             }
+            // código de barras: o MuPDF desenhou o texto; o app desenha o código
+            let mut obj = widget.annotation().object();
+            if crate::barcode::read_options(&obj).is_some() {
+                // o MuPDF atualiza primeiro (senão refaria o texto por cima depois)
+                widget.update()?;
+                self.draw_barcode(&mut obj)?;
+                return Ok(old);
+            }
         }
         widget.update()?;
         Ok(old)
@@ -461,7 +469,12 @@ impl PdfDoc {
     fn calc_order(&self, fields: &[FieldInfo]) -> Result<Vec<FieldInfo>> {
         let calculated: Vec<&FieldInfo> = fields
             .iter()
-            .filter(|f| matches!(f.calc, FieldCalc::Simple { .. } | FieldCalc::Sfn(_)))
+            .filter(|f| {
+                matches!(
+                    f.calc,
+                    FieldCalc::Simple { .. } | FieldCalc::Sfn(_) | FieldCalc::Barcode { .. }
+                )
+            })
             .collect();
         let mut out: Vec<FieldInfo> = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -486,7 +499,7 @@ impl PdfDoc {
     /// Refaz os cálculos até nada mudar (com tetos); devolve os valores anteriores do que mudou.
     /// Os valores anteriores vão para `changes` à medida que mudam (um erro no meio não perde o
     /// que já foi gravado).
-    fn recalculate(&mut self, changes: &mut Vec<(i32, i32, String)>) -> Result<()> {
+    pub(crate) fn recalculate(&mut self, changes: &mut Vec<(i32, i32, String)>) -> Result<()> {
         let fields = self.all_fields()?;
         let order = self.calc_order(&fields)?;
         let start = changes.len();
@@ -513,7 +526,15 @@ impl PdfDoc {
                         .map(|(_, v)| number_of(v))
                         .collect(),
                 };
-                let raw = evaluate(&f.calc, &lookup).map(calc_raw).unwrap_or_default();
+                let raw = match &f.calc {
+                    // código de barras: os valores dos campos, delimitados por tabulação
+                    FieldCalc::Barcode { fields, names } => {
+                        crate::form_scripts::barcode_value(fields, *names, &|n: &str| {
+                            raws.get(n).cloned()
+                        })
+                    }
+                    calc => evaluate(calc, &lookup).map(calc_raw).unwrap_or_default(),
+                };
                 if raws.get(&f.name) != Some(&raw) {
                     let old = self.write_field(f.page, f.id, &raw, true, Some(&f.format))?;
                     changes.push((f.page, f.id, old));
@@ -539,6 +560,11 @@ impl PdfDoc {
         for p in pages {
             for mut w in self.inner.load_pdf_page(p)?.widgets() {
                 if w.r#type()? != WidgetType::Text {
+                    continue;
+                }
+                let mut obj = w.annotation().object();
+                if crate::barcode::read_options(&obj).is_some() {
+                    self.draw_barcode(&mut obj)?;
                     continue;
                 }
                 let head = field_head(&w.annotation().object())?;
