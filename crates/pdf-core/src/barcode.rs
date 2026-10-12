@@ -64,6 +64,8 @@ impl Default for BarcodeOptions {
     }
 }
 
+/// Códigos desenhados por passada (abrir o arquivo, redesenhar páginas): codificar é caro.
+pub(crate) const MAX_PER_PASS: usize = 50;
 /// Maior valor desenhado (acima disso, o aviso no lugar do código).
 const MAX_VALUE: usize = 2_000;
 /// Largura do módulo gravada no /PMD (em milésimos de polegada, como o Acrobat).
@@ -233,10 +235,15 @@ impl PdfDoc {
 
     /// Desenha os códigos de barras do documento (ao abrir: o MuPDF os mostraria como texto).
     pub(crate) fn draw_barcodes(&mut self) -> Result<()> {
+        let mut drawn = 0;
         for p in 0..self.page_count()? {
             for w in self.inner.load_pdf_page(p)?.widgets() {
                 let mut obj = w.annotation().object();
                 if read_options(&obj).is_some() {
+                    if drawn >= MAX_PER_PASS {
+                        return Ok(());
+                    }
+                    drawn += 1;
                     self.draw_barcode(&mut obj)?;
                 }
             }

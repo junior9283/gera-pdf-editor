@@ -179,3 +179,47 @@ fn too_much_data_warns() {
     assert!(pdf_core::barcode_modules(o, &"y".repeat(2_500)).is_err());
     assert!(pdf_core::barcode_modules(o, "ok").is_ok());
 }
+
+#[test]
+fn many_heavy_barcodes_open_quickly() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = 400;
+    let value = "Z9".repeat(950);
+    let mut objs = vec![
+        format!(
+            "<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[{}]>>>>",
+            (0..n)
+                .map(|k| format!("{} 0 R", k + 5))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".into(),
+        format!(
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[{}]>>",
+            (0..n)
+                .map(|k| format!("{} 0 R", k + 5))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        "<</Type/PaperMetaData/Version 1/Symbology/QRCode/XSymWidth 9/ECC 0\
+         /DataPrep 0/Resolution 300.0>>"
+            .into(),
+    ];
+    for k in 0..n {
+        objs.push(format!(
+            "<</Type/Annot/Subtype/Widget/FT/Tx/T(B{k})/Rect[10 10 200 200]/P 3 0 R\
+             /V({value})/PMD 4 0 R>>"
+        ));
+    }
+    let path = dir.path().join("muitos.pdf");
+    std::fs::write(&path, pdf_core::sample::pdf_from_objects(&objs)).unwrap();
+    let t = std::time::Instant::now();
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    assert!(t.elapsed().as_secs_f32() < 3.0, "abrir: {:?}", t.elapsed());
+    // mexer num campo da página redesenha a página: também com teto
+    let t = std::time::Instant::now();
+    let id = d.fields(0).unwrap()[0].id;
+    d.move_field(0, id, pdf_core::PdfRect::new(20.0, 20.0, 210.0, 210.0))
+        .unwrap();
+    assert!(t.elapsed().as_secs_f32() < 3.0, "mover: {:?}", t.elapsed());
+}

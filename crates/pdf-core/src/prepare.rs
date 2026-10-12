@@ -555,9 +555,6 @@ impl PdfDoc {
             if PdfDoc::drawn_by_app(&obj) {
                 self.draw_button(&mut obj)?;
             }
-            if crate::barcode::read_options(&obj).is_some() {
-                self.draw_barcode(&mut obj)?;
-            }
         }
         // o MuPDF redesenha com o /V cru: os campos com Formatar voltam a mostrar o formatado
         self.redraw_values(Some(page), plain)

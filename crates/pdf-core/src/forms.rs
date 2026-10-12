@@ -557,6 +557,9 @@ impl PdfDoc {
             Some(p) => p..p + 1,
             None => 0..self.page_count()?,
         };
+        // códigos de barras: no máximo alguns por passada (codificar é caro; um PDF hostil pode ter
+        // milhares); os outros ficam como estavam até o valor mudar
+        let mut barcodes = 0;
         for p in pages {
             for mut w in self.inner.load_pdf_page(p)?.widgets() {
                 if w.r#type()? != WidgetType::Text {
@@ -564,7 +567,10 @@ impl PdfDoc {
                 }
                 let mut obj = w.annotation().object();
                 if crate::barcode::read_options(&obj).is_some() {
-                    self.draw_barcode(&mut obj)?;
+                    if barcodes < crate::barcode::MAX_PER_PASS {
+                        barcodes += 1;
+                        self.draw_barcode(&mut obj)?;
+                    }
                     continue;
                 }
                 let head = field_head(&w.annotation().object())?;
