@@ -256,20 +256,22 @@ impl PdfDoc {
     /// mudam.
     pub fn import_form_data(&mut self, path: &Path) -> Result<DataImport> {
         let values = read_data_file(path)?;
-        let fields = self.all_fields()?;
+        // o primeiro widget de cada campo que recebe valor (um grupo de botões de opção grava uma
+        // vez: o estado escolhido vale para todos)
+        let mut by_name: std::collections::HashMap<String, (i32, i32)> =
+            std::collections::HashMap::new();
+        for f in self.all_fields()? {
+            if !matches!(f.kind, FieldKind::Button | FieldKind::Signature) {
+                by_name.entry(f.name).or_insert((f.page, f.id));
+            }
+        }
         let mut filled = 0;
         let mut skipped = 0;
         let mut writes = Vec::new();
         for (name, value) in values {
-            let targets: Vec<&crate::FieldInfo> = fields
-                .iter()
-                .filter(|f| f.name == name)
-                .filter(|f| !matches!(f.kind, FieldKind::Button | FieldKind::Signature))
-                .collect();
-            // um grupo de botões de opção grava uma vez (o estado escolhido vale para todos)
-            match targets.first() {
-                Some(f) => {
-                    writes.push((f.page, f.id, value));
+            match by_name.get(&name) {
+                Some(&(page, id)) => {
+                    writes.push((page, id, value));
                     filled += 1;
                 }
                 None => skipped += 1,
@@ -498,7 +500,8 @@ pub fn merge_form_data(files: &[std::path::PathBuf], dest: &Path) -> Result<usiz
         return Err(refused("arquivos demais para uma planilha"));
     }
     let mut columns: Vec<String> = Vec::new();
-    let mut rows: Vec<Vec<(String, String)>> = Vec::new();
+    let mut known: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut rows: Vec<std::collections::HashMap<String, String>> = Vec::new();
     for f in files {
         let is_pdf = f.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
         let values = if is_pdf {
@@ -507,17 +510,29 @@ pub fn merge_form_data(files: &[std::path::PathBuf], dest: &Path) -> Result<usiz
             read_data_file(f)?
         };
         for (n, _) in &values {
-            if !columns.contains(n) && columns.len() < MAX_FIELDS {
+            if columns.len() < MAX_FIELDS && known.insert(n.clone()) {
                 columns.push(n.clone());
             }
         }
-        rows.push(values);
+        // a primeira ocorrência de cada nome vale
+        let mut row = std::collections::HashMap::new();
+        for (n, v) in values {
+            row.entry(n).or_insert(v);
+        }
+        rows.push(row);
     }
+    // aspas quando preciso; e uma fórmula ("=", "+", "-", "@"…) vira texto, senão a planilha a
+    // executaria ao abrir
     let cell = |s: &str| {
+        let s = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+            format!("'{s}")
+        } else {
+            s.to_string()
+        };
         if s.contains([',', '"', '\n', '\r']) {
             format!("\"{}\"", s.replace('"', "\"\""))
         } else {
-            s.to_string()
+            s
         }
     };
     let mut csv = String::new();
@@ -532,11 +547,7 @@ pub fn merge_form_data(files: &[std::path::PathBuf], dest: &Path) -> Result<usiz
     for row in &rows {
         let line: Vec<String> = columns
             .iter()
-            .map(|c| {
-                row.iter()
-                    .find(|(n, _)| n == c)
-                    .map_or_else(String::new, |(_, v)| cell(v))
-            })
+            .map(|c| row.get(c).map_or_else(String::new, |v| cell(v)))
             .collect();
         csv.push_str(&line.join(","));
         csv.push('\n');

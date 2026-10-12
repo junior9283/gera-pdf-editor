@@ -159,3 +159,33 @@ fn flatten_bakes_fields_and_undo_restores() {
     assert!(saved.fields(0).unwrap().is_empty());
     assert!(saved.page_text(0).unwrap().contains("Recife"));
 }
+
+#[test]
+fn spreadsheet_formulas_are_neutralized() {
+    let dir = tempfile::tempdir().unwrap();
+    let txt = dir.path().join("f.txt");
+    std::fs::write(&txt, "A\tB\tC\tD\tE\n=1+1\t+cmd\t-2\t@SUM(A1)\tnormal\n").unwrap();
+    let csv = dir.path().join("p.csv");
+    pdf_core::merge_form_data(&[txt], &csv).unwrap();
+    let text = std::fs::read_to_string(&csv).unwrap();
+    assert_eq!(
+        text.lines().nth(1).unwrap(),
+        "'=1+1,'+cmd,'-2,'@SUM(A1),normal"
+    );
+}
+
+#[test]
+fn merging_many_wide_files_is_fast() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut files = Vec::new();
+    for k in 0..150 {
+        let names: Vec<String> = (0..3000).map(|j| format!("c{}_{j}", k % 4)).collect();
+        let values: Vec<&str> = (0..3000).map(|_| "v").collect();
+        let p = dir.path().join(format!("{k}.txt"));
+        std::fs::write(&p, format!("{}\n{}\n", names.join("\t"), values.join("\t"))).unwrap();
+        files.push(p);
+    }
+    let t = std::time::Instant::now();
+    pdf_core::merge_form_data(&files, &dir.path().join("p.csv")).unwrap();
+    assert!(t.elapsed().as_secs_f32() < 3.0, "{:?}", t.elapsed());
+}
