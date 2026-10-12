@@ -54,6 +54,7 @@ pub enum Picked {
 }
 
 /// Imagens que o MuPDF lê (Criar PDF, Editar PDF).
+pub const FORM_DATA_EXTS: &[&str] = &["fdf", "xfdf", "xml", "txt"];
 pub const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "tif", "tiff", "bmp", "gif"];
 
 /// "Salvar como" de PDF partindo de `suggested` (pasta e nome); sem extensão, ganha ".pdf".
@@ -215,6 +216,71 @@ impl FileDialogs {
             suggest(dialog, &suggested)
                 .save_file_or_e2e()
                 .map_or(Picked::Cancelled, Picked::SaveTo)
+        });
+    }
+
+    /// Arquivo de dados do formulário (FDF, XFDF, XML ou TXT) para importar.
+    pub fn pick_form_data(&mut self, ctx: &egui::Context) {
+        self.spawn(ctx, move || {
+            rfd::FileDialog::new()
+                .set_title("Importar dados")
+                .add_filter("Dados do formulário (FDF, XFDF, XML, TXT)", FORM_DATA_EXTS)
+                .pick_file_or_e2e()
+                .map_or(Picked::Cancelled, |p| Picked::Open(vec![p]))
+        });
+    }
+
+    /// Onde gravar os dados exportados; o formato vem da extensão (sem ela, FDF, como o Acrobat).
+    pub fn save_form_data(&mut self, ctx: &egui::Context, suggested: PathBuf) {
+        self.spawn(ctx, move || {
+            let mut dialog = rfd::FileDialog::new().set_title("Exportar dados");
+            for f in pdf_core::DataFormat::ALL {
+                dialog = dialog.add_filter(f.label(), &[f.extension()]);
+            }
+            suggest(dialog, &suggested)
+                .save_file_or_e2e()
+                .map_or(Picked::Cancelled, |p| {
+                    Picked::SaveTo(if p.extension().is_some() {
+                        p
+                    } else {
+                        p.with_extension("fdf")
+                    })
+                })
+        });
+    }
+
+    /// Mesclar: os arquivos de dados ou formulários PDF (vários).
+    pub fn pick_data_sources(&mut self, ctx: &egui::Context) {
+        self.spawn(ctx, move || {
+            match rfd::FileDialog::new()
+                .set_title("Mesclar arquivos de dados numa planilha")
+                .add_filter(
+                    "Formulários e dados (PDF, FDF, XFDF)",
+                    &["pdf", "fdf", "xfdf"],
+                )
+                .pick_files_or_e2e()
+            {
+                Some(p) if !p.is_empty() => Picked::Open(p),
+                _ => Picked::Cancelled,
+            }
+        });
+    }
+
+    /// Onde gravar a planilha CSV do Mesclar.
+    pub fn save_csv(&mut self, ctx: &egui::Context, suggested: PathBuf) {
+        self.spawn(ctx, move || {
+            let dialog = rfd::FileDialog::new()
+                .set_title("Salvar planilha")
+                .add_filter("Planilha CSV", &["csv"]);
+            suggest(dialog, &suggested)
+                .save_file_or_e2e()
+                .map_or(Picked::Cancelled, |p| {
+                    Picked::SaveTo(if p.extension().is_some() {
+                        p
+                    } else {
+                        p.with_extension("csv")
+                    })
+                })
         });
     }
 

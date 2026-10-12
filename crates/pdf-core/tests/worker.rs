@@ -608,3 +608,61 @@ fn page_actions_reach_the_interface_after_saving_them() {
         other => panic!("esperava o resumo com as ações da página, veio {other:?}"),
     }
 }
+
+#[test]
+fn data_menu_routes_requests() {
+    let (d, w, _) = opened(1);
+    w.send(Request::Prepare(pdf_core::PrepareOp::Add {
+        page: 0,
+        rect: PdfRect::new(100.0, 100.0, 250.0, 122.0),
+        kind: pdf_core::NewFieldKind::Text,
+        name: "Nome".into(),
+    }));
+    let id = match recv(&w) {
+        Response::FieldsChanged { fields, .. } => fields[0].id,
+        other => panic!("esperava FieldsChanged, veio {other:?}"),
+    };
+    w.send(Request::SetField {
+        page: 0,
+        id,
+        value: "Ana".into(),
+    });
+    assert!(matches!(recv(&w), Response::FieldsChanged { .. }));
+    // exportar
+    let data = d.path().join("dados.xfdf");
+    w.send(Request::ExportFormData {
+        path: data.clone(),
+        format: pdf_core::DataFormat::Xfdf,
+    });
+    assert!(matches!(recv(&w), Response::FormDataExported { count: 1, .. }));
+    // mesclar (sem documento envolvido) e um arquivo ruim
+    let csv = d.path().join("m.csv");
+    w.send(Request::MergeFormData {
+        files: vec![data.clone()],
+        dest: csv.clone(),
+    });
+    assert!(matches!(recv(&w), Response::FormDataMerged { count: 1, .. }));
+    assert!(std::fs::read_to_string(&csv).unwrap().contains("Ana"));
+    let bad = d.path().join("ruim.xfdf");
+    std::fs::write(&bad, "<<< não é xml").unwrap();
+    w.send(Request::ImportFormData { path: bad });
+    assert!(matches!(recv(&w), Response::FormDataFailed(_)));
+    // limpar e importar: o valor volta, numa etapa do desfazer
+    w.send(Request::ResetForm);
+    assert!(matches!(recv(&w), Response::PagesChanged { .. }));
+    w.send(Request::ImportFormData { path: data });
+    assert!(matches!(recv(&w), Response::PagesChanged { .. }));
+    match recv(&w) {
+        Response::FormDataImported(r) => assert_eq!((r.filled, r.skipped), (1, 0)),
+        other => panic!("esperava FormDataImported, veio {other:?}"),
+    }
+    // nivelar: os campos somem do formulário
+    w.send(Request::Flatten { comments: false });
+    match recv(&w) {
+        Response::PagesChanged { summary, history } => {
+            assert!(history.can_undo);
+            assert!(summary.fields.is_empty());
+        }
+        other => panic!("esperava PagesChanged, veio {other:?}"),
+    }
+}

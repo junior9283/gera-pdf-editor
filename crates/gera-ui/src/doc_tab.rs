@@ -351,6 +351,11 @@ enum PickFor {
     ExportComments(Option<Vec<(i32, i32)>>),
     /// Comentários → Importar arquivo de dados.
     ImportComments,
+    /// Dados do formulário: onde exportar, o que importar, as fontes e o destino do Mesclar.
+    ExportFormData,
+    ImportFormData,
+    MergeSources,
+    MergeDest(Vec<PathBuf>),
     /// Carimbo personalizado: o PDF ou a imagem de origem.
     StampSource,
 }
@@ -1614,6 +1619,30 @@ impl DocTab {
                         self.status = "Os dados foram para o programa de e-mail.".into();
                     }
                 },
+                Response::FormDataExported { path, count } => {
+                    self.status = format!(
+                        "{count} campos exportados em {}",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    );
+                }
+                Response::FormDataImported(r) => {
+                    self.status = match r.skipped {
+                        0 => format!("Dados importados: {} campos preenchidos.", r.filled),
+                        n => format!(
+                            "Dados importados: {} campos preenchidos; {n} nomes do arquivo não existem neste formulário.",
+                            r.filled
+                        ),
+                    };
+                }
+                Response::FormDataMerged { dest, count } => {
+                    self.status = format!(
+                        "{count} arquivos mesclados na planilha {}",
+                        dest.file_name().unwrap_or_default().to_string_lossy()
+                    );
+                }
+                Response::FormDataFailed(msg) => {
+                    self.status = format!("Dados do formulário: {msg}");
+                }
                 Response::SubmitFailed(msg) => {
                     self.status = format!("Não foi possível enviar o formulário: {msg}");
                 }
@@ -2555,7 +2584,7 @@ impl DocTab {
         self.run_field_triggers(ui.ctx());
         // pedidos do menu de contexto (e do menu Organizar)
         for cmd in std::mem::take(&mut self.prepare.cmds) {
-            self.run_arrange(cmd);
+            self.run_arrange_with(ui.ctx(), cmd);
         }
         if let Some(text) = self.prepare_copied.take() {
             ui.ctx().copy_text(text);
@@ -2564,7 +2593,7 @@ impl DocTab {
         self.submit_window(ui.ctx());
         self.field_alert_window(ui.ctx());
         self.stamp_windows(ui.ctx());
-        self.poll_files();
+        self.poll_files(ui.ctx());
         self.identity_window(ui);
         self.pick_attachment_for_comment(ui.ctx());
         self.send_edits();
@@ -3326,7 +3355,7 @@ impl DocTab {
     }
 
     /// O arquivo ou a pasta escolhidos no seletor do Organizar/Dividir.
-    fn poll_files(&mut self) {
+    fn poll_files(&mut self, ctx: &egui::Context) {
         use crate::organize::{Dialog, Purpose};
         let Some(picked) = self.files.poll() else {
             return;
@@ -3428,6 +3457,40 @@ impl DocTab {
                     (self.stamp_create.as_mut(), files.into_iter().next())
                 {
                     d.set_source(path);
+                }
+            }
+            // o formato vem da extensão; outra extensão (um .pdf, por engano) é recusada
+            (Some(PickFor::ExportFormData), Picked::SaveTo(path)) => {
+                match pdf_core::DataFormat::from_path(&path) {
+                    Some(format) => self.worker.send(Request::ExportFormData { path, format }),
+                    None => {
+                        self.status =
+                            "Exportar dados: use a extensão .fdf, .xfdf, .xml ou .txt.".into()
+                    }
+                }
+            }
+            (Some(PickFor::ImportFormData), Picked::Open(files)) => {
+                if let Some(path) = files.into_iter().next() {
+                    self.worker.send(Request::ImportFormData { path });
+                }
+            }
+            (Some(PickFor::MergeSources), Picked::Open(files)) => {
+                let dir = files.first().and_then(|f| f.parent()).map(PathBuf::from);
+                let dest = dir.unwrap_or_default().join("dados_mesclados.csv");
+                self.files.save_csv(ctx, dest);
+                self.picking = Some(PickFor::MergeDest(files));
+            }
+            (Some(PickFor::MergeDest(files)), Picked::SaveTo(dest)) => {
+                // a planilha não pode ir por cima de um dos arquivos escolhidos
+                let csv = dest
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("csv"));
+                if !csv || files.iter().any(|f| same_file(f, &dest)) {
+                    self.status =
+                        "A planilha precisa de um nome .csv que não seja um dos arquivos a mesclar."
+                            .into();
+                } else {
+                    self.worker.send(Request::MergeFormData { files, dest });
                 }
             }
             (Some(PickFor::ImportComments), Picked::Open(files)) => {
@@ -3604,6 +3667,37 @@ impl DocTab {
         }
     }
 
+    /// Pedido do menu: os de dados do formulário abrem um seletor de arquivo; os outros agem
+    /// sobre a seleção.
+    fn run_arrange_with(&mut self, ctx: &egui::Context, cmd: crate::prepare::ArrangeCmd) {
+        use crate::prepare::ArrangeCmd as C;
+        if !matches!(cmd, C::ExportData | C::ImportData | C::MergeData) {
+            return self.run_arrange(cmd);
+        }
+        if self.files.busy() {
+            return;
+        }
+        self.picking = Some(match cmd {
+            C::ExportData => {
+                let stem = self
+                    .path
+                    .file_stem()
+                    .map_or("documento".into(), |s| s.to_string_lossy());
+                let dest = self.path.with_file_name(format!("{stem}_dados.fdf"));
+                self.files.save_form_data(ctx, dest);
+                PickFor::ExportFormData
+            }
+            C::ImportData => {
+                self.files.pick_form_data(ctx);
+                PickFor::ImportFormData
+            }
+            _ => {
+                self.files.pick_data_sources(ctx);
+                PickFor::MergeSources
+            }
+        });
+    }
+
     /// Executa um pedido sobre a seleção do Preparar (menu, tecla ou Editar).
     pub(crate) fn run_arrange(&mut self, cmd: crate::prepare::ArrangeCmd) {
         use crate::prepare::ArrangeCmd as C;
@@ -3643,6 +3737,16 @@ impl DocTab {
                 self.status =
                     "Detecção automática de campos: os campos achados aparecem nas páginas (Desfazer tira todos)."
                         .into();
+            }
+            C::Flatten(comments) => {
+                self.prepare.selection.clear();
+                self.worker.send(Request::Flatten { comments });
+                self.status = if comments {
+                    "Campos e comentários nivelados: agora fazem parte da página (Desfazer volta)."
+                } else {
+                    "Campos nivelados: agora fazem parte da página (Desfazer volta)."
+                }
+                .into();
             }
             C::Props => {
                 if let Some((page, id)) = anchor {
@@ -4623,6 +4727,14 @@ fn outline_shown<'a>(
         }
     }
     std::borrow::Cow::Owned(nodes)
+}
+
+/// Os dois caminhos são o mesmo arquivo (também por link ou caminho relativo)?
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 #[cfg(test)]

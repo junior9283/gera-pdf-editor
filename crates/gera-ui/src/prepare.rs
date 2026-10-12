@@ -55,6 +55,12 @@ pub enum ArrangeCmd {
     Props,
     /// Detectar campos automaticamente (todas as páginas).
     Detect,
+    /// Dados do formulário: exportar, importar e mesclar numa planilha.
+    ExportData,
+    ImportData,
+    MergeData,
+    /// Nivelar os campos (com `true`, também os comentários).
+    Flatten(bool),
 }
 
 #[derive(Default)]
@@ -552,6 +558,24 @@ pub fn arrange_menu(ui: &mut egui::Ui, cmds: &mut Vec<ArrangeCmd>, count: usize,
         true,
         "Detectar campos automaticamente",
         ArrangeCmd::Detect,
+    );
+    ui.separator();
+    ui.menu_button("Dados do formulário", |ui| {
+        item(ui, true, "Exportar dados…", ArrangeCmd::ExportData);
+        item(ui, true, "Importar dados…", ArrangeCmd::ImportData);
+        item(
+            ui,
+            true,
+            "Mesclar arquivos de dados numa planilha…",
+            ArrangeCmd::MergeData,
+        );
+    });
+    item(ui, true, "Nivelar campos", ArrangeCmd::Flatten(false));
+    item(
+        ui,
+        true,
+        "Nivelar campos e comentários",
+        ArrangeCmd::Flatten(true),
     );
 }
 
