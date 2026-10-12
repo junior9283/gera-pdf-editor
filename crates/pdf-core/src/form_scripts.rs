@@ -106,7 +106,50 @@ pub enum FieldCalc {
     },
     /// Notação simplificada de campos (`Preco * Quantidade`).
     Sfn(String),
+    /// Código de barras: os valores dos campos delimitados por tabulação (com a linha dos nomes,
+    /// se `names`), como o Acrobat.
+    Barcode {
+        fields: Vec<String>,
+        names: bool,
+    },
     Custom,
+}
+
+impl FieldCalc {
+    /// Um cálculo que o app executa (os outros ficam como estão no arquivo).
+    pub fn is_computed(&self) -> bool {
+        matches!(
+            self,
+            Self::Simple { .. } | Self::Sfn(_) | Self::Barcode { .. }
+        )
+    }
+}
+
+/// Maior script de código de barras reconhecido (a lista de campos pode ser longa).
+const MAX_BARCODE_SCRIPT: usize = 1024 * 1024;
+
+/// Começo do script do código de barras que o app grava (Calcular).
+const BARCODE_MARK: &str = "/* Gera PDF Editor: código de barras */";
+
+/// O valor do código de barras: os valores delimitados por tabulação, com a linha dos nomes
+/// antes (como o "Delimitado por tabulação" do Acrobat). `value`: o valor de cada campo.
+pub fn barcode_value(
+    fields: &[String],
+    names: bool,
+    value: &impl Fn(&str) -> Option<String>,
+) -> String {
+    let (mut n, mut v) = (Vec::new(), Vec::new());
+    for f in fields {
+        if let Some(x) = value(f) {
+            n.push(f.as_str());
+            v.push(x);
+        }
+    }
+    if names {
+        format!("{}\n{}", n.join("\t"), v.join("\t"))
+    } else {
+        v.join("\t")
+    }
 }
 
 /// Máscaras de AFSpecial_Format (0 a 3) e formatos de AFDate_Format (antigo, por número).
@@ -1012,6 +1055,23 @@ pub fn parse_calc(js: &str) -> FieldCalc {
     if js_t.is_empty() {
         return FieldCalc::None;
     }
+    // o script do código de barras do app tem teto próprio: a lista de campos pode ser longa
+    if js_t.starts_with(BARCODE_MARK) && js_t.len() <= MAX_BARCODE_SCRIPT {
+        // só o script que o app escreve: a lista de campos e se leva os nomes
+        let list = js_t
+            .find("new Array")
+            .and_then(|k| Cursor::new(&js_t[k..]).arg());
+        let Some(Arg::Array(fields)) = list else {
+            return FieldCalc::Custom;
+        };
+        let names = js_t.contains("n.join");
+        let c = FieldCalc::Barcode { fields, names };
+        return if js_chunks(js_t) == js_chunks(&calc_script(&c)) {
+            c
+        } else {
+            FieldCalc::Custom
+        };
+    }
     if js_t.len() > MAX_SCRIPT {
         return FieldCalc::Custom;
     }
@@ -1051,6 +1111,20 @@ pub fn parse_calc(js: &str) -> FieldCalc {
 /// O script de Calcular que o Acrobat grava; vazio para Nenhum.
 pub fn calc_script(c: &FieldCalc) -> String {
     match c {
+        FieldCalc::Barcode { fields, names } => {
+            let list: Vec<String> = fields.iter().map(|f| js_str(f)).collect();
+            let value = if *names {
+                r#"n.join("\t") + "\n" + v.join("\t")"#
+            } else {
+                r#"v.join("\t")"#
+            };
+            format!(
+                "{BARCODE_MARK} var f = new Array({}); var n = [], v = []; \
+                 for (var i = 0; i < f.length; i++) {{ var x = this.getField(f[i]); \
+                 if (x) {{ n.push(f[i]); v.push(x.valueAsString); }} }} event.value = {value};",
+                list.join(", ")
+            )
+        }
         FieldCalc::Simple { op, fields } => {
             let list: Vec<String> = fields.iter().map(|f| js_str(f)).collect();
             format!(
@@ -1079,7 +1153,7 @@ pub fn calc_script(c: &FieldCalc) -> String {
 /// Os campos de que o cálculo depende.
 pub fn calc_fields(c: &FieldCalc) -> Vec<String> {
     match c {
-        FieldCalc::Simple { fields, .. } => fields.clone(),
+        FieldCalc::Simple { fields, .. } | FieldCalc::Barcode { fields, .. } => fields.clone(),
         FieldCalc::Sfn(expr) => tokens(expr)
             .unwrap_or_default()
             .into_iter()
@@ -1511,5 +1585,28 @@ mod tests {
         assert!(sfn_ok("Preco * Qtd"));
         assert!(!sfn_ok("Preco *"));
         assert!(!sfn_ok(""));
+    }
+
+    #[test]
+    fn barcode_script_round_trips() {
+        let c = FieldCalc::Barcode {
+            fields: vec!["Nome".into(), "Idade \"x\"".into()],
+            names: true,
+        };
+        assert_eq!(parse_calc(&calc_script(&c)), c);
+        let plain = FieldCalc::Barcode {
+            fields: vec!["A".into()],
+            names: false,
+        };
+        assert_eq!(parse_calc(&calc_script(&plain)), plain);
+        // o marcador com outro código não vale
+        let fake = calc_script(&c).replace("valueAsString", "name");
+        assert_eq!(parse_calc(&fake), FieldCalc::Custom);
+        let get = |n: &str| (n == "Nome").then(|| "Ana".to_string());
+        assert_eq!(
+            barcode_value(&["Nome".into(), "X".into()], true, &get),
+            "Nome\nAna"
+        );
+        assert_eq!(barcode_value(&["Nome".into()], false, &get), "Ana");
     }
 }

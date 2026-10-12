@@ -17,3 +17,7 @@ panic = "abort"
 # a geração de chave RSA (ID digital) é lenta sem otimização; os testes também a usam
 [profile.dev.package.num-bigint-dig]
 opt-level = 3
+
+# o codificador de códigos de barras é lento sem otimização: otimizado também nos testes
+[profile.dev.package.rxing]
+opt-level = 3

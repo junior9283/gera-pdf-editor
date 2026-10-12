@@ -111,7 +111,7 @@ fn split(
 
 impl PdfDoc {
     /// A Helvetica dos campos (/AcroForm /DR /Font /Helv); sem ela, uma nova.
-    fn helvetica(&mut self) -> Result<PdfObject> {
+    pub(crate) fn helvetica(&mut self) -> Result<PdfObject> {
         use crate::pdf_obj::get;
         let found = get(&self.inner.catalog()?, "AcroForm")
             .and_then(|a| get(&a, "DR"))
@@ -138,22 +138,14 @@ impl PdfDoc {
         let mk = obj.get_dict("MK")?;
         let get = |k: &str| mk.as_ref().and_then(|m| m.get_dict(k).ok().flatten());
         // os lados do /Rect; com /MK /R 90 ou 270, o desenho em pé tem os lados trocados
-        let side = |a: i32, b: i32| -> f32 {
-            let v = |k| {
-                crate::pdf_obj::get(obj, "Rect")
-                    .and_then(|r| r.get_array(k).ok().flatten())
-                    .and_then(|n| n.as_float().ok())
-                    .unwrap_or(0.0)
-            };
-            (v(b) - v(a)).abs().max(1.0)
-        };
+        let (rw, rh) = crate::pdf_obj::rect_size(obj);
         let rotation = get("R")
             .and_then(|r| r.as_int().ok())
             .unwrap_or(0)
             .rem_euclid(360);
         let (w, h) = match rotation {
-            90 | 270 => (side(1, 3), side(0, 2)),
-            _ => (side(0, 2), side(1, 3)),
+            90 | 270 => (rh, rw),
+            _ => (rw, rh),
         };
         let layout = get("TP")
             .and_then(|t| t.as_int().ok())

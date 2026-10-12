@@ -6,7 +6,7 @@ pub fn prefix(kind: NewFieldKind) -> &'static str {
     kind.prefix()
 }
 
-/// Rótulo da ferramenta na linha Preparar formulário.
+/// Nome da ferramenta (a dica na linha Preparar formulário).
 pub fn label(kind: NewFieldKind) -> &'static str {
     match kind {
         NewFieldKind::Text => "Campo de texto",
@@ -14,15 +14,32 @@ pub fn label(kind: NewFieldKind) -> &'static str {
         NewFieldKind::Radio => "Botão de opção",
         NewFieldKind::Combo => "Lista suspensa",
         NewFieldKind::List => "Caixa de listagem",
+        NewFieldKind::Signature => "Campo de assinatura",
+        NewFieldKind::Button => "Botão",
+        NewFieldKind::Date => "Campo de data",
+        NewFieldKind::Image => "Campo de imagem",
+        NewFieldKind::Barcode => "Código de barras",
+    }
+}
+
+/// Rótulo curto na barra (com dez ferramentas, os nomes inteiros não cabem).
+pub fn short_label(kind: NewFieldKind) -> &'static str {
+    match kind {
+        NewFieldKind::Text => "Texto",
+        NewFieldKind::Checkbox => "Caixa",
+        NewFieldKind::Radio => "Opção",
+        NewFieldKind::Combo => "Suspensa",
+        NewFieldKind::List => "Listagem",
         NewFieldKind::Signature => "Assinatura",
         NewFieldKind::Button => "Botão",
         NewFieldKind::Date => "Data",
         NewFieldKind::Image => "Imagem",
+        NewFieldKind::Barcode => "Código",
     }
 }
 
 /// Na ordem da barra do Acrobat (Botão, Data e Imagem antes da Assinatura).
-pub const KINDS: [NewFieldKind; 9] = [
+pub const KINDS: [NewFieldKind; 10] = [
     NewFieldKind::Text,
     NewFieldKind::Checkbox,
     NewFieldKind::Radio,
@@ -31,6 +48,7 @@ pub const KINDS: [NewFieldKind; 9] = [
     NewFieldKind::Button,
     NewFieldKind::Date,
     NewFieldKind::Image,
+    NewFieldKind::Barcode,
     NewFieldKind::Signature,
 ];
 
@@ -56,6 +74,7 @@ pub fn default_size(kind: NewFieldKind) -> (f32, f32) {
         NewFieldKind::List => (150.0, 60.0),
         NewFieldKind::Signature => (180.0, 40.0),
         NewFieldKind::Image => (120.0, 90.0),
+        NewFieldKind::Barcode => (110.0, 110.0),
     }
 }
 

@@ -84,3 +84,15 @@ pub(crate) fn tree_pairs(
     );
     out
 }
+
+/// Largura e altura do /Rect do objeto (pelo menos 1).
+pub(crate) fn rect_size(obj: &PdfObject) -> (f32, f32) {
+    let rect = get(obj, "Rect");
+    let v = |k: i32| {
+        rect.as_ref()
+            .and_then(|r| r.get_array(k).ok().flatten())
+            .and_then(|n| n.as_float().ok())
+            .unwrap_or(0.0)
+    };
+    ((v(2) - v(0)).abs().max(1.0), (v(3) - v(1)).abs().max(1.0))
+}

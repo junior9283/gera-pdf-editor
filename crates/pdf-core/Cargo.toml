@@ -33,6 +33,10 @@ spki = "0.7"
 x509-cert = { version = "0.2", features = ["builder"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 similar = "3.2"
+# código de barras (v6e3): PDF417, QR Code e Data Matrix — porte do ZXing, Apache-2.0
+rxing = { version = "0.9", default-features = false, features = ["encoders", "qrcode", "pdf417", "datamatrix", "encoding_rs"] }
 
 [dev-dependencies]
 tempfile = "3"
+# os testes leem de volta o código desenhado
+rxing = { version = "0.9", default-features = false, features = ["encoders", "decoders", "qrcode", "pdf417", "datamatrix", "encoding_rs"] }

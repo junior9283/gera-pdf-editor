@@ -201,24 +201,7 @@ impl<T: Trigger> ActionsEditor<T> {
 /// O editor de uma ação (o que muda conforme o tipo).
 fn edit_action(ui: &mut egui::Ui, a: &mut ActionKind, fields: &[String], pages: usize) {
     let pick = |ui: &mut egui::Ui, list: &mut Vec<String>| {
-        egui::ScrollArea::vertical()
-            .id_salt("campos-da-acao")
-            .max_height(110.0)
-            .show(ui, |ui| {
-                for f in fields {
-                    let mut on = list.contains(f);
-                    if ui
-                        .checkbox(&mut on, crate::links::safe_display(f))
-                        .changed()
-                    {
-                        if on {
-                            list.push(f.clone());
-                        } else {
-                            list.retain(|x| x != f);
-                        }
-                    }
-                }
-            });
+        crate::shell::field_props::field_checklist(ui, "campos-da-acao", 110.0, fields, list)
     };
     match a {
         ActionKind::GoTo { page } => {
