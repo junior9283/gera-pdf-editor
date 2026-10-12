@@ -64,7 +64,7 @@ fn public_only(netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
 
 /// O endereço mailto com os dados no corpo (codificação de URL, espaço como %20).
 pub fn mail_url(base: &str, body: &str) -> String {
-    let encoded = pdf_core::form_encode(body).replace('+', "%20");
+    let encoded = pdf_core::mail_encode(body);
     let sep = if base.contains('?') { '&' } else { '?' };
     format!("{base}{sep}body={encoded}")
 }

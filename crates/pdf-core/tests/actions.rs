@@ -341,11 +341,52 @@ fn submit_refuses_internal_addresses() {
     ] {
         assert!(pdf_core::submit_target(bad).is_none(), "{bad}");
     }
-    assert!(pdf_core::submit_target("https://user@exemplo.com.br:8443/f?x=1").is_some());
+    assert!(pdf_core::submit_target("https://exemplo.com.br:8443/f?x=1").is_some());
     assert!(pdf_core::submit_target("http://8.8.8.8/").is_some());
     assert!(!pdf_core::is_public_ip("10.1.2.3".parse().unwrap()));
     assert!(pdf_core::is_public_ip("1.1.1.1".parse().unwrap()));
     assert!(!pdf_core::is_public_ip(
         "::ffff:192.168.1.1".parse().unwrap()
     ));
+}
+
+#[test]
+fn submit_target_is_canonical_and_mailto_is_restricted() {
+    use pdf_core::SubmitTarget as T;
+    // usuário e senha no endereço enganam a confirmação ("banco.com.br@outro.com"): recusado
+    for bad in [
+        "https://banco.com.br@outro.com/",
+        "https://a:b@outro.com/",
+        "http://exemplo.com:99999/",
+    ] {
+        assert!(pdf_core::submit_target(bad).is_none(), "{bad}");
+    }
+    // o endereço enviado é o canônico (o mesmo que o envio usa e a confirmação mostra)
+    assert_eq!(
+        pdf_core::submit_target("HTTPS://Exemplo.COM.br/f?x=1"),
+        Some(T::Http("https://exemplo.com.br/f?x=1".into()))
+    );
+    assert_eq!(
+        pdf_core::submit_target("http://outro.com\\@127.0.0.1/"),
+        Some(T::Http("http://outro.com/@127.0.0.1/".into())),
+        "a barra invertida vale como /: o host é outro.com"
+    );
+    // mailto: anexo de arquivo local, corpo e parâmetros desconhecidos saem; ficam
+    // destinatários, assunto, cc e bcc
+    assert_eq!(
+        pdf_core::submit_target(
+            "mailto:rh@x.y?attach=/home/u/.ssh/id_rsa&%61ttachment=/etc/passwd&body=oi&subject=Ficha%20nova&cc=a@b.c&x-y=1"
+        ),
+        Some(T::Mail("mailto:rh@x.y?subject=Ficha%20nova&cc=a%40b.c".into()))
+    );
+    assert_eq!(
+        pdf_core::submit_target("mailto:rh@x.y"),
+        Some(T::Mail("mailto:rh@x.y".into()))
+    );
+    assert!(pdf_core::submit_target("mailto:?attach=/etc/passwd").is_none());
+    // a confirmação destaca quem recebe
+    let t = pdf_core::submit_target("https://Exemplo.com.br/f").unwrap();
+    assert_eq!(t.recipient(), "exemplo.com.br");
+    let t = pdf_core::submit_target("mailto:rh%40x.y?subject=a").unwrap();
+    assert_eq!(t.recipient(), "rh@x.y");
 }

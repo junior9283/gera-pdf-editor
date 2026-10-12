@@ -2879,6 +2879,7 @@ dependencies = [
  "spki 0.7.3",
  "tempfile",
  "thiserror 2.0.21",
+ "url",
  "x509-cert 0.2.5",
  "zip",
 ]

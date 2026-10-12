@@ -68,7 +68,7 @@ pub use edit_images::{ImageEdit, PageImage};
 pub use edit_text::{PageTextBlock, MIN_TEXT_WIDTH, NEW_TEXT_SIZE, TEXT_MARGIN};
 pub use error::{PdfError, Result};
 pub use form_data::{
-    form_encode, is_public_ip, merge_form_data, submit_target, DataFormat, DataImport,
+    form_encode, is_public_ip, mail_encode, merge_form_data, submit_target, DataFormat, DataImport,
     SubmitFormat, SubmitTarget,
 };
 pub use form_scripts::{

@@ -102,41 +102,57 @@ pub enum SubmitTarget {
     Mail(String),
 }
 
+impl SubmitTarget {
+    /// Quem recebe: o servidor (http/https) ou os destinatários (mailto), para a confirmação.
+    pub fn recipient(&self) -> String {
+        match self {
+            Self::Http(u) => url::Url::parse(u)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_string))
+                .unwrap_or_default(),
+            Self::Mail(u) => {
+                let to = u
+                    .trim_start_matches("mailto:")
+                    .split('?')
+                    .next()
+                    .unwrap_or("");
+                url::form_urlencoded::parse(to.as_bytes())
+                    .map(|(k, _)| k.into_owned())
+                    .collect()
+            }
+        }
+    }
+}
+
 /// O destino do Enviar, se permitido.
 pub fn submit_target(url: &str) -> Option<SubmitTarget> {
     let url = url.trim();
     if url.len() > 4096 || url.chars().any(char::is_control) {
         return None;
     }
-    let (scheme, rest) = url.split_once(':')?;
-    match scheme.to_ascii_lowercase().as_str() {
+    // o mesmo analisador do envio: o que a confirmação mostra é o que sai
+    let parsed = url::Url::parse(url).ok()?;
+    match parsed.scheme() {
         "http" | "https" => {
-            let authority = rest
-                .strip_prefix("//")?
-                .split(['/', '?', '#', '\\'])
-                .next()?;
-            public_host(authority).then(|| SubmitTarget::Http(url.to_string()))
+            // usuário e senha no endereço só servem para enganar ("banco.com.br@outro.com")
+            if !parsed.username().is_empty() || parsed.password().is_some() {
+                return None;
+            }
+            let public = match parsed.host()? {
+                url::Host::Domain(d) => public_domain(d),
+                url::Host::Ipv4(ip) => is_public_ip(ip.into()),
+                url::Host::Ipv6(ip) => is_public_ip(ip.into()),
+            };
+            public.then(|| SubmitTarget::Http(parsed.to_string()))
         }
-        "mailto" if !rest.is_empty() => Some(SubmitTarget::Mail(url.to_string())),
+        "mailto" => mail_target(&parsed),
         _ => None,
     }
 }
 
-/// O host de `user@host:porta` é público: nada de localhost, nomes sem domínio (intranet), `.local`
-/// nem IP de loopback, rede privada ou link-local, em qualquer grafia (127.1, 2130706433, 0x7f…).
-fn public_host(authority: &str) -> bool {
-    let host_port = authority.rsplit('@').next().unwrap_or_default();
-    let host = match host_port.strip_prefix('[') {
-        Some(v6) => match v6.split_once(']').and_then(|(ip, _)| ip.parse().ok()) {
-            Some(ip) => return is_public_ip(std::net::IpAddr::V6(ip)),
-            None => return false,
-        },
-        None => host_port.split(':').next().unwrap_or_default(),
-    };
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
-    if let Some(ip) = legacy_ipv4(&host) {
-        return is_public_ip(std::net::IpAddr::V4(ip));
-    }
+/// Nome de domínio da internet: nada de localhost, nomes sem domínio (intranet) nem `.local`.
+fn public_domain(host: &str) -> bool {
+    let host = host.trim_end_matches('.');
     let last = host.rsplit('.').next().unwrap_or_default();
     host.contains('.')
         && !last.is_empty()
@@ -147,29 +163,36 @@ fn public_host(authority: &str) -> bool {
         )
 }
 
-/// IPv4 na grafia que os resolvedores aceitam (inet_aton): 1 a 4 partes em decimal, octal ou hex.
-fn legacy_ipv4(host: &str) -> Option<std::net::Ipv4Addr> {
-    let parts: Vec<u64> = host
-        .split('.')
-        .map(|p| {
-            if let Some(h) = p.strip_prefix("0x").or_else(|| p.strip_prefix("0X")) {
-                u64::from_str_radix(h, 16).ok()
-            } else if p.len() > 1 && p.starts_with('0') {
-                u64::from_str_radix(&p[1..], 8).ok()
-            } else {
-                p.parse().ok()
-            }
-        })
-        .collect::<Option<_>>()?;
-    let (last, head) = parts.split_last()?;
-    if head.len() > 3 || head.iter().any(|&p| p > 255) || *last >= 1u64 << (8 * (4 - head.len())) {
+/// mailto só com destinatários, assunto, cc e bcc: o resto (`attach`, que alguns programas de
+/// e-mail usam para anexar um arquivo local, e o `body`, que o app preenche) sai.
+fn mail_target(parsed: &url::Url) -> Option<SubmitTarget> {
+    // destinatários sem parâmetros escondidos (nem codificados: %3F = ?, %26 = &, %0A…)
+    let to = parsed.path();
+    let low = to.to_ascii_lowercase();
+    if to.is_empty()
+        || to.contains(['?', '&', '='])
+        || ["%3f", "%26", "%3d", "%0a", "%0d", "%00"]
+            .iter()
+            .any(|e| low.contains(e))
+    {
         return None;
     }
-    let n = head
-        .iter()
-        .enumerate()
-        .fold(*last, |n, (i, &p)| n | p << (24 - 8 * i));
-    Some(std::net::Ipv4Addr::from(n as u32))
+    let kept: Vec<String> = parsed
+        .query_pairs()
+        .filter(|(k, _)| matches!(k.to_ascii_lowercase().as_str(), "subject" | "cc" | "bcc"))
+        .map(|(k, v)| format!("{}={}", k.to_ascii_lowercase(), mail_encode(&v)))
+        .collect();
+    let query = if kept.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", kept.join("&"))
+    };
+    Some(SubmitTarget::Mail(format!("mailto:{to}{query}")))
+}
+
+/// Codificação de um valor de mailto (espaço como %20: o + ali é literal).
+pub fn mail_encode(s: &str) -> String {
+    form_encode(s).replace('+', "%20")
 }
 
 /// Endereço da internet pública (não loopback, privado, link-local, CGNAT, multicast…).

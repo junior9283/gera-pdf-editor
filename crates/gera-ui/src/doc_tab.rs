@@ -3846,6 +3846,12 @@ impl DocTab {
         egui::Modal::new(egui::Id::new("enviar-formulario")).show(ctx, |ui| {
             ui.heading("Enviar formulário");
             ui.label(format!("O documento quer enviar {what} para:"));
+            ui.label(
+                egui::RichText::new(crate::links::safe_display(&target.recipient()))
+                    .strong()
+                    .size(16.0),
+            );
+            ui.label("Endereço completo:");
             ui.monospace(crate::links::safe_display(url));
             ui.label("Envie só se você confia neste documento e neste endereço.");
             ui.horizontal(|ui| {
