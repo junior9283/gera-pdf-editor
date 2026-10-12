@@ -589,3 +589,22 @@ fn exported_pages_go_into_another_document_with_annotations() {
         .iter()
         .any(|a| a.contents == "vai junto"));
 }
+
+#[test]
+fn page_actions_reach_the_interface_after_saving_them() {
+    let (_d, w, _) = opened(2);
+    let actions = vec![(
+        pdf_core::PageTrigger::Open,
+        pdf_core::ActionKind::GoTo { page: 1 },
+    )];
+    w.send(Request::Prepare(pdf_core::PrepareOp::SetPageActions {
+        page: 0,
+        actions: actions.clone(),
+    }));
+    match recv(&w) {
+        Response::PagesChanged { summary, .. } => {
+            assert_eq!(summary.page_actions, vec![(0, actions)])
+        }
+        other => panic!("esperava o resumo com as ações da página, veio {other:?}"),
+    }
+}

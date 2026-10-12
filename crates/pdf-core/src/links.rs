@@ -198,6 +198,21 @@ fn point_of(kind: DestinationKind) -> Option<(f32, f32)> {
     }
 }
 
+/// Destino de uma ação de campo ou de página (link da web ou abrir arquivo), com as regras dos
+/// links: só os esquemas permitidos e só PDF (relativo ao documento); o resto é bloqueado.
+pub fn action_link(action: &crate::ActionKind, doc_path: &Path) -> Option<LinkTarget> {
+    let dir = doc_path.parent().unwrap_or(Path::new("."));
+    match action {
+        crate::ActionKind::Uri(u) => Some(web(u.clone())),
+        crate::ActionKind::Launch(p) if is_pdf(p) => Some(LinkTarget::File {
+            path: absolute(dir, p),
+            page: None,
+        }),
+        crate::ActionKind::Launch(p) => Some(blocked(p.clone())),
+        _ => None,
+    }
+}
+
 /// Endereço web: só os esquemas permitidos abrem; o resto é bloqueado.
 fn web(uri: String) -> LinkTarget {
     let scheme = uri

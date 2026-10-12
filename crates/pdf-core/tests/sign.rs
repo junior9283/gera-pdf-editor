@@ -423,3 +423,25 @@ fn a_comment_added_after_signing_is_not_a_permitted_change() {
     let s = PdfDoc::open(&path, None).unwrap().signatures().unwrap();
     assert!(s[0].modified_after && !s[0].changes_permitted);
 }
+
+#[test]
+fn a_hidden_signature_field_is_not_signed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_sample(&dir, "a.pdf", 1, 0);
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let field = d
+        .add_field(
+            0,
+            PdfRect::new(100.0, 100.0, 280.0, 140.0),
+            NewFieldKind::Signature,
+            "Assinatura1",
+        )
+        .unwrap();
+    d.show_fields(&["Assinatura1".into()], true).unwrap();
+    // um campo oculto (a assinatura ficaria invisível) é recusado
+    assert!(d
+        .sign_digitally(SignPlace::Field { page: 0, id: field }, id(), "", "")
+        .is_err());
+    let d = PdfDoc::open(&path, None).unwrap();
+    assert!(d.signatures().unwrap().is_empty());
+}

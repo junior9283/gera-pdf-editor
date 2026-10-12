@@ -682,6 +682,8 @@ pub struct DocSummary {
     /// Campos de formulário de todas as páginas.
     pub fields: Vec<crate::FieldInfo>,
     pub form_notes: crate::FormNotes,
+    /// Ações de abrir e fechar página, só das páginas que as têm.
+    pub page_actions: Vec<(i32, Vec<(crate::PageTrigger, crate::ActionKind)>)>,
     /// Proteção e permissões de quem abriu.
     pub security: crate::SecurityInfo,
     /// Resultado do Comparar arquivos (`/Info /GeraCompare`): a aba abre a linha Comparação.

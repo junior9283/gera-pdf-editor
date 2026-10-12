@@ -116,6 +116,8 @@ pub enum ThumbAction {
     DragOut(Vec<i32>),
     /// Rótulos de página… com estas páginas selecionadas.
     Labels(Vec<i32>),
+    /// Propriedades da página… (ações de abrir e fechar).
+    PageProps(i32),
 }
 
 pub struct ThumbnailsPanel {
@@ -345,6 +347,14 @@ impl ThumbnailsPanel {
         if can_edit && ui.button("Rótulos de página…").clicked() {
             out.push(ThumbAction::Labels(self.org.sel.to_vec()));
             ui.close();
+        }
+        if can_edit {
+            if let Some(&page) = self.org.sel.to_vec().first() {
+                if ui.button("Propriedades da página…").clicked() {
+                    out.push(ThumbAction::PageProps(page));
+                    ui.close();
+                }
+            }
         }
         ui.add_enabled_ui(!targets.is_empty(), |ui| {
             ui.menu_button("Copiar para", |ui| {

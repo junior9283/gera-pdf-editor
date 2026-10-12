@@ -6,7 +6,7 @@ use crate::form_scripts::{
     calc_script, format_scripts, parse_calc, parse_format, parse_validate, validate_script,
     FieldCalc, FieldFormat, FieldValidate,
 };
-use crate::forms::{aa_script, field_head, kids_of, on_state, options_of, resets_form};
+use crate::forms::{aa_script, field_head, kids_of, on_state, options_of};
 use crate::types::PdfRect;
 use mupdf::pdf::{PdfAnnotationType, PdfDocument, PdfObject, PdfWidget};
 use mupdf::{Buffer, Rect};
@@ -24,6 +24,8 @@ pub enum NewFieldKind {
     Button,
     /// Campo de texto com Formatar = Data (`dd/mm/aaaa`) e o seletor de data ao preencher.
     Date,
+    /// Campo Imagem: botão "somente ícone" que, ao preencher, pede a imagem.
+    Image,
 }
 
 impl NewFieldKind {
@@ -38,6 +40,7 @@ impl NewFieldKind {
             Self::Signature => "Assinatura",
             Self::Button => "Botão",
             Self::Date => "Data",
+            Self::Image => "Imagem",
         }
     }
 }
@@ -73,6 +76,39 @@ pub enum PrepareOp {
     SetTabOrder {
         page: i32,
         order: TabOrder,
+    },
+    /// Move ou redimensiona vários campos numa etapa: (página, id, retângulo).
+    MoveMany {
+        moves: Vec<(i32, i32, PdfRect)>,
+    },
+    /// Exclui vários campos numa etapa: (página, id).
+    DeleteMany {
+        ids: Vec<(i32, i32)>,
+    },
+    /// Repete o widget nas páginas `pages` (a dele é pulada, salvo com deslocamento: colar), na
+    /// mesma posição mais `offset`. As cópias são widgets do mesmo campo (mesmo valor).
+    Duplicate {
+        page: i32,
+        id: i32,
+        pages: Vec<i32>,
+        offset: (f32, f32),
+    },
+    /// Criar várias cópias: campos novos (`nome_1`, `nome_2`…) nestes retângulos da página.
+    Copies {
+        page: i32,
+        id: i32,
+        rects: Vec<PdfRect>,
+    },
+    /// Colar (`Ctrl+V`): os campos copiados viram widgets dos mesmos campos na página `to`
+    /// (deslocados se for a mesma página), numa etapa.
+    Paste {
+        items: Vec<(i32, i32)>,
+        to: i32,
+    },
+    /// Ações da página (Abrir e Fechar página).
+    SetPageActions {
+        page: i32,
+        actions: Vec<(crate::actions::PageTrigger, crate::actions::ActionKind)>,
     },
 }
 
@@ -116,9 +152,15 @@ pub struct FieldProps {
     pub format: FieldFormat,
     pub validate: FieldValidate,
     pub calc: FieldCalc,
-    /// Botão: rótulo (/MK /CA) e a ação Redefinir formulário.
+    /// Botão: rótulo (/MK /CA), layout (/MK /TP, 0 a 6), comportamento (índice em
+    /// `BEHAVIORS`, /H), se tem ícone (desligar tira) e a imagem do ícone novo.
     pub button_label: String,
-    pub reset_action: bool,
+    pub layout: u8,
+    pub behavior: u8,
+    pub has_icon: bool,
+    pub icon_path: Option<std::path::PathBuf>,
+    /// Ações do widget (aba Ações), na ordem dos gatilhos.
+    pub actions: Vec<(crate::actions::FieldTrigger, crate::actions::ActionKind)>,
 }
 
 /// Formato do campo Data novo, como o Acrobat em português.
@@ -133,6 +175,59 @@ const RADIO: i32 = 1 << 15;
 const COMBO: i32 = 1 << 17;
 const EDIT: i32 = 1 << 18;
 const PUSHBUTTON: i32 = 1 << 16;
+
+/// Deslocamento do campo colado na mesma página (como colar no Acrobat).
+const PASTE_OFFSET: (f32, f32) = (10.0, 10.0);
+
+/// Teto de "Criar várias cópias" (20 × 20).
+const MAX_COPIES: usize = 400;
+
+/// Chaves do nó do campo (separadas do widget ao duplicar).
+const FIELD_KEYS: &[&str] = &[
+    "T", "TU", "TM", "FT", "Ff", "V", "DV", "Opt", "TI", "I", "MaxLen", "RV", "DS", "Parent",
+];
+/// Chaves do widget copiadas ao duplicar (a aparência é refeita, salvo a dos estados).
+const WIDGET_KEYS: &[&str] = &[
+    "F", "DA", "Q", "MK", "BS", "Border", "H", "AS", "AP", "A", "AA",
+];
+
+/// Cópia de `obj` com dicionários e arrays diretos novos (as referências continuam as mesmas).
+fn copy_tree(doc: &PdfDocument, obj: &PdfObject, depth: u32) -> Result<PdfObject> {
+    if obj.is_indirect()? || depth > 8 {
+        return Ok(obj.clone());
+    }
+    if obj.is_dict()? {
+        let mut out = doc.new_dict()?;
+        for item in obj.dict_iter()? {
+            let (k, v) = item?;
+            out.dict_put(k, copy_tree(doc, &v, depth + 1)?)?;
+        }
+        return Ok(out);
+    }
+    if obj.is_array()? {
+        let mut out = doc.new_array()?;
+        for v in obj.array_iter()? {
+            out.array_push(copy_tree(doc, &v?, depth + 1)?)?;
+        }
+        return Ok(out);
+    }
+    Ok(obj.clone())
+}
+
+/// Troca, no array, a referência ao objeto `num` por `to`.
+fn replace_ref(array: &mut PdfObject, num: i32, to: &PdfObject) -> Result<()> {
+    for k in 0..array.len()? as i32 {
+        if array.get_array(k)?.and_then(|o| o.as_indirect().ok()) == Some(num) {
+            array.array_put(k, to.clone())?;
+        }
+    }
+    Ok(())
+}
+
+/// Nome completo do campo do widget.
+fn w_name(w: &PdfWidget) -> Result<String> {
+    Ok(w.name()?.unwrap_or_default())
+}
 
 /// Valor de exportação padrão da caixa de seleção nova.
 const CHECK_ON: &str = "Sim";
@@ -179,7 +274,7 @@ fn set_flag(flags: &mut i32, bit: i32, on: bool) {
 }
 
 /// Tamanho da fonte em /DA ("/Helv 12 Tf 0 g"); 0 = automático.
-fn da_size(obj: &PdfObject) -> Result<f32> {
+pub(crate) fn da_size(obj: &PdfObject) -> Result<f32> {
     let Some(da) = obj.get_dict_inheritable("DA")? else {
         return Ok(0.0);
     };
@@ -444,6 +539,11 @@ impl PdfDoc {
         for mut w in self.inner.load_pdf_page(page)?.widgets() {
             // um campo defeituoso de outro programa fica como está; os nossos são redesenhados
             let _ = w.update();
+            // o MuPDF não desenha o ícone (/MK /I): os botões com ícone ou layout são do app
+            let mut obj = w.annotation().object();
+            if PdfDoc::drawn_by_app(&obj) {
+                self.draw_button(&mut obj)?;
+            }
         }
         // o MuPDF redesenha com o /V cru: os campos com Formatar voltam a mostrar o formatado
         self.redraw_values(Some(page), plain)
@@ -521,6 +621,20 @@ impl PdfDoc {
                 set_aa(&mut self.inner, &mut w, "F", &f)?;
                 set_aa(&mut self.inner, &mut w, "K", &k)?;
             }
+            NewFieldKind::Image => {
+                w.dict_put("FT", name_obj("Btn")?)?;
+                w.dict_put("Ff", int(PUSHBUTTON)?)?;
+                mk.dict_put("TP", int(1)?)?;
+                mk.dict_put("BC", self.inner.new_object_from_str("[0.6]")?)?;
+                crate::actions::write_field_actions(
+                    &self.inner,
+                    &mut w,
+                    &[(
+                        crate::actions::FieldTrigger::MouseUp,
+                        crate::actions::ActionKind::ImportIcon,
+                    )],
+                )?;
+            }
             NewFieldKind::Button => {
                 w.dict_put("FT", name_obj("Btn")?)?;
                 w.dict_put("Ff", int(PUSHBUTTON)?)?;
@@ -565,6 +679,10 @@ impl PdfDoc {
         annot.update()?;
         page_ref.update()?;
         self.refresh_widgets(page, None)?;
+        if kind == NewFieldKind::Image {
+            // o campo Imagem é desenhado pelo app (o MuPDF não desenha ícones)
+            self.draw_button(&mut annot.object())?;
+        }
         Ok(id)
     }
 
@@ -597,7 +715,254 @@ impl PdfDoc {
                 self.check_page(page)?;
                 self.with_snapshot(|d| d.write_tab_order(page, &order))
             }
+            PrepareOp::MoveMany { moves } => {
+                for &(page, id, _) in &moves {
+                    self.widget(page, id)?;
+                }
+                self.with_snapshot(|d| {
+                    let mut pages = Vec::new();
+                    for (page, id, rect) in moves {
+                        let mut a = d.widget(page, id)?.into_annotation();
+                        a.set_rect(Rect::from(rect))?;
+                        a.update()?;
+                        if !pages.contains(&page) {
+                            pages.push(page);
+                        }
+                    }
+                    pages
+                        .into_iter()
+                        .try_for_each(|p| d.refresh_widgets(p, None))
+                })
+            }
+            PrepareOp::DeleteMany { ids } => {
+                for &(page, id) in &ids {
+                    self.widget(page, id)?;
+                }
+                self.with_snapshot(|d| ids.iter().try_for_each(|&(p, id)| d.remove_field(p, id)))
+            }
+            PrepareOp::Duplicate {
+                page,
+                id,
+                pages,
+                offset,
+            } => {
+                self.copyable(page, id)?;
+                let pasting = offset != (0.0, 0.0);
+                let mut targets: Vec<i32> = Vec::new();
+                for p in pages {
+                    self.check_page(p)?;
+                    if (p != page || pasting) && !targets.contains(&p) {
+                        targets.push(p);
+                    }
+                }
+                self.with_snapshot(|d| {
+                    for &p in &targets {
+                        d.duplicate_widget(page, id, p, offset)?;
+                    }
+                    // um redesenho por página, no fim
+                    targets.iter().try_for_each(|&p| d.refresh_widgets(p, None))
+                })
+            }
+            PrepareOp::Paste { items, to } => {
+                self.check_page(to)?;
+                for &(page, id) in &items {
+                    self.copyable(page, id)?;
+                }
+                self.with_snapshot(|d| {
+                    for &(page, id) in &items {
+                        let offset = if page == to { PASTE_OFFSET } else { (0.0, 0.0) };
+                        d.duplicate_widget(page, id, to, offset)?;
+                    }
+                    d.refresh_widgets(to, None)
+                })
+            }
+            PrepareOp::SetPageActions { page, actions } => {
+                self.check_page(page)?;
+                self.with_snapshot(|d| d.write_page_actions(page, &actions))
+            }
+            PrepareOp::Copies { page, id, rects } => {
+                self.copyable(page, id)?;
+                if rects.len() > MAX_COPIES {
+                    return Err(invalid("cópias demais"));
+                }
+                self.with_snapshot(|d| {
+                    // os nomes lidos uma vez; cada cópia nova entra na lista
+                    let mut names = d.field_names()?;
+                    for r in rects {
+                        d.copy_field(page, id, r, &mut names)?;
+                    }
+                    d.refresh_widgets(page, None)
+                })
+            }
         }
+    }
+
+    /// O campo pode ser repetido? Um campo de assinatura já assinado não (como no Acrobat: a
+    /// cópia apontaria para a mesma assinatura).
+    fn copyable(&self, page: i32, id: i32) -> Result<()> {
+        let w = self.widget(page, id)?;
+        let obj = w.annotation().object();
+        let sig = obj
+            .get_dict_inheritable("FT")?
+            .and_then(|t| t.as_name().ok())
+            .as_deref()
+            == Some(b"Sig");
+        if sig && obj.get_dict_inheritable("V")?.is_some() {
+            return Err(invalid(
+                "um campo de assinatura assinado não pode ser copiado",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Repete o widget `id` na página `to`, deslocado: um widget novo do mesmo campo. Um campo
+    /// "mesclado" (o widget é o próprio campo) é antes separado em campo e widget.
+    fn duplicate_widget(&mut self, page: i32, id: i32, to: i32, offset: (f32, f32)) -> Result<i32> {
+        let src = self.widget(page, id)?;
+        let src_obj = src.annotation().object();
+        let mut head = field_head(&src_obj)?;
+        if head.as_indirect()? == id {
+            head = self.split_field(&src_obj, id)?;
+        }
+        let rect = PdfRect::from(src.annotation().rect()?).translated(offset.0, offset.1);
+        let mut page_ref = self.inner.load_pdf_page(to)?;
+        let mut annot = page_ref.create_annotation(PdfAnnotationType::Widget)?;
+        annot.set_rect(Rect::from(rect))?;
+        let new_id = annot_id(&annot)?;
+        let mut w = annot.object();
+        for key in WIDGET_KEYS {
+            if let Some(v) = src_obj.get_dict(*key)? {
+                w.dict_put(*key, copy_tree(&self.inner, &v, 0)?)?;
+            }
+        }
+        w.dict_put("Parent", head.clone())?;
+        kids_array(&head)?.array_push(self.inner.new_indirect(new_id, 0)?)?;
+        annot.update()?;
+        page_ref.update()?;
+        Ok(new_id)
+    }
+
+    /// Separa o campo do seu widget (que eram o mesmo objeto): o campo novo leva nome, tipo,
+    /// valor e os scripts de valor; o widget fica com a aparência, como filho dele.
+    fn split_field(&mut self, widget: &PdfObject, id: i32) -> Result<PdfObject> {
+        let mut w = widget.clone();
+        let mut field = self.inner.add_object(&self.inner.new_dict()?)?;
+        for key in FIELD_KEYS {
+            if let Some(v) = w.get_dict(*key)? {
+                field.dict_put(*key, v)?;
+                w.dict_delete(*key)?;
+            }
+        }
+        // os gatilhos de valor (Tecla, Formatar, Validar, Calcular) são do campo
+        if let Some(mut aa) = w.get_dict("AA")? {
+            let mut field_aa = self.inner.new_dict()?;
+            for key in ["K", "F", "V", "C"] {
+                if let Some(v) = aa.get_dict(key)? {
+                    field_aa.dict_put(key, v)?;
+                    aa.dict_delete(key)?;
+                }
+            }
+            if field_aa.dict_len()? > 0 {
+                field.dict_put("AA", field_aa)?;
+            }
+            if aa.dict_len()? == 0 {
+                w.dict_delete("AA")?;
+            }
+        }
+        // quem apontava para o widget (pai ou /Fields, e /CO) passa a apontar para o campo
+        let field_num = field.as_indirect()?;
+        let holder = match field.get_dict("Parent")? {
+            Some(parent) => parent.get_dict("Kids")?,
+            None => acroform(&mut self.inner)?.get_dict("Fields")?,
+        };
+        if let Some(mut list) = holder {
+            replace_ref(&mut list, id, &field)?;
+        }
+        if let Some(mut co) = acroform(&mut self.inner)?.get_dict("CO")? {
+            replace_ref(&mut co, id, &field)?;
+        }
+        let mut kids = self.inner.new_array()?;
+        kids.array_push(self.inner.new_indirect(id, 0)?)?;
+        field.dict_put("Kids", kids)?;
+        w.dict_put("Parent", self.inner.new_indirect(field_num, 0)?)?;
+        Ok(field)
+    }
+
+    /// Criar várias cópias: um campo novo como o `id` (mesmas propriedades e valor), chamado
+    /// `nome_k`, no retângulo `rect` da mesma página.
+    fn copy_field(
+        &mut self,
+        page: i32,
+        id: i32,
+        rect: PdfRect,
+        names: &mut Vec<String>,
+    ) -> Result<i32> {
+        let src = self.widget(page, id)?;
+        let src_obj = src.annotation().object();
+        let head = field_head(&src_obj)?;
+        if flags_of(&head)? & RADIO != 0 {
+            return Err(invalid(
+                "botões de opção não são copiados assim; use Duplicar",
+            ));
+        }
+        // filho de um campo pai ("a.b"): a cópia é outro filho dele ("a.b_1"), com o nome parcial
+        // sem ponto e as chaves herdadas do pai
+        let parent = head.get_dict("Parent")?;
+        let partial = partial_name(&head)?;
+        let full = w_name(&src)?;
+        // livre: nem um campo nem o nó de outros ("a" com "a.b")
+        let taken = |n: &str| {
+            names
+                .iter()
+                .any(|x| x == n || x.strip_prefix(n).is_some_and(|r| r.starts_with('.')))
+        };
+        let k = (1..)
+            .find(|k| !taken(&format!("{full}_{k}")))
+            .expect("sequência infinita");
+        names.push(format!("{full}_{k}"));
+        let name = format!("{partial}_{k}");
+        let acro = acroform(&mut self.inner)?;
+        let mut page_ref = self.inner.load_pdf_page(page)?;
+        let mut annot = page_ref.create_annotation(PdfAnnotationType::Widget)?;
+        annot.set_rect(Rect::from(rect))?;
+        let new_id = annot_id(&annot)?;
+        let mut w = annot.object();
+        for (from, keys) in [(&src_obj, WIDGET_KEYS), (&head, FIELD_KEYS)] {
+            for key in keys {
+                if *key == "Parent" {
+                    continue;
+                }
+                if let Some(v) = from.get_dict(*key)? {
+                    w.dict_put(*key, copy_tree(&self.inner, &v, 0)?)?;
+                }
+            }
+        }
+        // as ações do widget (mouse, foco) mais as de valor do campo (Tecla, Formatar…)
+        if head.as_indirect()? != id {
+            if let Some(field_aa) = head
+                .get_dict("AA")?
+                .filter(|a| a.is_dict().unwrap_or(false))
+            {
+                let mut aa = child_or_new(&self.inner, &mut w, "AA", false)?;
+                for key in ["K", "F", "V", "C"] {
+                    if let Some(v) = field_aa.get_dict(key)? {
+                        aa.dict_put(key, copy_tree(&self.inner, &v, 0)?)?;
+                    }
+                }
+            }
+        }
+        w.dict_put("T", PdfObject::new_string(&name)?)?;
+        let me = self.inner.new_indirect(new_id, 0)?;
+        match parent {
+            Some(parent) => {
+                w.dict_put("Parent", parent.clone())?;
+                kids_array(&parent)?.array_push(me)?;
+            }
+            None => fields_of(&acro)?.array_push(me)?,
+        }
+        annot.update()?;
+        page_ref.update()?;
+        Ok(new_id)
     }
 
     /// A ordem de tabulação da página (pelo /Tabs).
@@ -737,11 +1102,15 @@ impl PdfDoc {
     fn write_button(&mut self, obj: &mut PdfObject, p: &FieldProps) -> Result<()> {
         let mut mk = child_or_new(&self.inner, obj, "MK", false)?;
         mk.dict_put("CA", PdfObject::new_string(&p.button_label)?)?;
-        if p.reset_action {
-            obj.dict_put("A", self.inner.new_object_from_str("<</S/ResetForm>>")?)?;
-        } else if resets_form(obj)? {
-            obj.dict_delete("A")?;
+        mk.dict_put("TP", int(i32::from(p.layout.min(6)))?)?;
+        if let Some(path) = &p.icon_path {
+            let icon = crate::button_icon::icon_from_file(&mut self.inner, path)?;
+            mk.dict_put("I", icon)?;
+        } else if !p.has_icon {
+            mk.dict_delete("I")?;
         }
+        let (h, _) = crate::button_icon::BEHAVIORS[usize::from(p.behavior.min(3))];
+        obj.dict_put("H", name_obj(h)?)?;
         Ok(())
     }
 
@@ -769,15 +1138,35 @@ impl PdfDoc {
             String::new()
         };
         let default = text(head.get_dict("DV")?)?;
-        let label = obj
-            .get_dict("MK")?
-            .and_then(|mk| mk.get_dict("CA").ok().flatten());
+        let mk = obj.get_dict("MK")?;
+        let label = mk.as_ref().and_then(|mk| mk.get_dict("CA").ok().flatten());
+        let layout = mk
+            .as_ref()
+            .and_then(|mk| mk.get_dict("TP").ok().flatten())
+            .and_then(|t| t.as_int().ok())
+            .unwrap_or(0)
+            .clamp(0, 6) as u8;
+        let has_icon = mk
+            .as_ref()
+            .is_some_and(|mk| mk.get_dict("I").ok().flatten().is_some());
+        let h = obj
+            .get_dict("H")?
+            .and_then(|h| h.as_name().ok())
+            .unwrap_or_else(|| b"I".to_vec());
+        let behavior = crate::button_icon::BEHAVIORS
+            .iter()
+            .position(|(k, _)| k.as_bytes() == h.as_slice())
+            .unwrap_or(1) as u8;
         Ok(FieldProps {
             format: parse_format(&aa_script(&head, "F")?),
             validate: parse_validate(&aa_script(&head, "V")?),
             calc: parse_calc(&aa_script(&head, "C")?),
             button_label: text(label)?,
-            reset_action: is_button && flags & PUSHBUTTON != 0 && resets_form(&obj)?,
+            layout,
+            behavior,
+            has_icon,
+            icon_path: None,
+            actions: crate::actions::read_field_actions(&self.inner, &obj)?,
             name: partial_name(&head)?,
             tooltip: text(head.get_dict("TU")?)?,
             required: flags & REQUIRED != 0,
@@ -904,7 +1293,23 @@ impl PdfDoc {
             _ => {}
         }
         head.dict_put("Ff", int(flags)?)?;
-        self.refresh_widgets(page, Some(id))
+        if p.actions != before.actions {
+            crate::actions::write_field_actions(&self.inner, &mut obj, &p.actions)?;
+        }
+        self.refresh_widgets(page, Some(id))?;
+        // botão de ação: o app desenha (rótulo, layout e ícone), como o Acrobat mostraria (os com
+        // ícone ou layout já foram desenhados pelo refresh)
+        if flags & PUSHBUTTON != 0
+            && !PdfDoc::drawn_by_app(&obj)
+            && obj
+                .get_dict_inheritable("FT")?
+                .and_then(|t| t.as_name().ok())
+                .as_deref()
+                == Some(b"Btn")
+        {
+            self.draw_button(&mut obj)?;
+        }
+        Ok(())
     }
 
     /// Botão de opção `id` sai do grupo atual (que some se ficar vazio; o valor dele deixa de
@@ -1056,23 +1461,26 @@ impl PdfDoc {
     /// Exclui o campo `id` (o grupo de opção some junto com o último botão).
     pub fn delete_field(&mut self, page: i32, id: i32) -> Result<()> {
         self.widget(page, id)?;
-        self.with_snapshot(|d| {
-            let w = d.widget(page, id)?;
-            let obj = w.annotation().object();
-            let head = field_head(&obj)?;
-            if head.as_indirect()? == id {
-                d.unlink_field(&head)?;
-            } else {
-                let mut kids = kids_array(&head)?;
-                remove_ref(&mut kids, id)?;
-                if kids.len()? == 0 {
-                    d.unlink_field(&head)?;
-                }
+        self.with_snapshot(|d| d.remove_field(page, id))
+    }
+
+    /// Tira o widget da página e da árvore de campos (o campo some com o último widget).
+    fn remove_field(&mut self, page: i32, id: i32) -> Result<()> {
+        let w = self.widget(page, id)?;
+        let obj = w.annotation().object();
+        let head = field_head(&obj)?;
+        if head.as_indirect()? == id {
+            self.unlink_field(&head)?;
+        } else {
+            let mut kids = kids_array(&head)?;
+            remove_ref(&mut kids, id)?;
+            if kids.len()? == 0 {
+                self.unlink_field(&head)?;
             }
-            let mut page_ref = d.inner.load_pdf_page(page)?;
-            page_ref.delete_annotation(w.into_annotation())?;
-            page_ref.update()?;
-            Ok(())
-        })
+        }
+        let mut page_ref = self.inner.load_pdf_page(page)?;
+        page_ref.delete_annotation(w.into_annotation())?;
+        page_ref.update()?;
+        Ok(())
     }
 }

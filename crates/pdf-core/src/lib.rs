@@ -1,8 +1,10 @@
 //! Única camada que conhece o MuPDF.
 pub mod sample;
 
+mod actions;
 mod annot_edit;
 mod attachments;
+mod button_icon;
 mod comment_summary;
 mod comments_io;
 mod compare;
@@ -41,8 +43,10 @@ mod types;
 mod worker;
 mod xfdf;
 
+pub use actions::{named_label, ActionKind, FieldTrigger, PageTrigger, NAMED_ITEMS};
 pub use annot_edit::{callout_end, dist_to_segment, MAX_VERTICES};
 pub use attachments::MAX_ATTACHMENT_BYTES;
+pub use button_icon::{BEHAVIORS, LAYOUTS};
 pub use comment_summary::{
     summarize_comments, SummaryFont, SummaryLayout, SummaryOptions, SummarySort,
 };
@@ -67,6 +71,7 @@ pub use form_scripts::{
 };
 pub use forms::{FieldInfo, FieldKind, FormNotes};
 pub use layers::LayerNode;
+pub use links::action_link;
 pub use ocr::{tessdata_dir, OcrLanguage, OcrReport};
 pub use page_labels::{apply_labels, format_label, label_list, PageLabelRange, PageLabelStyle};
 pub use pagination::{

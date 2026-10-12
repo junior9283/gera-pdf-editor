@@ -126,10 +126,22 @@ pub enum Request {
     },
     /// Limpar formulário (valores padrão).
     ResetForm,
-    /// Clique num botão com a ação Redefinir formulário (só os campos da ação).
-    PressReset {
+    /// Ação Redefinir formulário: os campos `fields` (todos, se vazio); com `exclude`, todos
+    /// menos eles.
+    ResetFields {
+        fields: Vec<String>,
+        exclude: bool,
+    },
+    /// Campo Imagem: a figura do arquivo vira o ícone do botão.
+    SetButtonIcon {
         page: i32,
         id: i32,
+        path: PathBuf,
+    },
+    /// Ação Mostrar/ocultar campos (não entra no desfazer, como no Acrobat).
+    ShowFields {
+        names: Vec<String>,
+        hide: bool,
     },
     /// Preparar formulário: criar, editar, mover ou excluir um campo.
     Prepare(crate::PrepareOp),
@@ -691,8 +703,15 @@ impl State {
                 },
             ),
             Request::ResetForm => self.edit(send, |d| d.reset_form().map(|()| Changed::Document)),
-            Request::PressReset { page, id } => self.edit(send, |d| {
-                d.press_reset(page, id).map(|()| Changed::Document)
+            Request::ResetFields { fields, exclude } => self.edit(send, |d| {
+                d.reset_fields(&fields, exclude).map(|()| Changed::Document)
+            }),
+            Request::SetButtonIcon { page, id, path } => self.edit(send, |d| {
+                d.set_button_icon(page, id, &path)
+                    .map(|()| Changed::Pages(vec![page]))
+            }),
+            Request::ShowFields { names, hide } => self.edit(send, |d| {
+                d.show_fields(&names, hide).map(|_| Changed::Fields)
             }),
             Request::SignDigitally {
                 place,
@@ -756,7 +775,15 @@ impl State {
             Request::CalcOrder => send(Response::CalcOrder(
                 self.with_doc(|d| d.calc_order_names()).unwrap_or_default(),
             )),
-            Request::Prepare(op) => self.edit(send, |d| d.prepare(op).map(|()| Changed::Fields)),
+            Request::Prepare(op) => {
+                // as ações de página vêm no resumo do documento
+                let changed = if matches!(op, crate::PrepareOp::SetPageActions { .. }) {
+                    Changed::Document
+                } else {
+                    Changed::Fields
+                };
+                self.edit(send, |d| d.prepare(op).map(|()| changed))
+            }
             Request::PageImages { page } => send(Response::PageImages {
                 page,
                 images: self.with_doc(|d| d.page_images(page)).unwrap_or_default(),

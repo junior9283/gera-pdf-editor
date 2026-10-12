@@ -1841,6 +1841,9 @@ impl PdfDoc {
             labels: self.labels(),
             layers: self.layers(),
             form_notes: self.form_notes_of(&fields).unwrap_or_default(),
+            page_actions: (0..self.page_count()?)
+                .filter_map(|p| Some((p, self.page_actions(p).ok().filter(|a| !a.is_empty())?)))
+                .collect(),
             fields,
             security: self.security()?,
             is_comparison: self.is_comparison(),
