@@ -53,6 +53,8 @@ pub enum ArrangeCmd {
     Duplicate,
     Copies,
     Props,
+    /// Detectar campos automaticamente (todas as páginas).
+    Detect,
 }
 
 #[derive(Default)]
@@ -78,6 +80,8 @@ pub struct PrepareState {
     pub cmds: Vec<ArrangeCmd>,
     /// Prévia de "Criar várias cópias": (página, retângulo).
     pub ghosts: Vec<(i32, PdfRect)>,
+    /// A detecção automática já rodou ao entrar neste documento.
+    detected: bool,
     /// Grupo dos botões de opção colocados enquanto a ferramenta segue ativa.
     radio_group: Option<String>,
     /// Campo recém-criado a selecionar quando a lista de campos chegar: (página, ids que a página
@@ -123,6 +127,13 @@ impl PrepareState {
         if tool.is_some() {
             self.selection.clear();
         }
+    }
+
+    /// Entrar no Preparar: num documento sem campos, detecta os campos (uma vez por documento),
+    /// como o Acrobat.
+    pub fn should_detect(&mut self, fields: &[FieldInfo]) -> bool {
+        let first = !std::mem::replace(&mut self.detected, true);
+        first && fields.is_empty()
     }
 
     /// A âncora (último selecionado).
@@ -535,6 +546,13 @@ pub fn arrange_menu(ui: &mut egui::Ui, cmds: &mut Vec<ArrangeCmd>, count: usize,
     ui.separator();
     item(ui, count == 1, "Duplicar…", ArrangeCmd::Duplicate);
     item(ui, count == 1, "Criar várias cópias…", ArrangeCmd::Copies);
+    ui.separator();
+    item(
+        ui,
+        true,
+        "Detectar campos automaticamente",
+        ArrangeCmd::Detect,
+    );
 }
 
 /// Itens de alinhar (com as teclas do Acrobat).
@@ -807,5 +825,17 @@ mod tests {
             nudge_op(&st, &fields, 1.0, 0.0),
             Some(PrepareOp::Move { id: 2, .. })
         ));
+    }
+
+    #[test]
+    fn entering_prepare_without_fields_asks_for_detection() {
+        let mut st = PrepareState::default();
+        assert!(st.should_detect(&[]), "documento sem campos: detecta");
+        assert!(!st.should_detect(&[]), "só uma vez por documento");
+        let mut other = PrepareState::default();
+        assert!(
+            !other.should_detect(&[field_at(1, 0.0, 0.0)]),
+            "já tem formulário"
+        );
     }
 }

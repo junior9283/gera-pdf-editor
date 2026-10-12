@@ -2268,6 +2268,9 @@ impl DocTab {
         self.prepare.selection.clear();
         self.prepare.preview = false;
         self.arrange_dialog = None;
+        if self.prepare_tools && self.view.is_some() && self.prepare.should_detect(&self.fields) {
+            self.run_arrange(crate::prepare::ArrangeCmd::Detect);
+        }
         self.edit_pdf_tools = id == tc::EDIT_PDF;
         let pagination = match id {
             tc::WATERMARK => Some(pdf_core::Pagination::Watermark),
@@ -3603,6 +3606,14 @@ impl DocTab {
                 let to = self.last.current_page as i32;
                 self.worker
                     .send(Request::Prepare(pdf_core::PrepareOp::Paste { items, to }));
+            }
+            C::Detect => {
+                let pages = (0..pages as i32).collect();
+                self.worker
+                    .send(Request::Prepare(pdf_core::PrepareOp::Detect { pages }));
+                self.status =
+                    "Detecção automática de campos: os campos achados aparecem nas páginas (Desfazer tira todos)."
+                        .into();
             }
             C::Props => {
                 if let Some((page, id)) = anchor {
