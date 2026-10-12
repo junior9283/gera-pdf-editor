@@ -99,6 +99,12 @@ pub enum PrepareOp {
         id: i32,
         rects: Vec<PdfRect>,
     },
+    /// Colar (`Ctrl+V`): os campos copiados viram widgets dos mesmos campos na página `to`
+    /// (deslocados se for a mesma página), numa etapa.
+    Paste {
+        items: Vec<(i32, i32)>,
+        to: i32,
+    },
     /// Ações da página (Abrir e Fechar página).
     SetPageActions {
         page: i32,
@@ -169,6 +175,9 @@ const RADIO: i32 = 1 << 15;
 const COMBO: i32 = 1 << 17;
 const EDIT: i32 = 1 << 18;
 const PUSHBUTTON: i32 = 1 << 16;
+
+/// Deslocamento do campo colado na mesma página (como colar no Acrobat).
+const PASTE_OFFSET: (f32, f32) = (10.0, 10.0);
 
 /// Teto de "Criar várias cópias" (20 × 20).
 const MAX_COPIES: usize = 400;
@@ -533,8 +542,7 @@ impl PdfDoc {
             // o MuPDF não desenha o ícone (/MK /I): os botões com ícone ou layout são do app
             let mut obj = w.annotation().object();
             if PdfDoc::drawn_by_app(&obj) {
-                let rect = PdfRect::from(w.annotation().rect()?);
-                self.draw_button(&mut obj, rect)?;
+                self.draw_button(&mut obj)?;
             }
         }
         // o MuPDF redesenha com o /V cru: os campos com Formatar voltam a mostrar o formatado
@@ -671,6 +679,10 @@ impl PdfDoc {
         annot.update()?;
         page_ref.update()?;
         self.refresh_widgets(page, None)?;
+        if kind == NewFieldKind::Image {
+            // o campo Imagem é desenhado pelo app (o MuPDF não desenha ícones)
+            self.draw_button(&mut annot.object())?;
+        }
         Ok(id)
     }
 
@@ -734,7 +746,7 @@ impl PdfDoc {
                 pages,
                 offset,
             } => {
-                self.widget(page, id)?;
+                self.copyable(page, id)?;
                 let pasting = offset != (0.0, 0.0);
                 let mut targets: Vec<i32> = Vec::new();
                 for p in pages {
@@ -751,12 +763,25 @@ impl PdfDoc {
                     targets.iter().try_for_each(|&p| d.refresh_widgets(p, None))
                 })
             }
+            PrepareOp::Paste { items, to } => {
+                self.check_page(to)?;
+                for &(page, id) in &items {
+                    self.copyable(page, id)?;
+                }
+                self.with_snapshot(|d| {
+                    for &(page, id) in &items {
+                        let offset = if page == to { PASTE_OFFSET } else { (0.0, 0.0) };
+                        d.duplicate_widget(page, id, to, offset)?;
+                    }
+                    d.refresh_widgets(to, None)
+                })
+            }
             PrepareOp::SetPageActions { page, actions } => {
                 self.check_page(page)?;
                 self.with_snapshot(|d| d.write_page_actions(page, &actions))
             }
             PrepareOp::Copies { page, id, rects } => {
-                self.widget(page, id)?;
+                self.copyable(page, id)?;
                 if rects.len() > MAX_COPIES {
                     return Err(invalid("cópias demais"));
                 }
@@ -770,6 +795,24 @@ impl PdfDoc {
                 })
             }
         }
+    }
+
+    /// O campo pode ser repetido? Um campo de assinatura já assinado não (como no Acrobat: a
+    /// cópia apontaria para a mesma assinatura).
+    fn copyable(&self, page: i32, id: i32) -> Result<()> {
+        let w = self.widget(page, id)?;
+        let obj = w.annotation().object();
+        let sig = obj
+            .get_dict_inheritable("FT")?
+            .and_then(|t| t.as_name().ok())
+            .as_deref()
+            == Some(b"Sig");
+        if sig && obj.get_dict_inheritable("V")?.is_some() {
+            return Err(invalid(
+                "um campo de assinatura assinado não pode ser copiado",
+            ));
+        }
+        Ok(())
     }
 
     /// Repete o widget `id` na página `to`, deslocado: um widget novo do mesmo campo. Um campo
@@ -862,18 +905,22 @@ impl PdfDoc {
                 "botões de opção não são copiados assim; use Duplicar",
             ));
         }
-        let base = w_name(&src)?;
+        // filho de um campo pai ("a.b"): a cópia é outro filho dele ("a.b_1"), com o nome parcial
+        // sem ponto e as chaves herdadas do pai
+        let parent = head.get_dict("Parent")?;
+        let partial = partial_name(&head)?;
+        let full = w_name(&src)?;
         // livre: nem um campo nem o nó de outros ("a" com "a.b")
         let taken = |n: &str| {
             names
                 .iter()
                 .any(|x| x == n || x.strip_prefix(n).is_some_and(|r| r.starts_with('.')))
         };
-        let name = (1..)
-            .map(|k| format!("{base}_{k}"))
-            .find(|n| !taken(n))
+        let k = (1..)
+            .find(|k| !taken(&format!("{full}_{k}")))
             .expect("sequência infinita");
-        names.push(name.clone());
+        names.push(format!("{full}_{k}"));
+        let name = format!("{partial}_{k}");
         let acro = acroform(&mut self.inner)?;
         let mut page_ref = self.inner.load_pdf_page(page)?;
         let mut annot = page_ref.create_annotation(PdfAnnotationType::Widget)?;
@@ -890,11 +937,29 @@ impl PdfDoc {
                 }
             }
         }
-        if let Some(aa) = head.get_dict("AA")? {
-            w.dict_put("AA", copy_tree(&self.inner, &aa, 0)?)?;
+        // as ações do widget (mouse, foco) mais as de valor do campo (Tecla, Formatar…)
+        if head.as_indirect()? != id {
+            if let Some(field_aa) = head
+                .get_dict("AA")?
+                .filter(|a| a.is_dict().unwrap_or(false))
+            {
+                let mut aa = child_or_new(&self.inner, &mut w, "AA", false)?;
+                for key in ["K", "F", "V", "C"] {
+                    if let Some(v) = field_aa.get_dict(key)? {
+                        aa.dict_put(key, copy_tree(&self.inner, &v, 0)?)?;
+                    }
+                }
+            }
         }
         w.dict_put("T", PdfObject::new_string(&name)?)?;
-        fields_of(&acro)?.array_push(self.inner.new_indirect(new_id, 0)?)?;
+        let me = self.inner.new_indirect(new_id, 0)?;
+        match parent {
+            Some(parent) => {
+                w.dict_put("Parent", parent.clone())?;
+                kids_array(&parent)?.array_push(me)?;
+            }
+            None => fields_of(&acro)?.array_push(me)?,
+        }
         annot.update()?;
         page_ref.update()?;
         Ok(new_id)
@@ -1242,8 +1307,7 @@ impl PdfDoc {
                 .as_deref()
                 == Some(b"Btn")
         {
-            let rect = PdfRect::from(self.widget(page, id)?.annotation().rect()?);
-            self.draw_button(&mut obj, rect)?;
+            self.draw_button(&mut obj)?;
         }
         Ok(())
     }

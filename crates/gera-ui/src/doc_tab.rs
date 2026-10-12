@@ -225,9 +225,9 @@ pub struct DocTab {
     /// Ações de abrir e fechar página (só das páginas que as têm) e a página da última vez.
     page_actions: Vec<(i32, Vec<(pdf_core::PageTrigger, pdf_core::ActionKind)>)>,
     action_page: Option<i32>,
-    /// Página aonde uma ação de abrir página levou: lá, as ações de navegar não rodam de novo
-    /// (duas páginas que se mandam uma para a outra não ficam pulando).
-    auto_jump: Option<i32>,
+    /// Uma ação de abrir página já navegou neste documento: as outras não navegam (páginas que
+    /// se mandam umas para as outras não prendem o leitor).
+    page_goto_done: bool,
     /// Estado do histórico de edições no worker.
     history: HistoryState,
     /// O motor de PDF (thread do worker) parou; já avisado.
@@ -246,6 +246,8 @@ pub struct DocTab {
     pub(crate) prepare: crate::prepare::PrepareState,
     /// Janela Duplicar ou Criar várias cópias do Preparar.
     arrange_dialog: Option<crate::shell::arrange_dialogs::ArrangeDialog>,
+    /// Campos copiados no Preparar: os nomes a pôr na área de transferência do sistema.
+    prepare_copied: Option<String>,
     /// Linha Editar PDF aberta (as imagens viram objetos editáveis).
     pub(crate) edit_pdf_tools: bool,
     pub(crate) edit_pdf: crate::edit_pdf::EditPdfState,
@@ -421,7 +423,7 @@ impl DocTab {
             field_triggers: Vec::new(),
             page_actions: Vec::new(),
             action_page: None,
-            auto_jump: None,
+            page_goto_done: false,
             history: HistoryState::default(),
             engine_stopped: false,
             outline: Vec::new(),
@@ -432,6 +434,7 @@ impl DocTab {
             prepare_tools: false,
             prepare: Default::default(),
             arrange_dialog: None,
+            prepare_copied: None,
             edit_pdf_tools: false,
             edit_pdf: Default::default(),
             pagination: Default::default(),
@@ -2523,6 +2526,9 @@ impl DocTab {
         for cmd in std::mem::take(&mut self.prepare.cmds) {
             self.run_arrange(cmd);
         }
+        if let Some(text) = self.prepare_copied.take() {
+            ui.ctx().copy_text(text);
+        }
         self.arrange_window(ui.ctx());
         self.field_alert_window(ui.ctx());
         self.stamp_windows(ui.ctx());
@@ -3579,20 +3585,24 @@ impl DocTab {
         });
         let pages = self.page_total();
         match cmd {
-            C::Copy => self.prepare.clipboard = self.prepare.selection.clone(),
+            C::Copy => {
+                self.prepare.clipboard = self.prepare.selection.clone();
+                // os nomes também vão para a área de transferência do sistema: sem nada lá, o
+                // Ctrl+V nem chega ao app
+                let names: Vec<&str> = self
+                    .fields
+                    .iter()
+                    .filter(|f| self.prepare.is_selected(f.page, f.id))
+                    .map(|f| f.name.as_str())
+                    .collect();
+                self.prepare_copied = Some(names.join("\n"));
+            }
             C::Paste => {
                 // no lugar do original; na mesma página, um pouco abaixo (como colar no Acrobat)
+                let items = self.prepare.clipboard.clone();
                 let to = self.last.current_page as i32;
-                for (page, id) in self.prepare.clipboard.clone() {
-                    let offset = if page == to { (10.0, 10.0) } else { (0.0, 0.0) };
-                    self.worker
-                        .send(Request::Prepare(pdf_core::PrepareOp::Duplicate {
-                            page,
-                            id,
-                            pages: vec![to],
-                            offset,
-                        }));
-                }
+                self.worker
+                    .send(Request::Prepare(pdf_core::PrepareOp::Paste { items, to }));
             }
             C::Props => {
                 if let Some((page, id)) = anchor {
@@ -3629,7 +3639,7 @@ impl DocTab {
     fn run_field_triggers(&mut self, ctx: &egui::Context) {
         use pdf_core::PageTrigger;
         let filling = !self.prepare_tools || self.prepare.preview;
-        use crate::fields::auto_allowed;
+        use crate::fields::{auto_allowed, Auto};
         use pdf_core::FieldTrigger as T;
         let mut todo: Vec<(i32, i32, pdf_core::ActionKind)> = Vec::new();
         let mut skipped = false;
@@ -3637,7 +3647,7 @@ impl DocTab {
             let clicked = matches!(trigger, T::MouseUp | T::MouseDown);
             if let Some(f) = self.fields.iter().find(|f| f.page == page && f.id == id) {
                 for (_, a) in f.actions.iter().filter(|(t, _)| *t == trigger) {
-                    if clicked || auto_allowed(a, false) {
+                    if clicked || auto_allowed(a, Auto::Field) {
                         todo.push((page, id, a.clone()));
                     } else {
                         skipped = true;
@@ -3646,7 +3656,9 @@ impl DocTab {
             }
         }
         let current = self.last.current_page as i32;
-        if filling && self.view.is_some() && self.action_page != Some(current) {
+        // as ações de página mexem no formulário: só com a permissão de preencher
+        let allowed = filling && self.security.permissions.forms;
+        if allowed && self.view.is_some() && self.action_page != Some(current) {
             let of = |p: Option<i32>, t: PageTrigger| -> Vec<pdf_core::ActionKind> {
                 self.page_actions
                     .iter()
@@ -3655,25 +3667,28 @@ impl DocTab {
                     .map(|(_, a)| a.clone())
                     .collect()
             };
-            let mut page_todo = of(self.action_page, PageTrigger::Close);
-            page_todo.extend(of(Some(current), PageTrigger::Open));
-            // chegou aqui por uma ação de abrir página: não salta de novo
-            let jumped_here = self.auto_jump.take() == Some(current);
-            for a in page_todo {
-                if jumped_here && matches!(a, pdf_core::ActionKind::GoTo { .. }) {
+            let page_todo = of(self.action_page, PageTrigger::Close)
+                .into_iter()
+                .map(|a| (Auto::PageClose, a))
+                .chain(
+                    of(Some(current), PageTrigger::Open)
+                        .into_iter()
+                        .map(|a| (Auto::PageOpen, a)),
+                );
+            for (origin, a) in page_todo.collect::<Vec<_>>() {
+                let navigate = matches!(a, pdf_core::ActionKind::GoTo { .. });
+                if navigate && origin == Auto::PageOpen && self.page_goto_done {
                     continue;
                 }
-                if !auto_allowed(&a, true) {
+                if !auto_allowed(&a, origin) {
                     skipped = true;
                     continue;
                 }
-                if let pdf_core::ActionKind::GoTo { page } = a {
-                    self.auto_jump = Some(page);
-                }
+                self.page_goto_done |= navigate;
                 todo.push((current, -1, a));
             }
             self.action_page = Some(current);
-        } else if !filling {
+        } else if !allowed {
             self.action_page = None;
         }
         if skipped {

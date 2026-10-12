@@ -45,6 +45,9 @@ pub(crate) fn icon_from_file(doc: &mut PdfDocument, path: &Path) -> Result<PdfOb
     form_xobject(doc, ops.as_bytes(), res, [0.0, 0.0, w, h])
 }
 
+/// Marca dos botões cuja aparência o app desenhou (chave própria, ignorada pelos leitores).
+const APP_MARK: &str = "GeraAP";
+
 thread_local! {
     /// Helvetica do MuPDF, para medir os rótulos (carregada uma vez por thread).
     static HELVETICA: Option<Font> = Font::new("Helvetica").ok();
@@ -124,23 +127,34 @@ impl PdfDoc {
     }
 
     /// Botão que o app desenha (com ícone ou layout diferente de "Somente rótulo")?
+    /// Só os botões de ação que o app já desenhou (marca /GeraAP): os de outros programas
+    /// guardam a aparência deles (estados, pressionado) até serem editados aqui.
     pub(crate) fn drawn_by_app(obj: &PdfObject) -> bool {
-        obj.get_dict("MK").ok().flatten().is_some_and(|mk| {
-            mk.get_dict("I").ok().flatten().is_some()
-                || mk
-                    .get_dict("TP")
-                    .ok()
-                    .flatten()
-                    .and_then(|t| t.as_int().ok())
-                    .is_some_and(|t| t != 0)
-        })
+        crate::pdf_obj::get(obj, APP_MARK).is_some_and(|m| m.as_bool().unwrap_or(false))
     }
 
     /// Gera a aparência (/AP /N) do botão de ação: fundo, borda, ícone e rótulo, pelo layout.
-    pub(crate) fn draw_button(&mut self, obj: &mut PdfObject, rect: PdfRect) -> Result<()> {
-        let (w, h) = (rect.width().max(1.0), rect.height().max(1.0));
+    pub(crate) fn draw_button(&mut self, obj: &mut PdfObject) -> Result<()> {
         let mk = obj.get_dict("MK")?;
         let get = |k: &str| mk.as_ref().and_then(|m| m.get_dict(k).ok().flatten());
+        // os lados do /Rect; com /MK /R 90 ou 270, o desenho em pé tem os lados trocados
+        let side = |a: i32, b: i32| -> f32 {
+            let v = |k| {
+                crate::pdf_obj::get(obj, "Rect")
+                    .and_then(|r| r.get_array(k).ok().flatten())
+                    .and_then(|n| n.as_float().ok())
+                    .unwrap_or(0.0)
+            };
+            (v(b) - v(a)).abs().max(1.0)
+        };
+        let rotation = get("R")
+            .and_then(|r| r.as_int().ok())
+            .unwrap_or(0)
+            .rem_euclid(360);
+        let (w, h) = match rotation {
+            90 | 270 => (side(1, 3), side(0, 2)),
+            _ => (side(0, 2), side(1, 3)),
+        };
         let layout = get("TP")
             .and_then(|t| t.as_int().ok())
             .unwrap_or(0)
@@ -203,10 +217,20 @@ impl PdfDoc {
             res.dict_put("Font", fonts)?;
         }
         ops += "Q";
-        let stream = form_xobject(&mut self.inner, ops.as_bytes(), res, [0.0, 0.0, w, h])?;
+        let mut stream = form_xobject(&mut self.inner, ops.as_bytes(), res, [0.0, 0.0, w, h])?;
+        let matrix = match rotation {
+            90 => Some("[0 1 -1 0 0 0]"),
+            180 => Some("[-1 0 0 -1 0 0]"),
+            270 => Some("[0 -1 1 0 0 0]"),
+            _ => None,
+        };
+        if let Some(m) = matrix {
+            stream.dict_put("Matrix", self.inner.new_object_from_str(m)?)?;
+        }
         let mut ap = self.inner.new_dict()?;
         ap.dict_put("N", stream)?;
         obj.dict_put("AP", ap)?;
+        obj.dict_put(APP_MARK, PdfObject::new_bool(true))?;
         Ok(())
     }
 
@@ -218,7 +242,6 @@ impl PdfDoc {
         let icon = icon_from_file(&mut self.inner, path)?;
         self.with_snapshot(|d| {
             let w = d.widget(page, id)?;
-            let rect = PdfRect::from(w.annotation().rect()?);
             let mut obj = w.annotation().object();
             let mut mk = match obj.get_dict("MK")? {
                 Some(mk) if mk.is_dict()? => mk,
@@ -235,7 +258,7 @@ impl PdfDoc {
             if tp == 0 {
                 mk.dict_put("TP", PdfObject::new_int(1)?)?;
             }
-            d.draw_button(&mut obj, rect)
+            d.draw_button(&mut obj)
         })
     }
 }

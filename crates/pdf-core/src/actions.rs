@@ -206,8 +206,10 @@ fn read_one(doc: &PdfDocument, a: &PdfObject) -> Result<ActionKind> {
                         doc.lookup_page_number(&p).ok()
                     }
                 });
+            // página fora do documento (PDF hostil ou mal feito): preservada como estava
+            let count = doc.page_count().unwrap_or(0);
             match page {
-                Some(page) if page >= 0 => ActionKind::GoTo { page },
+                Some(page) if (0..count).contains(&page) => ActionKind::GoTo { page },
                 _ => other(a, &kind)?,
             }
         }
@@ -445,26 +447,58 @@ pub(crate) fn write_field_actions(
     w: &mut PdfObject,
     list: &[(FieldTrigger, ActionKind)],
 ) -> Result<()> {
-    w.dict_delete("A")?;
-    let mut aa = match w.get_dict("AA")? {
-        Some(aa) if aa.is_dict()? => aa,
-        _ => {
-            w.dict_put("AA", doc.new_dict()?)?;
-            w.get_dict("AA")?.expect("acabou de ser posto")
+    let mut before = read_actions_of(doc, w)?;
+    // ações que estavam no nó do campo passam para o widget (senão voltariam ao ser tiradas)
+    let mut head = crate::forms::field_head(w)?;
+    if before.is_empty() && head.as_indirect()? != w.as_indirect()? {
+        if !read_actions_of(doc, &head)?.is_empty() {
+            head.dict_delete("A")?;
+            if let Some(mut aa) = head
+                .get_dict("AA")?
+                .filter(|aa| aa.is_dict().unwrap_or(false))
+            {
+                for t in FieldTrigger::ALL {
+                    aa.dict_delete(t.key())?;
+                }
+            }
         }
-    };
+        before = Vec::new();
+    }
     for t in FieldTrigger::ALL {
-        aa.dict_delete(t.key())?;
         let mine = of_trigger(list, t);
-        if let Some(chain) = chain_obj(doc, &mine)? {
+        // gatilho sem mudança fica como está no arquivo (o modelo do app resume algumas ações)
+        if of_trigger(&before, t) == mine {
+            continue;
+        }
+        let chain = chain_obj(doc, &mine)?;
+        if t == FieldTrigger::MouseUp {
+            w.dict_delete("A")?;
+        }
+        let aa = match w.get_dict("AA")? {
+            Some(aa) if aa.is_dict()? => Some(aa),
+            _ => None,
+        };
+        if let Some(mut aa) = aa.clone() {
+            aa.dict_delete(t.key())?;
+        }
+        if let Some(chain) = chain {
             if t == FieldTrigger::MouseUp {
                 w.dict_put("A", chain)?;
             } else {
+                let mut aa = match aa {
+                    Some(aa) => aa,
+                    None => {
+                        w.dict_put("AA", doc.new_dict()?)?;
+                        w.get_dict("AA")?.expect("acabou de ser posto")
+                    }
+                };
                 aa.dict_put(t.key(), chain)?;
             }
         }
     }
-    if aa.dict_len()? == 0 {
+    if w.get_dict("AA")?
+        .is_some_and(|aa| aa.dict_len().unwrap_or(1) == 0)
+    {
         w.dict_delete("AA")?;
     }
     Ok(())
@@ -496,17 +530,27 @@ impl PdfDoc {
         page: i32,
         list: &[(PageTrigger, ActionKind)],
     ) -> Result<()> {
+        let before = self.page_actions(page)?;
         let mut obj = self.inner.find_page(page)?;
-        obj.dict_delete("AA")?;
-        let mut aa = self.inner.new_dict()?;
+        let mut aa = match obj.get_dict("AA")? {
+            Some(aa) if aa.is_dict()? => aa,
+            _ => self.inner.new_dict()?,
+        };
         for t in PageTrigger::ALL {
             let mine = of_trigger(list, t);
+            // gatilho sem mudança fica como está no arquivo
+            if of_trigger(&before, t) == mine {
+                continue;
+            }
+            aa.dict_delete(t.key())?;
             if let Some(chain) = chain_obj(&self.inner, &mine)? {
                 aa.dict_put(t.key(), chain)?;
             }
         }
         if aa.dict_len()? > 0 {
             obj.dict_put("AA", aa)?;
+        } else {
+            obj.dict_delete("AA")?;
         }
         Ok(())
     }

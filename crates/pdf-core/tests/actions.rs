@@ -176,3 +176,73 @@ fn show_hide_sets_the_hidden_flag() {
     assert!(d.show_fields(&["Nome".into()], false).unwrap());
     assert!(!d.fields(0).unwrap().iter().any(|x| x.hidden));
 }
+
+/// /A de um widget como texto (para ver o que ficou gravado).
+fn widget_a(path: &std::path::Path) -> String {
+    let doc = mupdf::pdf::PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let page = doc.load_pdf_page(0).unwrap();
+    let w = page.widgets().next().unwrap();
+    w.annotation()
+        .object()
+        .get_dict("A")
+        .unwrap()
+        .map(|a| a.to_string())
+        .unwrap_or_default()
+}
+
+#[test]
+fn editing_one_trigger_keeps_the_others_as_they_were() {
+    let dir = tempfile::tempdir().unwrap();
+    // GoTo com /XYZ (o modelo do app só sabe /Fit): não pode virar /Fit se não foi mexido
+    let path = button_pdf(&dir, "<</S/GoTo/D[3 0 R/XYZ 10 20 0]>>", &[]);
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let id = d.fields(0).unwrap()[0].id;
+    let mut p = d.field_props(0, id).unwrap();
+    p.actions.push((T::MouseEnter, A::Named("Print".into())));
+    d.set_field_props(0, id, &p).unwrap();
+    d.save(&path).unwrap();
+    assert!(widget_a(&path).contains("XYZ"), "{}", widget_a(&path));
+}
+
+#[test]
+fn actions_of_the_field_node_can_be_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let objs = [
+        "<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[4 0 R]>>>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[5 0 R]>>",
+        "<</FT/Btn/Ff 65536/T(B)/Kids[5 0 R]/A<</S/URI/URI(https://x.y)>>>>",
+        "<</Type/Annot/Subtype/Widget/Parent 4 0 R/Rect[100 700 200 720]/P 3 0 R/F 4>>",
+    ];
+    let path = dir.path().join("pai.pdf");
+    std::fs::write(
+        &path,
+        pdf_core::sample::pdf_from_objects(&objs.map(String::from)),
+    )
+    .unwrap();
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let id = d.fields(0).unwrap()[0].id;
+    let mut p = d.field_props(0, id).unwrap();
+    assert_eq!(p.actions.len(), 1, "a ação do nó do campo é lida");
+    p.actions.clear();
+    d.set_field_props(0, id, &p).unwrap();
+    assert!(
+        d.fields(0).unwrap()[0].actions.is_empty(),
+        "e pode ser tirada"
+    );
+}
+
+#[test]
+fn a_go_to_outside_the_document_does_not_block_editing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = button_pdf(&dir, "<</S/GoTo/D[99 /Fit]>>", &[]);
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let id = d.fields(0).unwrap()[0].id;
+    let mut p = d.field_props(0, id).unwrap();
+    assert!(
+        matches!(p.actions[0].1, A::Other { .. }),
+        "página que não existe: preservada"
+    );
+    p.actions.push((T::MouseEnter, A::Named("Print".into())));
+    d.set_field_props(0, id, &p).unwrap();
+}

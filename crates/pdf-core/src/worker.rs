@@ -775,7 +775,15 @@ impl State {
             Request::CalcOrder => send(Response::CalcOrder(
                 self.with_doc(|d| d.calc_order_names()).unwrap_or_default(),
             )),
-            Request::Prepare(op) => self.edit(send, |d| d.prepare(op).map(|()| Changed::Fields)),
+            Request::Prepare(op) => {
+                // as ações de página vêm no resumo do documento
+                let changed = if matches!(op, crate::PrepareOp::SetPageActions { .. }) {
+                    Changed::Document
+                } else {
+                    Changed::Fields
+                };
+                self.edit(send, |d| d.prepare(op).map(|()| changed))
+            }
             Request::PageImages { page } => send(Response::PageImages {
                 page,
                 images: self.with_doc(|d| d.page_images(page)).unwrap_or_default(),

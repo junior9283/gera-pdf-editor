@@ -67,13 +67,23 @@ pub struct FormState {
 /// Uma ação disparada sem clique (abrir ou fechar página, mouse entra ou sai, foco) pode rodar?
 /// Só mostrar/ocultar campos, e navegar ao abrir uma página: links, arquivos, imprimir, tela
 /// cheia, itens de menu e Redefinir pedem o clique do usuário (um PDF não age sozinho).
-pub fn auto_allowed(action: &pdf_core::ActionKind, page_open: bool) -> bool {
+pub fn auto_allowed(action: &pdf_core::ActionKind, origin: Auto) -> bool {
     use pdf_core::ActionKind as A;
     match action {
         A::ShowHide { .. } => true,
-        A::GoTo { .. } => page_open,
+        A::GoTo { .. } => origin == Auto::PageOpen,
         _ => false,
     }
+}
+
+/// De onde vem uma ação que roda sem clique.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Auto {
+    /// Mouse entra e sai, Em foco e Fora de foco.
+    Field,
+    PageOpen,
+    /// Fechar página: nunca navega (senão prenderia o leitor na página).
+    PageClose,
 }
 
 /// O clique num campo com ações: Mouse para baixo e Mouse para cima (como no Acrobat).
@@ -792,14 +802,18 @@ mod tests {
             fields: vec!["x".into()],
             hide: true,
         };
-        assert!(auto_allowed(&hide, false));
+        assert!(auto_allowed(&hide, Auto::Field));
         assert!(
-            auto_allowed(&A::GoTo { page: 1 }, true),
+            auto_allowed(&A::GoTo { page: 1 }, Auto::PageOpen),
             "abrir página pode navegar"
         );
         assert!(
-            !auto_allowed(&A::GoTo { page: 1 }, false),
+            !auto_allowed(&A::GoTo { page: 1 }, Auto::Field),
             "passar o mouse não navega"
+        );
+        assert!(
+            !auto_allowed(&A::GoTo { page: 1 }, Auto::PageClose),
+            "fechar a página não puxa o leitor de volta"
         );
         for a in [
             A::Uri("https://x.y".into()),
@@ -812,7 +826,7 @@ mod tests {
             A::Named("NextPage".into()),
             A::ImportIcon,
         ] {
-            assert!(!auto_allowed(&a, true), "{a:?} só com clique");
+            assert!(!auto_allowed(&a, Auto::PageOpen), "{a:?} só com clique");
         }
     }
 

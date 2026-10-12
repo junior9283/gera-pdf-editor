@@ -817,3 +817,120 @@ fn multiple_copies_make_new_fields() {
     d.undo().unwrap();
     assert_eq!(d.fields(0).unwrap().len(), 1, "as cópias saem numa etapa");
 }
+
+#[test]
+fn copies_of_a_child_field_stay_under_the_same_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let objs = [
+        "<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[4 0 R]/DA(/Helv 0 Tf 0 g)>>>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[5 0 R]>>",
+        "<</T(a)/FT/Tx/Kids[5 0 R]>>",
+        "<</Type/Annot/Subtype/Widget/Parent 4 0 R/T(b)/Rect[100 700 250 720]/P 3 0 R/F 4/DA(/Helv 10 Tf 0 g)>>",
+    ];
+    let path = dir.path().join("pai.pdf");
+    std::fs::write(
+        &path,
+        pdf_core::sample::pdf_from_objects(&objs.map(String::from)),
+    )
+    .unwrap();
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let id = d.fields(0).unwrap()[0].id;
+    d.prepare(pdf_core::PrepareOp::Copies {
+        page: 0,
+        id,
+        rects: vec![r(130.0)],
+    })
+    .unwrap();
+    d.save(&path).unwrap();
+    let d = PdfDoc::open(&path, None).unwrap();
+    let mut names: Vec<String> = d.fields(0).unwrap().into_iter().map(|f| f.name).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["a.b", "a.b_1"],
+        "nome parcial sem ponto, filho do mesmo pai"
+    );
+    assert!(matches!(
+        by_name(&d.fields(0).unwrap(), "a.b_1").kind,
+        FieldKind::Text { .. }
+    ));
+}
+
+#[test]
+fn copies_keep_the_widget_actions() {
+    let (_d, _p, mut d) = doc_pages(2);
+    let a = d.add_field(0, r(100.0), NewFieldKind::Text, "X").unwrap();
+    let mut p = d.field_props(0, a).unwrap();
+    p.actions = vec![(
+        pdf_core::FieldTrigger::MouseEnter,
+        pdf_core::ActionKind::Named("Print".into()),
+    )];
+    d.set_field_props(0, a, &p).unwrap();
+    // depois de Duplicar, o campo tem nó e widget separados
+    d.prepare(pdf_core::PrepareOp::Duplicate {
+        page: 0,
+        id: a,
+        pages: vec![1],
+        offset: (0.0, 0.0),
+    })
+    .unwrap();
+    d.prepare(pdf_core::PrepareOp::Copies {
+        page: 0,
+        id: a,
+        rects: vec![r(150.0)],
+    })
+    .unwrap();
+    let f = d.fields(0).unwrap();
+    assert_eq!(by_name(&f, "X_1").actions.len(), 1, "{f:?}");
+}
+
+#[test]
+fn pasting_several_fields_is_one_undo_step() {
+    let (_d, _p, mut d) = doc();
+    let a = d.add_field(0, r(100.0), NewFieldKind::Text, "A").unwrap();
+    let b = d.add_field(0, r(200.0), NewFieldKind::Text, "B").unwrap();
+    d.prepare(pdf_core::PrepareOp::Paste {
+        items: vec![(0, a), (0, b)],
+        to: 0,
+    })
+    .unwrap();
+    assert_eq!(d.fields(0).unwrap().len(), 4);
+    d.undo().unwrap();
+    assert_eq!(d.fields(0).unwrap().len(), 2, "uma etapa");
+}
+
+#[test]
+fn a_signed_signature_field_is_not_copied() {
+    let dir = tempfile::tempdir().unwrap();
+    let objs = [
+        "<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[4 0 R]>>>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[4 0 R]>>",
+        "<</Type/Annot/Subtype/Widget/FT/Sig/T(Ass)/V 5 0 R/Rect[100 700 250 740]/P 3 0 R/F 4>>",
+        "<</Type/Sig/Filter/Adobe.PPKLite/Contents<00>>>",
+    ];
+    let path = dir.path().join("ass.pdf");
+    std::fs::write(
+        &path,
+        pdf_core::sample::pdf_from_objects(&objs.map(String::from)),
+    )
+    .unwrap();
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    let id = d.fields(0).unwrap()[0].id;
+    assert!(d
+        .prepare(pdf_core::PrepareOp::Copies {
+            page: 0,
+            id,
+            rects: vec![r(300.0)],
+        })
+        .is_err());
+    assert!(d
+        .prepare(pdf_core::PrepareOp::Duplicate {
+            page: 0,
+            id,
+            pages: vec![0],
+            offset: (10.0, 10.0),
+        })
+        .is_err());
+}
