@@ -246,6 +246,9 @@ pub struct DocTab {
     pub(crate) prepare: crate::prepare::PrepareState,
     /// Janela Duplicar ou Criar várias cópias do Preparar.
     arrange_dialog: Option<crate::shell::arrange_dialogs::ArrangeDialog>,
+    /// Enviar formulário: aguardando a confirmação (endereço e formato) e o envio http em curso.
+    submit_confirm: Option<(pdf_core::SubmitTarget, pdf_core::SubmitFormat)>,
+    sending: Option<crate::submit::Sending>,
     /// Campos copiados no Preparar: os nomes a pôr na área de transferência do sistema.
     prepare_copied: Option<String>,
     /// Linha Editar PDF aberta (as imagens viram objetos editáveis).
@@ -434,6 +437,8 @@ impl DocTab {
             prepare_tools: false,
             prepare: Default::default(),
             arrange_dialog: None,
+            submit_confirm: None,
+            sending: None,
             prepare_copied: None,
             edit_pdf_tools: false,
             edit_pdf: Default::default(),
@@ -1589,6 +1594,27 @@ impl DocTab {
                     self.status = format!("Não foi possível ler as propriedades: {msg}");
                 }
                 Response::Exported { dest } => self.send_to_printer(ctx, dest),
+                Response::SubmitReady {
+                    target,
+                    body,
+                    content_type,
+                } => match target {
+                    pdf_core::SubmitTarget::Http(url) => {
+                        self.status = "Enviando o formulário…".into();
+                        self.sending =
+                            Some(crate::submit::post(url, body, content_type.to_string()));
+                    }
+                    pdf_core::SubmitTarget::Mail(base) => {
+                        let text = String::from_utf8_lossy(&body);
+                        ctx.open_url(egui::OpenUrl::new_tab(crate::submit::mail_url(
+                            &base, &text,
+                        )));
+                        self.status = "Os dados foram para o programa de e-mail.".into();
+                    }
+                },
+                Response::SubmitFailed(msg) => {
+                    self.status = format!("Não foi possível enviar o formulário: {msg}");
+                }
                 Response::ExportFailed(msg) => {
                     self.print_pending = None;
                     self.status = format!("Não foi possível preparar a impressão: {msg}");
@@ -2533,6 +2559,7 @@ impl DocTab {
             ui.ctx().copy_text(text);
         }
         self.arrange_window(ui.ctx());
+        self.submit_window(ui.ctx());
         self.field_alert_window(ui.ctx());
         self.stamp_windows(ui.ctx());
         self.poll_files();
@@ -3754,6 +3781,15 @@ impl DocTab {
                 }
             }
             A::ImportIcon => self.pick_button_icon(ctx, page, id),
+            A::Submit { url, format } => match pdf_core::submit_target(&url) {
+                Some(target) => self.submit_confirm = Some((target, format)),
+                None => {
+                    self.status = format!(
+                        "Envio recusado: o endereço «{}» não é http, https ou mailto, ou é da rede interna.",
+                        crate::links::safe_display(&url)
+                    )
+                }
+            },
             A::JavaScript(_) => {
                 self.status = "Este formulário tem JavaScript que o app não executa.".into()
             }
@@ -3779,6 +3815,61 @@ impl DocTab {
     /// Número de páginas do documento aberto (0 antes de abrir).
     fn page_total(&self) -> usize {
         self.view.as_ref().map_or(0, |v| v.sizes.len())
+    }
+
+    /// Confirmação do Enviar formulário (sempre, mostrando o endereço) e o resultado do envio.
+    fn submit_window(&mut self, ctx: &egui::Context) {
+        if let Some(sending) = &self.sending {
+            match sending.poll() {
+                Some(Ok(_)) => {
+                    self.sending = None;
+                    self.status = "Formulário enviado.".into();
+                }
+                Some(Err(e)) => {
+                    self.sending = None;
+                    self.status = format!(
+                        "Não foi possível enviar o formulário: {}",
+                        crate::links::safe_display(&e)
+                    );
+                }
+                None => ctx.request_repaint_after(std::time::Duration::from_millis(200)),
+            }
+        }
+        let Some((target, format)) = &self.submit_confirm else {
+            return;
+        };
+        let (url, what) = match target {
+            pdf_core::SubmitTarget::Http(u) => (u, format!("os dados em {}", format.label())),
+            pdf_core::SubmitTarget::Mail(u) => (u, "os dados no corpo de um e-mail".to_string()),
+        };
+        let mut choice = None;
+        egui::Modal::new(egui::Id::new("enviar-formulario")).show(ctx, |ui| {
+            ui.heading("Enviar formulário");
+            ui.label(format!("O documento quer enviar {what} para:"));
+            ui.monospace(crate::links::safe_display(url));
+            ui.label("Envie só se você confia neste documento e neste endereço.");
+            ui.horizontal(|ui| {
+                if ui.button("Enviar").clicked() {
+                    choice = Some(true);
+                }
+                if ui.button("Cancelar").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                {
+                    choice = Some(false);
+                }
+            });
+        });
+        match choice {
+            Some(true) => {
+                let (target, format) = self.submit_confirm.take().unwrap();
+                if self.sending.is_some() {
+                    self.status = "Já há um envio em andamento.".into();
+                } else {
+                    self.worker.send(Request::Submit { target, format });
+                }
+            }
+            Some(false) => self.submit_confirm = None,
+            None => {}
+        }
     }
 
     /// Janela Duplicar ou Criar várias cópias (com a prévia na página).
@@ -5015,5 +5106,27 @@ mod tests {
         replace_pages(&mut all, &[1], vec![a(1, 3), a(1, 5)]);
         let ids: Vec<_> = all.iter().map(|x| x.id).collect();
         assert_eq!(ids, [1, 3, 5, 4]);
+    }
+
+    #[test]
+    fn submit_asks_first_and_refuses_internal_addresses() {
+        let ctx = egui::Context::default();
+        let mut tab = tab_with_pages(1);
+        let submit = |url: &str| pdf_core::ActionKind::Submit {
+            url: url.into(),
+            format: pdf_core::SubmitFormat::Xfdf,
+        };
+        tab.run_action(&ctx, 0, 1, submit("http://192.168.0.1/x"));
+        assert!(tab.submit_confirm.is_none() && tab.status.contains("recusado"));
+        tab.run_action(&ctx, 0, 1, submit("https://exemplo.com.br/f"));
+        // nada sai antes do Enviar da confirmação
+        assert!(tab.sending.is_none());
+        assert_eq!(
+            tab.submit_confirm,
+            Some((
+                pdf_core::SubmitTarget::Http("https://exemplo.com.br/f".into()),
+                pdf_core::SubmitFormat::Xfdf
+            ))
+        );
     }
 }

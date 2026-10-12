@@ -29,6 +29,7 @@ mod search;
 mod shell;
 mod sidebar;
 mod stamp_dialogs;
+mod submit;
 mod summary_dialog;
 mod thumbnails;
 mod view;

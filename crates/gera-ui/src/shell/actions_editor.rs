@@ -22,7 +22,7 @@ impl Trigger for PageTrigger {
 
 /// As ações que dá para acrescentar (o menu "Selecionar ação" do Acrobat, menos as que o app
 /// ainda não executa).
-const NEW_ACTIONS: [&str; 7] = [
+const NEW_ACTIONS: [&str; 8] = [
     "Ir para uma página",
     "Abrir um link da web",
     "Mostrar/ocultar um campo",
@@ -30,6 +30,7 @@ const NEW_ACTIONS: [&str; 7] = [
     "Executar um item de menu",
     "Abrir um arquivo",
     "Executar um JavaScript",
+    "Enviar um formulário",
 ];
 
 fn new_action(k: usize) -> ActionKind {
@@ -46,7 +47,11 @@ fn new_action(k: usize) -> ActionKind {
         },
         4 => ActionKind::Named(NAMED_ITEMS[0].0.into()),
         5 => ActionKind::Launch(String::new()),
-        _ => ActionKind::JavaScript(String::new()),
+        6 => ActionKind::JavaScript(String::new()),
+        _ => ActionKind::Submit {
+            url: "https://".into(),
+            format: pdf_core::SubmitFormat::Fdf,
+        },
     }
 }
 
@@ -250,6 +255,23 @@ fn edit_action(ui: &mut egui::Ui, a: &mut ActionKind, fields: &[String], pages: 
             ui.label("O script é gravado no arquivo, mas o app não o executa.");
             ui.add(egui::TextEdit::multiline(js).desired_rows(4).code_editor());
         }
+        ActionKind::Submit { url, format } => {
+            ui.label("Endereço (http, https ou mailto:):");
+            ui.text_edit_singleline(url);
+            if !url.trim().is_empty() && pdf_core::submit_target(url).is_none() {
+                ui.colored_label(ui.visuals().warn_fg_color, "Endereço não aceito.");
+            }
+            ui.horizontal(|ui| {
+                ui.label("Formato:");
+                egui::ComboBox::from_id_salt("formato-do-envio")
+                    .selected_text(format.label())
+                    .show_ui(ui, |ui| {
+                        for f in pdf_core::SubmitFormat::ALL {
+                            ui.selectable_value(format, f, f.label());
+                        }
+                    });
+            });
+        }
         ActionKind::ImportIcon => {
             ui.label("Escolher a imagem do botão (campo Imagem).");
         }
@@ -262,6 +284,15 @@ fn edit_action(ui: &mut egui::Ui, a: &mut ActionKind, fields: &[String], pages: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn submit_is_offered() {
+        let k = NEW_ACTIONS
+            .iter()
+            .position(|l| *l == "Enviar um formulário")
+            .unwrap();
+        assert!(matches!(new_action(k), ActionKind::Submit { .. }));
+    }
 
     #[test]
     fn actions_tab_builds_the_props() {

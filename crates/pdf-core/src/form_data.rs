@@ -428,6 +428,14 @@ impl PdfDoc {
     }
 
     /// O que a ação Enviar formulário manda, e o tipo do conteúdo.
+    /// Os dados como texto, uma linha `nome=valor` por campo (o corpo do e-mail do mailto).
+    pub fn submit_text(&self) -> Result<String> {
+        Ok(values_of(self)?
+            .iter()
+            .map(|(n, v)| format!("{n}={v}\n"))
+            .collect())
+    }
+
     pub fn submit_payload(&self, format: SubmitFormat) -> Result<(Vec<u8>, &'static str)> {
         Ok(match format {
             SubmitFormat::Fdf => (

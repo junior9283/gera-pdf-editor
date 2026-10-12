@@ -299,6 +299,7 @@ fn submit_payloads_and_targets() {
     assert!(fdf.starts_with(b"%FDF-1.2") && kind == "application/vnd.fdf");
     let (pdf, _) = d.submit_payload(F::Pdf).unwrap();
     assert!(pdf.starts_with(b"%PDF-"));
+    assert!(d.submit_text().unwrap().contains("=Ana & Bia\n"));
     // destinos: só http, https e mailto
     assert!(pdf_core::submit_target("https://a.b/c").is_some());
     assert!(pdf_core::submit_target("mailto:x@y.z").is_some());

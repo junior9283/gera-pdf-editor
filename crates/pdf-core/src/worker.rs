@@ -132,6 +132,12 @@ pub enum Request {
         fields: Vec<String>,
         exclude: bool,
     },
+    /// Enviar formulário (já confirmado): monta os dados; responde `SubmitReady` ou
+    /// `SubmitFailed`. No mailto, o corpo é o texto `nome=valor`.
+    Submit {
+        target: crate::SubmitTarget,
+        format: crate::SubmitFormat,
+    },
     /// Campo Imagem: a figura do arquivo vira o ícone do botão.
     SetButtonIcon {
         page: i32,
@@ -368,6 +374,12 @@ pub enum Response {
     Exported {
         dest: PathBuf,
     },
+    SubmitReady {
+        target: crate::SubmitTarget,
+        body: Vec<u8>,
+        content_type: &'static str,
+    },
+    SubmitFailed(String),
     ExportFailed(String),
     /// As anotações mudaram (edição, desfazer ou refazer): páginas mudadas (a renderizar de
     /// novo), as anotações visíveis delas e o estado do histórico.
@@ -748,6 +760,21 @@ impl State {
                     Err(e) => Response::OcrFailed(e),
                 });
             }
+            Request::Submit { target, format } => send(
+                match self.with_doc(|d| match target {
+                    crate::SubmitTarget::Mail(_) => {
+                        Ok((d.submit_text()?.into_bytes(), "text/plain"))
+                    }
+                    crate::SubmitTarget::Http(_) => d.submit_payload(format),
+                }) {
+                    Ok((body, content_type)) => Response::SubmitReady {
+                        target,
+                        body,
+                        content_type,
+                    },
+                    Err(e) => Response::SubmitFailed(e),
+                },
+            ),
             Request::Export { format } => send(match self.with_doc(|d| d.export(format)) {
                 Ok(files) => Response::ExportedTo(files),
                 Err(e) => Response::ExportToFailed(e),
