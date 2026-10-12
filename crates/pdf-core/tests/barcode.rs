@@ -382,3 +382,106 @@ fn filling_with_many_barcodes_stays_fast() {
         "o valor de todos é gravado"
     );
 }
+
+/// PDF com `pages` páginas, cada uma com `per` códigos Data Matrix de `len` dígitos (e um campo
+/// de texto "A" na primeira).
+fn heavy(dir: &tempfile::TempDir, pages: usize, per: usize, len: usize) -> std::path::PathBuf {
+    let mut objs = vec![
+        String::new(),
+        String::new(),
+        "<</Type/PaperMetaData/Version 1/Symbology/DataMatrix/XSymWidth 9/DataPrep 0/Resolution 300.0>>"
+            .to_string(),
+    ];
+    let mut fields = Vec::new();
+    let mut kids = Vec::new();
+    let value = "7".repeat(len);
+    for p in 0..pages {
+        let page_num = objs.len() + 1;
+        objs.push(String::new());
+        kids.push(format!("{page_num} 0 R"));
+        let mut annots = Vec::new();
+        if p == 0 {
+            let n = objs.len() + 1;
+            objs.push(format!("<</Type/Annot/Subtype/Widget/FT/Tx/T(A)/Rect[10 700 300 720]/P {page_num} 0 R/V()>>"));
+            annots.push(format!("{n} 0 R"));
+            fields.push(format!("{n} 0 R"));
+        }
+        for k in 0..per {
+            let n = objs.len() + 1;
+            objs.push(format!(
+                "<</Type/Annot/Subtype/Widget/FT/Tx/T(B{p}_{k})/Rect[10 10 200 200]/P {page_num} 0 R\
+                 /V({value})/PMD 3 0 R>>"
+            ));
+            annots.push(format!("{n} 0 R"));
+            fields.push(format!("{n} 0 R"));
+        }
+        objs[page_num - 1] = format!(
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[{}]>>",
+            annots.join(" ")
+        );
+    }
+    objs[0] = format!(
+        "<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[{}]/NeedAppearances true>>>>",
+        fields.join(" ")
+    );
+    objs[1] = format!("<</Type/Pages/Kids[{}]/Count {pages}>>", kids.join(" "));
+    let path = dir.path().join("pesado.pdf");
+    std::fs::write(&path, pdf_core::sample::pdf_from_objects(&objs)).unwrap();
+    path
+}
+
+#[test]
+fn passes_share_one_barcode_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = heavy(&dir, 150, 12, 480);
+    let t = std::time::Instant::now();
+    let mut d = PdfDoc::open(&path, None).unwrap();
+    assert!(t.elapsed().as_secs_f32() < 3.0, "abrir: {:?}", t.elapsed());
+    // duplicar em todas as páginas redesenha cada página: o orçamento é o da operação inteira
+    let a = by(&d, "A").id;
+    let t = std::time::Instant::now();
+    d.prepare(pdf_core::PrepareOp::Duplicate {
+        page: 0,
+        id: a,
+        pages: (0..150).collect(),
+        offset: (0.0, 0.0),
+    })
+    .unwrap();
+    assert!(
+        t.elapsed().as_secs_f32() < 3.0,
+        "duplicar: {:?}",
+        t.elapsed()
+    );
+    let t = std::time::Instant::now();
+    d.undo().unwrap();
+    d.redo().unwrap();
+    assert!(
+        t.elapsed().as_secs_f32() < 3.0,
+        "desfazer/refazer: {:?}",
+        t.elapsed()
+    );
+}
+
+#[test]
+fn a_huge_barcode_script_is_parsed_quickly() {
+    let names: Vec<String> = (0..9000)
+        .map(|k| format!("campo {k:05} com nome longo"))
+        .collect();
+    let js = pdf_core::calc_script(&FieldCalc::Barcode {
+        fields: names,
+        names: true,
+    });
+    let t = std::time::Instant::now();
+    for _ in 0..50 {
+        let _ = pdf_core::parse_calc(&js);
+    }
+    // linear: em release, alguns milissegundos por leitura; em debug, umas 5 vezes mais (a
+    // comparação pedaço a pedaço de antes levava 3,2 s em debug)
+    let limit = if cfg!(debug_assertions) { 2.0 } else { 1.0 };
+    assert!(
+        t.elapsed().as_secs_f32() < limit,
+        "{:?} para 50 leituras de {} bytes",
+        t.elapsed(),
+        js.len()
+    );
+}
