@@ -4,11 +4,12 @@
 use crate::create_export::{oriented, UprightImage};
 use crate::doc::PdfDoc;
 use crate::error::Result;
+use crate::page_content::form_xobject;
 use crate::stamp::literal;
 use crate::text_fit::text_width;
 use crate::types::PdfRect;
 use mupdf::pdf::{PdfDocument, PdfObject};
-use mupdf::{Buffer, Font};
+use mupdf::Font;
 use std::path::Path;
 
 /// Layouts do Acrobat (/MK /TP).
@@ -37,14 +38,16 @@ pub(crate) fn icon_from_file(doc: &mut PdfDocument, path: &Path) -> Result<PdfOb
     let (w, h) = (up.width.max(1.0), up.height.max(1.0));
     let [a, b, c, d, e, f] = oriented(up.orientation, w, h);
     let ops = format!("q {a} {b} {c} {d} {e} {f} cm /Img Do Q");
-    let mut dict =
-        doc.new_object_from_str(&format!("<</Type/XObject/Subtype/Form/BBox[0 0 {w} {h}]>>"))?;
     let mut res = doc.new_dict()?;
     let mut xo = doc.new_dict()?;
     xo.dict_put("Img", image)?;
     res.dict_put("XObject", xo)?;
-    dict.dict_put("Resources", res)?;
-    Ok(doc.add_stream(&Buffer::from_bytes(ops.as_bytes())?, Some(&dict), false)?)
+    form_xobject(doc, ops.as_bytes(), res, [0.0, 0.0, w, h])
+}
+
+thread_local! {
+    /// Helvetica do MuPDF, para medir os rótulos (carregada uma vez por thread).
+    static HELVETICA: Option<Font> = Font::new("Helvetica").ok();
 }
 
 /// Operadores de cor de um array /MK (/BG ou /BC): cinza, RGB ou CMYK.
@@ -67,24 +70,6 @@ fn color_ops(arr: Option<PdfObject>, stroke: bool) -> Result<Option<String>> {
         _ => return Ok(None),
     };
     Ok(Some(format!("{} {op}", vals.join(" "))))
-}
-
-/// Tamanho da fonte do /DA (0 = automático).
-fn da_size(obj: &PdfObject) -> f32 {
-    let da = obj
-        .get_dict_inheritable("DA")
-        .ok()
-        .flatten()
-        .and_then(|d| d.as_string().ok())
-        .unwrap_or_default();
-    let parts: Vec<&str> = da.split_whitespace().collect();
-    parts
-        .iter()
-        .position(|p| *p == "Tf")
-        .and_then(|k| k.checked_sub(1))
-        .and_then(|k| parts[k].parse::<f32>().ok())
-        .filter(|s| s.is_finite() && *s >= 0.0)
-        .unwrap_or(0.0)
 }
 
 /// Onde vão o ícone e o rótulo no botão `w`×`h`, pelo layout (com 2 pt de margem).
@@ -122,6 +107,22 @@ fn split(
 }
 
 impl PdfDoc {
+    /// A Helvetica dos campos (/AcroForm /DR /Font /Helv); sem ela, uma nova.
+    fn helvetica(&mut self) -> Result<PdfObject> {
+        use crate::pdf_obj::get;
+        let found = get(&self.inner.catalog()?, "AcroForm")
+            .and_then(|a| get(&a, "DR"))
+            .and_then(|dr| get(&dr, "Font"))
+            .and_then(|f| get(&f, "Helv"));
+        if let Some(helv) = found {
+            return Ok(helv);
+        }
+        let helv = self.inner.new_object_from_str(
+            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>",
+        )?;
+        Ok(self.inner.add_object(&helv)?)
+    }
+
     /// Botão que o app desenha (com ícone ou layout diferente de "Somente rótulo")?
     pub(crate) fn drawn_by_app(obj: &PdfObject) -> bool {
         obj.get_dict("MK").ok().flatten().is_some_and(|mk| {
@@ -155,15 +156,17 @@ impl PdfDoc {
         if let Some(bc) = color_ops(get("BC"), true)? {
             ops += &format!("{bc} 1 w 0.5 0.5 {} {} re S ", w - 1.0, h - 1.0);
         }
-        let font = Font::new("Helvetica")?;
-        let size = match da_size(obj) {
+        let size = match crate::prepare::da_size(obj).unwrap_or(0.0) {
             s if s > 0.0 => s,
             _ => (h * 0.5).clamp(4.0, 12.0),
         };
         let label_w = if label.is_empty() {
             0.0
         } else {
-            text_width(&font, &label, size)?
+            HELVETICA
+                .with(|f| f.as_ref().map(|f| text_width(f, &label, size)))
+                .transpose()?
+                .unwrap_or(label.chars().count() as f32 * size * 0.5)
         };
         let label_h = if label.is_empty() { 0.0 } else { size * 1.2 };
         let (icon_at, label_at) = split(layout, w, h, label_w, label_h);
@@ -196,20 +199,11 @@ impl PdfDoc {
                 literal(&label)
             );
             let mut fonts = self.inner.new_dict()?;
-            let helv = self.inner.new_object_from_str(
-                "<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>",
-            )?;
-            fonts.dict_put("Helv", self.inner.add_object(&helv)?)?;
+            fonts.dict_put("Helv", self.helvetica()?)?;
             res.dict_put("Font", fonts)?;
         }
         ops += "Q";
-        let mut dict = self
-            .inner
-            .new_object_from_str(&format!("<</Type/XObject/Subtype/Form/BBox[0 0 {w} {h}]>>"))?;
-        dict.dict_put("Resources", res)?;
-        let stream =
-            self.inner
-                .add_stream(&Buffer::from_bytes(ops.as_bytes())?, Some(&dict), false)?;
+        let stream = form_xobject(&mut self.inner, ops.as_bytes(), res, [0.0, 0.0, w, h])?;
         let mut ap = self.inner.new_dict()?;
         ap.dict_put("N", stream)?;
         obj.dict_put("AP", ap)?;

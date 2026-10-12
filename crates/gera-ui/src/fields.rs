@@ -318,7 +318,8 @@ pub fn on_page(
                 surrender_egui_focus(ui);
             }
         }
-        if resp.hovered() {
+        // Mouse entra e sai: só importa nos campos com ações
+        if resp.hovered() && !f.actions.is_empty() {
             st.hover_now = Some(key);
         }
         if resp.clicked() {
@@ -757,7 +758,7 @@ mod tests {
     #[test]
     fn button_click_runs_mouse_up_actions() {
         use pdf_core::{ActionKind, FieldTrigger as T};
-        let mut b = f(1, 0, 0.0, 0.0, "Limpar", FieldKind::Button { reset: true });
+        let mut b = f(1, 0, 0.0, 0.0, "Limpar", FieldKind::Button);
         assert!(click_actions(&b).is_empty(), "sem ações, nada a executar");
         b.actions = vec![(T::MouseUp, ActionKind::Named("NextPage".into()))];
         assert!(matches!(

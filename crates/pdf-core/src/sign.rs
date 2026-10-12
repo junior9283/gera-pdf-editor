@@ -787,11 +787,7 @@ impl PdfDoc {
             .ok_or_else(|| err("campo de assinatura não encontrado"))?;
         let mut obj = w.annotation().object();
         // oculto (/F 2 ou 32): a assinatura ficaria invisível para quem lê
-        let flags = obj
-            .get_dict("F")?
-            .and_then(|f| f.as_int().ok())
-            .unwrap_or(0);
-        if flags & (2 | 32) != 0 {
+        if crate::forms::hidden(&obj)? {
             return Err(err("o campo de assinatura está oculto"));
         }
         let is_sig = obj

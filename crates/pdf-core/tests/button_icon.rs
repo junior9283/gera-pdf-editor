@@ -41,7 +41,7 @@ fn image_field_is_created_like_acrobat() {
         .unwrap();
     let f = d.fields(0).unwrap();
     assert_eq!(f[0].name, "Imagem1");
-    assert!(matches!(f[0].kind, FieldKind::Button { .. }));
+    assert!(matches!(f[0].kind, FieldKind::Button));
     let p = d.field_props(0, id).unwrap();
     assert_eq!(p.layout, 1, "somente ícone");
     assert_eq!(

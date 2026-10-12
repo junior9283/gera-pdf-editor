@@ -435,7 +435,12 @@ fn reset_button_clears_only_its_fields() {
             ],
         );
         let mut d = PdfDoc::open(&path, None).unwrap();
-        d.press_reset(0, field(&d, "Limpar").id).unwrap();
+        // o clique no botão executa a ação Redefinir dele
+        let pdf_core::ActionKind::Reset { fields, exclude } = &field(&d, "Limpar").actions[0].1
+        else {
+            panic!("ação Redefinir");
+        };
+        d.reset_fields(fields, *exclude).unwrap();
         assert_eq!(
             (field(&d, "A").value.as_str(), field(&d, "B").value.as_str()),
             (a, b),

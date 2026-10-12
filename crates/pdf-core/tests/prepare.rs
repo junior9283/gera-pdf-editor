@@ -513,10 +513,7 @@ fn button_and_date_fields_are_created() {
     d.save(&path).unwrap();
     let d = PdfDoc::open(&path, None).unwrap();
     let f = d.fields(0).unwrap();
-    assert_eq!(
-        by_name(&f, "Botão1").kind,
-        FieldKind::Button { reset: true }
-    );
+    assert_eq!(by_name(&f, "Botão1").kind, FieldKind::Button);
     let (_, p) = props(&d, "Botão1");
     assert_eq!(p.button_label, "Limpar");
     assert_eq!(

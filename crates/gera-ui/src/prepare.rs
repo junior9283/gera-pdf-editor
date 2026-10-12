@@ -408,11 +408,7 @@ pub fn on_page(
                     .interact_pointer_pos()
                     .map(|p| map.to_page(p.into()));
                 if let Some((p, id, _)) = at.and_then(hit) {
-                    if !st.is_selected(p, id) {
-                        st.selection = vec![(p, id)];
-                    } else {
-                        st.click(Some((p, id)), false);
-                    }
+                    st.click(Some((p, id)), false);
                 }
             }
             let (count, can_paste) = (st.selection.len(), !st.clipboard.is_empty());

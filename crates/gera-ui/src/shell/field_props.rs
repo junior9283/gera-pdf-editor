@@ -55,7 +55,7 @@ impl FieldPropsWindow {
             FieldKind::Radio { .. } => Kind::Button { radio: true },
             FieldKind::Combo { .. } => Kind::Choice { combo: true },
             FieldKind::List { .. } => Kind::Choice { combo: false },
-            FieldKind::Button { .. } => Kind::Push,
+            FieldKind::Button => Kind::Push,
             FieldKind::Signature => Kind::Other,
         };
         Self {
@@ -812,14 +812,7 @@ mod draft_tests {
             has_icon: true,
             ..Default::default()
         };
-        let mut w = FieldPropsWindow::new(
-            0,
-            1,
-            &pdf_core::FieldKind::Button { reset: false },
-            props,
-            vec![],
-            1,
-        );
+        let mut w = FieldPropsWindow::new(0, 1, &pdf_core::FieldKind::Button, props, vec![], 1);
         w.props.layout = 2;
         w.props.button_label = "Escolha".into();
         w.set_icon(std::path::PathBuf::from("/tmp/a.png"));

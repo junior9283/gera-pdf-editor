@@ -154,11 +154,8 @@ const MAX_RAW: usize = 64 * 1024;
 /// Maior script de ação lido.
 const MAX_JS: usize = 70_000;
 
-fn name_of(obj: &PdfObject, key: &str) -> Result<Option<String>> {
-    Ok(obj
-        .get_dict(key)?
-        .and_then(|n| n.as_name().ok())
-        .map(|n| String::from_utf8_lossy(&n).into_owned()))
+fn name_of(obj: &PdfObject, key: &str) -> Option<String> {
+    crate::pdf_obj::get(obj, key).and_then(|n| crate::pdf_obj::name_of(&n))
 }
 
 fn text(obj: &PdfObject) -> Result<String> {
@@ -195,7 +192,7 @@ fn field_list(obj: Option<PdfObject>) -> Result<Vec<String>> {
 
 /// Uma ação (sem a /Next).
 fn read_one(doc: &PdfDocument, a: &PdfObject) -> Result<ActionKind> {
-    let kind = name_of(a, "S")?.unwrap_or_default();
+    let kind = name_of(a, "S").unwrap_or_default();
     Ok(match kind.as_str() {
         "GoTo" => {
             let page = a
@@ -235,7 +232,7 @@ fn read_one(doc: &PdfDocument, a: &PdfObject) -> Result<ActionKind> {
                 .and_then(|f| f.as_int().ok())
                 .is_some_and(|f| f & 1 != 0),
         },
-        "Named" => ActionKind::Named(name_of(a, "N")?.unwrap_or_default()),
+        "Named" => ActionKind::Named(name_of(a, "N").unwrap_or_default()),
         "Launch" => {
             let file = match a.get_dict("F")? {
                 Some(f) if f.is_dict()? => f
@@ -318,6 +315,16 @@ pub(crate) fn read_field_actions(
     doc: &PdfDocument,
     w: &PdfObject,
 ) -> Result<Vec<(FieldTrigger, ActionKind)>> {
+    let out = read_actions_of(doc, w)?;
+    // sem ações no widget: as do nó do campo (outros programas as põem lá)
+    let head = crate::forms::field_head(w)?;
+    if out.is_empty() && head.as_indirect()? != w.as_indirect()? {
+        return read_actions_of(doc, &head);
+    }
+    Ok(out)
+}
+
+fn read_actions_of(doc: &PdfDocument, w: &PdfObject) -> Result<Vec<(FieldTrigger, ActionKind)>> {
     let mut out = Vec::new();
     let aa = w.get_dict("AA")?.filter(|aa| aa.is_dict().unwrap_or(false));
     for t in FieldTrigger::ALL {
@@ -400,6 +407,14 @@ fn action_obj(doc: &PdfDocument, a: &ActionKind) -> Result<Option<PdfObject>> {
     Ok(Some(d))
 }
 
+/// As ações de um gatilho, na ordem.
+fn of_trigger<T: PartialEq + Copy>(list: &[(T, ActionKind)], t: T) -> Vec<&ActionKind> {
+    list.iter()
+        .filter(|(x, _)| *x == t)
+        .map(|(_, a)| a)
+        .collect()
+}
+
 /// A cadeia: a primeira ação com as outras em /Next (array), como o Acrobat grava.
 fn chain_obj(doc: &PdfDocument, list: &[&ActionKind]) -> Result<Option<PdfObject>> {
     let mut objs = Vec::new();
@@ -440,11 +455,7 @@ pub(crate) fn write_field_actions(
     };
     for t in FieldTrigger::ALL {
         aa.dict_delete(t.key())?;
-        let mine: Vec<&ActionKind> = list
-            .iter()
-            .filter(|(x, _)| *x == t)
-            .map(|(_, a)| a)
-            .collect();
+        let mine = of_trigger(list, t);
         if let Some(chain) = chain_obj(doc, &mine)? {
             if t == FieldTrigger::MouseUp {
                 w.dict_put("A", chain)?;
@@ -489,11 +500,7 @@ impl PdfDoc {
         obj.dict_delete("AA")?;
         let mut aa = self.inner.new_dict()?;
         for t in PageTrigger::ALL {
-            let mine: Vec<&ActionKind> = list
-                .iter()
-                .filter(|(x, _)| *x == t)
-                .map(|(_, a)| a)
-                .collect();
+            let mine = of_trigger(list, t);
             if let Some(chain) = chain_obj(&self.inner, &mine)? {
                 aa.dict_put(t.key(), chain)?;
             }
@@ -508,17 +515,12 @@ impl PdfDoc {
     /// um nome de grupo). Não entra no desfazer (como no Acrobat), mas marca o documento como
     /// alterado. Devolve se algo mudou.
     pub fn show_fields(&mut self, names: &[String], hide: bool) -> Result<bool> {
-        const HIDDEN: i32 = 2;
+        use crate::forms::HIDDEN;
         let mut changed = false;
         for p in 0..self.page_count()? {
             for w in self.inner.load_pdf_page(p)?.widgets() {
                 let name = w.name().ok().flatten().unwrap_or_default();
-                let listed = names.iter().any(|n| {
-                    name == *n
-                        || name
-                            .strip_prefix(n.as_str())
-                            .is_some_and(|r| r.starts_with('.'))
-                });
+                let listed = crate::forms::named_in(&name, names);
                 if !listed {
                     continue;
                 }

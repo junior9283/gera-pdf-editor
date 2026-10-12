@@ -1203,7 +1203,7 @@ impl DocTab {
             self.worker.send(r);
         }
         self.form.notes = summary.form_notes;
-        self.page_actions = summary.page_actions.clone();
+        self.page_actions = summary.page_actions;
         self.outline = summary.outline;
         self.links = summary.links;
         self.attachments = summary.attachments;
@@ -1681,7 +1681,7 @@ impl DocTab {
                                         &f.kind,
                                         props,
                                         self.field_names(),
-                                        self.view.as_ref().map_or(0, |v| v.sizes.len()),
+                                        self.page_total(),
                                     ));
                             }
                             (Err(e), _) => {
@@ -2429,7 +2429,11 @@ impl DocTab {
                 }
             }
         }
-        let names = self.field_names();
+        let names = if self.page_props.is_some() {
+            self.field_names()
+        } else {
+            Vec::new()
+        };
         if let Some(done) = self
             .page_props
             .as_mut()
@@ -2757,7 +2761,7 @@ impl DocTab {
                 ThumbAction::CopyTo { pages, target } => self.copy_pages(pages, target),
                 ThumbAction::DragOut(pages) => self.events.push(DocEvent::DragPagesOut(pages)),
                 ThumbAction::PageProps(page) => {
-                    let total = self.view.as_ref().map_or(0, |v| v.sizes.len());
+                    let total = self.page_total();
                     let actions = self
                         .page_actions
                         .iter()
@@ -2769,7 +2773,7 @@ impl DocTab {
                     ));
                 }
                 ThumbAction::Labels(pages) => {
-                    let total = self.view.as_ref().map_or(0, |v| v.sizes.len());
+                    let total = self.page_total();
                     self.labels_dialog = Some(crate::page_labels_dialog::PageLabelsDialog::new(
                         &pages, total,
                     ));
@@ -3573,7 +3577,7 @@ impl DocTab {
                 .find(|f| f.page == p && f.id == id)
                 .cloned()
         });
-        let pages = self.view.as_ref().map_or(0, |v| v.sizes.len());
+        let pages = self.page_total();
         match cmd {
             C::Copy => self.prepare.clipboard = self.prepare.selection.clone(),
             C::Paste => {
@@ -3656,15 +3660,17 @@ impl DocTab {
             // chegou aqui por uma ação de abrir página: não salta de novo
             let jumped_here = self.auto_jump.take() == Some(current);
             for a in page_todo {
-                let navigate = matches!(a, pdf_core::ActionKind::GoTo { .. });
-                if auto_allowed(&a, true) && !(navigate && jumped_here) {
-                    if let pdf_core::ActionKind::GoTo { page } = a {
-                        self.auto_jump = Some(page);
-                    }
-                    todo.push((current, -1, a));
-                } else if !(navigate && jumped_here) {
-                    skipped = true;
+                if jumped_here && matches!(a, pdf_core::ActionKind::GoTo { .. }) {
+                    continue;
                 }
+                if !auto_allowed(&a, true) {
+                    skipped = true;
+                    continue;
+                }
+                if let pdf_core::ActionKind::GoTo { page } = a {
+                    self.auto_jump = Some(page);
+                }
+                todo.push((current, -1, a));
             }
             self.action_page = Some(current);
         } else if !filling {
@@ -3744,9 +3750,14 @@ impl DocTab {
             .pick_image(ctx, "Escolher a imagem", crate::open_dialog::IMAGE_EXTS);
     }
 
+    /// Número de páginas do documento aberto (0 antes de abrir).
+    fn page_total(&self) -> usize {
+        self.view.as_ref().map_or(0, |v| v.sizes.len())
+    }
+
     /// Janela Duplicar ou Criar várias cópias (com a prévia na página).
     fn arrange_window(&mut self, ctx: &egui::Context) {
-        let pages = self.view.as_ref().map_or(0, |v| v.sizes.len());
+        let pages = self.page_total();
         let Some(dialog) = self.arrange_dialog.as_mut() else {
             self.prepare.ghosts.clear();
             return;

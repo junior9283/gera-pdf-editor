@@ -300,7 +300,7 @@ mod tests {
         let mut hidden = field(1, FieldKind::Signature);
         hidden.hidden = true;
         assert_eq!(empty_sig_field(&[hidden], &[], 0, (10.0, 10.0)), None);
-        let text = [field(2, FieldKind::Button { reset: false })];
+        let text = [field(2, FieldKind::Button)];
         assert_eq!(empty_sig_field(&text, &[], 0, (10.0, 10.0)), None);
     }
 }

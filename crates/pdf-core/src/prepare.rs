@@ -265,7 +265,7 @@ fn set_flag(flags: &mut i32, bit: i32, on: bool) {
 }
 
 /// Tamanho da fonte em /DA ("/Helv 12 Tf 0 g"); 0 = automático.
-fn da_size(obj: &PdfObject) -> Result<f32> {
+pub(crate) fn da_size(obj: &PdfObject) -> Result<f32> {
     let Some(da) = obj.get_dict_inheritable("DA")? else {
         return Ok(0.0);
     };
@@ -744,9 +744,11 @@ impl PdfDoc {
                     }
                 }
                 self.with_snapshot(|d| {
-                    targets
-                        .into_iter()
-                        .try_for_each(|p| d.duplicate_widget(page, id, p, offset).map(drop))
+                    for &p in &targets {
+                        d.duplicate_widget(page, id, p, offset)?;
+                    }
+                    // um redesenho por página, no fim
+                    targets.iter().try_for_each(|&p| d.refresh_widgets(p, None))
                 })
             }
             PrepareOp::SetPageActions { page, actions } => {
@@ -759,9 +761,12 @@ impl PdfDoc {
                     return Err(invalid("cópias demais"));
                 }
                 self.with_snapshot(|d| {
-                    rects
-                        .into_iter()
-                        .try_for_each(|r| d.copy_field(page, id, r).map(drop))
+                    // os nomes lidos uma vez; cada cópia nova entra na lista
+                    let mut names = d.field_names()?;
+                    for r in rects {
+                        d.copy_field(page, id, r, &mut names)?;
+                    }
+                    d.refresh_widgets(page, None)
                 })
             }
         }
@@ -791,7 +796,6 @@ impl PdfDoc {
         kids_array(&head)?.array_push(self.inner.new_indirect(new_id, 0)?)?;
         annot.update()?;
         page_ref.update()?;
-        self.refresh_widgets(to, None)?;
         Ok(new_id)
     }
 
@@ -843,7 +847,13 @@ impl PdfDoc {
 
     /// Criar várias cópias: um campo novo como o `id` (mesmas propriedades e valor), chamado
     /// `nome_k`, no retângulo `rect` da mesma página.
-    fn copy_field(&mut self, page: i32, id: i32, rect: PdfRect) -> Result<i32> {
+    fn copy_field(
+        &mut self,
+        page: i32,
+        id: i32,
+        rect: PdfRect,
+        names: &mut Vec<String>,
+    ) -> Result<i32> {
         let src = self.widget(page, id)?;
         let src_obj = src.annotation().object();
         let head = field_head(&src_obj)?;
@@ -853,11 +863,17 @@ impl PdfDoc {
             ));
         }
         let base = w_name(&src)?;
-        let names = self.field_names()?;
+        // livre: nem um campo nem o nó de outros ("a" com "a.b")
+        let taken = |n: &str| {
+            names
+                .iter()
+                .any(|x| x == n || x.strip_prefix(n).is_some_and(|r| r.starts_with('.')))
+        };
         let name = (1..)
             .map(|k| format!("{base}_{k}"))
-            .find(|n| !names.contains(n) && !self.is_node(n).unwrap_or(true))
+            .find(|n| !taken(n))
             .expect("sequência infinita");
+        names.push(name.clone());
         let acro = acroform(&mut self.inner)?;
         let mut page_ref = self.inner.load_pdf_page(page)?;
         let mut annot = page_ref.create_annotation(PdfAnnotationType::Widget)?;
@@ -881,7 +897,6 @@ impl PdfDoc {
         fields_of(&acro)?.array_push(self.inner.new_indirect(new_id, 0)?)?;
         annot.update()?;
         page_ref.update()?;
-        self.refresh_widgets(page, None)?;
         Ok(new_id)
     }
 
@@ -1217,8 +1232,10 @@ impl PdfDoc {
             crate::actions::write_field_actions(&self.inner, &mut obj, &p.actions)?;
         }
         self.refresh_widgets(page, Some(id))?;
-        // botão de ação: o app desenha (rótulo, layout e ícone), como o Acrobat mostraria
+        // botão de ação: o app desenha (rótulo, layout e ícone), como o Acrobat mostraria (os com
+        // ícone ou layout já foram desenhados pelo refresh)
         if flags & PUSHBUTTON != 0
+            && !PdfDoc::drawn_by_app(&obj)
             && obj
                 .get_dict_inheritable("FT")?
                 .and_then(|t| t.as_name().ok())

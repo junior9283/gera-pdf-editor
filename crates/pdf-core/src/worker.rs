@@ -704,7 +704,7 @@ impl State {
             ),
             Request::ResetForm => self.edit(send, |d| d.reset_form().map(|()| Changed::Document)),
             Request::ResetFields { fields, exclude } => self.edit(send, |d| {
-                d.reset_named(&fields, exclude).map(|()| Changed::Document)
+                d.reset_fields(&fields, exclude).map(|()| Changed::Document)
             }),
             Request::SetButtonIcon { page, id, path } => self.edit(send, |d| {
                 d.set_button_icon(page, id, &path)

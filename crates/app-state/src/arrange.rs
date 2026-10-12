@@ -68,14 +68,7 @@ pub fn align(rects: &[PdfRect], anchor: usize, edge: Edge) -> Vec<PdfRect> {
 
 /// Caixa que envolve todos os retângulos.
 fn bounds(rects: &[PdfRect]) -> Option<PdfRect> {
-    rects.iter().copied().reduce(|a, b| {
-        PdfRect::new(
-            a.x0.min(b.x0),
-            a.y0.min(b.y0),
-            a.x1.max(b.x1),
-            a.y1.max(b.y1),
-        )
-    })
+    rects.iter().copied().reduce(|a, b| a.union(&b))
 }
 
 /// Centraliza o grupo na página (as distâncias entre os campos ficam).

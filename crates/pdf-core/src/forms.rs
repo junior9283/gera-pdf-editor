@@ -35,10 +35,8 @@ pub enum FieldKind {
         options: Vec<(String, String)>,
     },
     Signature,
-    /// Botão de ação; `reset`: Redefinir formulário ao clicar.
-    Button {
-        reset: bool,
-    },
+    /// Botão de ação (o que ele faz está nas ações do campo).
+    Button,
 }
 
 impl FieldKind {
@@ -179,19 +177,6 @@ pub(crate) fn on_state(obj: &PdfObject) -> Result<String> {
     Ok("Yes".into())
 }
 
-/// O botão tem a ação Redefinir formulário (/A /S /ResetForm no widget ou no campo)?
-pub(crate) fn resets_form(obj: &PdfObject) -> Result<bool> {
-    let is_reset = |o: &PdfObject| -> Result<bool> {
-        Ok(match o.get_dict("A")? {
-            Some(a) => a
-                .get_dict("S")?
-                .is_some_and(|s| s.as_name().is_ok_and(|n| n == b"ResetForm")),
-            None => false,
-        })
-    };
-    Ok(is_reset(obj)? || is_reset(&field_head(obj)?)?)
-}
-
 /// Nó do campo (com /T) de um widget: os botões de opção são filhos sem nome do grupo.
 /// A subida é limitada: um /Parent em ciclo (PDF malicioso) não pode travar o app.
 pub(crate) fn field_head(obj: &PdfObject) -> Result<PdfObject> {
@@ -237,8 +222,11 @@ fn set_buttons(head: &mut PdfObject, value: &str) -> Result<()> {
 }
 
 /// Campo oculto (flags Hidden ou NoView): o Acrobat não mostra nem deixa preencher.
-fn hidden(obj: &PdfObject) -> Result<bool> {
-    const HIDDEN: i32 = 2;
+/// Bit Oculto de /F (Mostrar/ocultar).
+pub(crate) const HIDDEN: i32 = 2;
+
+/// Widget oculto (/F Oculto ou Sem exibição).
+pub(crate) fn hidden(obj: &PdfObject) -> Result<bool> {
     const NO_VIEW: i32 = 32;
     Ok(obj
         .get_dict("F")?
@@ -282,9 +270,7 @@ fn info(w: &PdfWidget, page: i32) -> Result<FieldInfo> {
             options: options_of(&obj)?,
         },
         WidgetType::Signature => FieldKind::Signature,
-        _ => FieldKind::Button {
-            reset: resets_form(&obj)?,
-        },
+        _ => FieldKind::Button,
     };
     let head = field_head(&obj)?;
     let keystroke = parse_format(&aa_script(&head, "K")?);
@@ -351,7 +337,7 @@ fn show_value(
 }
 
 /// O nome de campo `name` está na lista (ele ou um grupo acima dele)?
-fn named_in(name: &str, list: &[String]) -> bool {
+pub(crate) fn named_in(name: &str, list: &[String]) -> bool {
     list.iter().any(|l| {
         name == l
             || name
@@ -609,67 +595,22 @@ impl PdfDoc {
         result
     }
 
-    /// Botão com a ação Redefinir formulário: limpa os campos de /Fields (ou todos menos eles,
-    /// com o bit 1 de /Flags), como no Acrobat.
-    pub fn press_reset(&mut self, page: i32, id: i32) -> Result<()> {
-        let obj = self.widget(page, id)?.annotation().object();
-        let action = match obj.get_dict("A")? {
-            Some(a) => Some(a),
-            None => field_head(&obj)?.get_dict("A")?,
-        };
-        let mut filter = None;
-        if let Some(a) = action {
-            if let Some(list) = a
-                .get_dict("Fields")?
-                .filter(|l| l.is_array().unwrap_or(false))
-            {
-                let mut names = Vec::new();
-                for k in 0..list.len()?.min(10_000) as i32 {
-                    let Some(item) = list.get_array(k)? else {
-                        continue;
-                    };
-                    names.push(if item.is_string()? {
-                        item.as_string()?
-                    } else {
-                        crate::prepare::full_name(&item)?
-                    });
-                }
-                let exclude = a
-                    .get_dict("Flags")?
-                    .and_then(|f| f.as_int().ok())
-                    .is_some_and(|f| f & 1 != 0);
-                filter = Some((names, exclude));
-            }
-        }
-        self.reset_fields(filter.as_ref())
-    }
-
-    /// Ação Redefinir formulário: os campos `fields` (todos, se vazio); com `exclude`, todos menos
-    /// eles.
-    pub fn reset_named(&mut self, fields: &[String], exclude: bool) -> Result<()> {
-        if fields.is_empty() && !exclude {
-            return self.reset_fields(None);
-        }
-        self.reset_fields(Some(&(fields.to_vec(), exclude)))
-    }
-
     /// Limpar formulário: todos os campos voltam ao valor padrão (desfazer por instantâneo).
     pub fn reset_form(&mut self) -> Result<()> {
-        self.reset_fields(None)
+        self.reset_fields(&[], false)
     }
 
-    /// Volta ao padrão os campos de `filter` (nomes; com `true`, todos menos eles) ou todos, e
-    /// recalcula (desfazer por instantâneo).
-    fn reset_fields(&mut self, filter: Option<&(Vec<String>, bool)>) -> Result<()> {
+    /// Ação Redefinir formulário: os campos `fields` (ou todos, sem nenhum); com `exclude`, todos
+    /// menos eles. Recalcula depois (desfazer por instantâneo).
+    pub fn reset_fields(&mut self, fields: &[String], exclude: bool) -> Result<()> {
+        let all = fields.is_empty() && !exclude;
         let before = self.snapshot()?;
         for p in 0..self.page_count()? {
             let page_ref = self.inner.load_pdf_page(p)?;
             for mut w in page_ref.widgets() {
-                if let Some((names, exclude)) = filter {
-                    let name = w.name().ok().flatten().unwrap_or_default();
-                    if named_in(&name, names) == *exclude {
-                        continue;
-                    }
+                let name = w.name().ok().flatten().unwrap_or_default();
+                if !all && named_in(&name, fields) == exclude {
+                    continue;
                 }
                 if is_button(&w)? {
                     // o reset do MuPDF não volta o grupo de botões: padrão (/DV) ou "Off"
