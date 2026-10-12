@@ -8,6 +8,14 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 - v6e4 — formulários: importar e exportar dados, Enviar, nivelar e preenchimento automático.
 
+## [0.21.1] — 2026-10-12 · Correções de segurança dos códigos de barras
+
+### Segurança
+- Um PDF com centenas de códigos de barras não trava mais ao duplicar campos em muitas páginas,
+  desfazer ou refazer: cada operação tem um orçamento único de códigos redesenhados.
+- Abrir um formulário com `/NeedAppearances` não monta o texto dos códigos à toa.
+- O script de um código de barras com uma lista enorme de campos é lido em tempo linear.
+
 ## [0.21.0] — 2026-10-12 · Detecção automática de campos e Código de barras (v6e3)
 
 ### Adicionado
