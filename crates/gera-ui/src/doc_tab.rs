@@ -99,6 +99,8 @@ pub enum DocEvent {
     NeedSaveAs,
     /// Clique num link para fora do documento (endereço, outro arquivo ou bloqueado).
     OpenLink(pdf_core::LinkTarget),
+    /// O preenchimento automático aprendeu uma entrada: a lista nova (vai para as preferências).
+    Autofill(app_state::autofill::Autofill),
     /// O arquivo pede para abrir em tela cheia (`/PageMode /FullScreen`).
     FullScreen,
     /// Anexo PDF gravado na pasta privada: abrir numa aba, sem lugar escolhido (Salvar pergunta).
@@ -4017,6 +4019,11 @@ impl DocTab {
 
     /// Nome do usuário: vai para os carimbos dinâmicos e, no worker, como autor das anotações.
     /// Repetir o mesmo nome não manda nada (a Identidade já o aplica antes de avisar a casca).
+    /// A lista e o modo do preenchimento automático (das preferências).
+    pub fn set_autofill(&mut self, autofill: &app_state::autofill::Autofill) {
+        self.form.autofill.clone_from(autofill);
+    }
+
     pub fn set_author(&mut self, author: Option<String>) {
         if self.edit.author != author {
             self.edit.author = author.clone();
@@ -4220,6 +4227,10 @@ impl DocTab {
         if let Some((page, id)) = open_props {
             self.prepare.props_for = Some((page, id));
             self.worker.send(Request::FieldProps { page, id });
+        }
+        if std::mem::take(&mut self.form.learned) {
+            self.events
+                .push(DocEvent::Autofill(self.form.autofill.clone()));
         }
         for action in field_actions {
             match action {

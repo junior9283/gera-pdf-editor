@@ -113,6 +113,8 @@ pub struct Prefs {
     pub thumb_width: f32,
     /// Usar números lógicos de página (os rótulos do documento na caixa de página).
     pub logical_page_numbers: bool,
+    /// Preferências ▸ Formulários: preenchimento automático e a lista lembrada.
+    pub autofill: crate::autofill::Autofill,
 }
 
 impl Default for Prefs {
@@ -133,6 +135,7 @@ impl Default for Prefs {
             last_views: Vec::new(),
             thumb_width: THUMB_WIDTH,
             logical_page_numbers: true,
+            autofill: Default::default(),
         }
     }
 }
@@ -185,6 +188,7 @@ impl Prefs {
             .filter(|(k, _)| site_key(k).as_deref() == Some(k.as_str()))
             .take(MAX_SITES)
             .collect();
+        self.autofill = std::mem::take(&mut self.autofill).sanitized();
         self.max_recents = self.max_recents.clamp(1, MAX_RECENT_SETTING);
         self.thumb_width = if self.thumb_width.is_finite() {
             self.thumb_width

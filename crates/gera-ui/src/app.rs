@@ -186,6 +186,7 @@ impl GeraApp {
             let mut doc = DocTab::new(ctx, path.clone(), self.prefs.dark);
             doc.thumbs.width = self.prefs.thumb_width;
             doc.set_author(self.prefs.author.clone());
+            doc.set_autofill(&self.prefs.autofill);
             let key = path.to_string_lossy();
             doc.open_view = crate::doc_tab::OpenView {
                 mode: self.prefs.default_mode,
@@ -384,6 +385,13 @@ impl GeraApp {
                     }
                     DocEvent::Run(cmd) => to_run.push(cmd),
                     DocEvent::OpenAttachment(path) => attachments.push(path),
+                    DocEvent::Autofill(list) => {
+                        self.prefs.autofill = list;
+                        self.prefs_dirty = true;
+                        for doc in &mut self.docs {
+                            doc.set_autofill(&self.prefs.autofill);
+                        }
+                    }
                     DocEvent::OpenLink(target) => {
                         use crate::links::Outcome;
                         match crate::links::outcome(&target, &self.prefs.link_sites) {
@@ -1153,6 +1161,11 @@ impl GeraApp {
         let (dark, author) = (new.dark, new.author.clone());
         let (theme_changed, author_changed) =
             (dark != self.prefs.dark, author != self.prefs.author);
+        if new.autofill != self.prefs.autofill {
+            for doc in &mut self.docs {
+                doc.set_autofill(&new.autofill);
+            }
+        }
         self.prefs = new;
         self.prefs_dirty = true;
         if forget || fewer {
