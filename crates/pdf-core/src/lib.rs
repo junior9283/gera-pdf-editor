@@ -4,6 +4,7 @@ pub mod sample;
 mod actions;
 mod annot_edit;
 mod attachments;
+mod button_icon;
 mod comment_summary;
 mod comments_io;
 mod compare;
@@ -45,6 +46,7 @@ mod xfdf;
 pub use actions::{named_label, ActionKind, FieldTrigger, PageTrigger, NAMED_ITEMS};
 pub use annot_edit::{callout_end, dist_to_segment, MAX_VERTICES};
 pub use attachments::MAX_ATTACHMENT_BYTES;
+pub use button_icon::{BEHAVIORS, LAYOUTS};
 pub use comment_summary::{
     summarize_comments, SummaryFont, SummaryLayout, SummaryOptions, SummarySort,
 };

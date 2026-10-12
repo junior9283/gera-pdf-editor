@@ -36,6 +36,8 @@ pub struct FieldPropsWindow {
     actions: crate::shell::actions_editor::ActionsEditor<pdf_core::FieldTrigger>,
     all_names: Vec<String>,
     pages: usize,
+    /// "Escolher…" do ícone foi clicado: a aba abre o seletor de imagem.
+    pub wants_icon: bool,
 }
 
 impl FieldPropsWindow {
@@ -70,6 +72,7 @@ impl FieldPropsWindow {
             ),
             all_names: names.clone(),
             pages,
+            wants_icon: false,
             names: names.into_iter().filter(|n| *n != props.name).collect(),
             max_len: props.max_len.map_or_else(String::new, |n| n.to_string()),
             props,
@@ -93,7 +96,11 @@ impl FieldPropsWindow {
     }
 
     fn contents(&mut self, ui: &mut egui::Ui) -> Option<Option<FieldProps>> {
-        let mut tabs = vec![(Tab::General, "Geral"), (Tab::Actions, "Ações")];
+        let mut tabs = vec![(Tab::General, "Geral")];
+        if self.kind == Kind::Push {
+            tabs.push((Tab::Options, "Opções"));
+        }
+        tabs.push((Tab::Actions, "Ações"));
         if self.kind == Kind::Text {
             tabs.extend([
                 (Tab::Format, "Formatar"),
@@ -109,6 +116,7 @@ impl FieldPropsWindow {
         ui.separator();
         match self.tab {
             Tab::Actions => self.actions.ui(ui, &self.all_names, self.pages),
+            Tab::Options => self.button_options(ui),
             Tab::Format => self.format.ui(ui),
             Tab::Validate => self.validate.ui(ui),
             Tab::Calculate => self.calc.ui(ui, &self.names),
@@ -118,21 +126,90 @@ impl FieldPropsWindow {
         let mut out = None;
         ui.horizontal(|ui| {
             if ui.button("OK").clicked() {
-                let mut props = self.props.clone();
-                props.max_len = self.max_len.trim().parse().ok().filter(|&n: &usize| n > 0);
-                if self.kind == Kind::Text {
-                    props.format = self.format.format();
-                    props.validate = self.validate.validate();
-                    props.calc = self.calc.calc();
-                }
-                props.actions = self.actions.list.clone();
-                out = Some(Some(props));
+                out = Some(Some(self.built()));
             }
             if ui.button("Cancelar").clicked() {
                 out = Some(None);
             }
         });
         out
+    }
+
+    /// As propriedades com o que está nas abas.
+    fn built(&self) -> FieldProps {
+        let mut props = self.props.clone();
+        props.max_len = self.max_len.trim().parse().ok().filter(|&n: &usize| n > 0);
+        if self.kind == Kind::Text {
+            props.format = self.format.format();
+            props.validate = self.validate.validate();
+            props.calc = self.calc.calc();
+        }
+        props.actions = self.actions.list.clone();
+        props
+    }
+
+    /// A imagem escolhida para o ícone do botão.
+    pub fn set_icon(&mut self, path: std::path::PathBuf) {
+        self.props.icon_path = Some(path);
+        self.props.has_icon = true;
+    }
+
+    fn clear_icon(&mut self) {
+        self.props.icon_path = None;
+        self.props.has_icon = false;
+    }
+
+    /// A aba Opções dos botões (como no Acrobat): layout, comportamento, rótulo e ícone.
+    fn button_options(&mut self, ui: &mut egui::Ui) {
+        let p = &mut self.props;
+        egui::Grid::new("opcoes-botao")
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label("Layout");
+                let layout = usize::from(p.layout.min(6));
+                egui::ComboBox::from_id_salt("layout-botao")
+                    .selected_text(pdf_core::LAYOUTS[layout])
+                    .show_ui(ui, |ui| {
+                        for (k, label) in pdf_core::LAYOUTS.iter().enumerate() {
+                            ui.selectable_value(&mut p.layout, k as u8, *label);
+                        }
+                    });
+                ui.end_row();
+                ui.label("Comportamento");
+                let behavior = usize::from(p.behavior.min(3));
+                egui::ComboBox::from_id_salt("comportamento-botao")
+                    .selected_text(pdf_core::BEHAVIORS[behavior].1)
+                    .show_ui(ui, |ui| {
+                        for (k, (_, label)) in pdf_core::BEHAVIORS.iter().enumerate() {
+                            ui.selectable_value(&mut p.behavior, k as u8, *label);
+                        }
+                    });
+                ui.end_row();
+                ui.label("Rótulo");
+                ui.add_enabled(
+                    p.layout != 1,
+                    egui::TextEdit::singleline(&mut p.button_label),
+                );
+                ui.end_row();
+                ui.label("Ícone");
+                ui.horizontal(|ui| {
+                    let state = match (&p.icon_path, p.has_icon) {
+                        (Some(path), _) => path
+                            .file_name()
+                            .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+                        (None, true) => "imagem do arquivo".into(),
+                        (None, false) => "nenhum".into(),
+                    };
+                    ui.label(crate::links::safe_display(&state));
+                    if ui.button("Escolher…").clicked() {
+                        self.wants_icon = true;
+                    }
+                });
+                ui.end_row();
+            });
+        if self.props.has_icon && ui.button("Limpar ícone").clicked() {
+            self.clear_icon();
+        }
     }
 
     /// A aba Geral (e tudo, nos tipos sem abas).
@@ -191,13 +268,7 @@ impl FieldPropsWindow {
                 }
                 options_editor(ui, &mut p.options, &mut self.new_option);
             }
-            Kind::Push => {
-                ui.horizontal(|ui| {
-                    ui.label("Rótulo");
-                    ui.text_edit_singleline(&mut p.button_label);
-                });
-            }
-            Kind::Other => {}
+            Kind::Push | Kind::Other => {}
         }
         if !matches!(self.kind, Kind::Other | Kind::Button { .. }) {
             ui.horizontal(|ui| {
@@ -510,6 +581,7 @@ impl CalcDraft {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     General,
+    Options,
     Actions,
     Format,
     Validate,
@@ -730,6 +802,41 @@ mod tests {
 mod draft_tests {
     use super::*;
     use pdf_core::{CalcOp, FieldCalc, FieldFormat, FieldValidate};
+
+    #[test]
+    fn options_tab_builds_the_props() {
+        let props = FieldProps {
+            name: "Foto".into(),
+            layout: 1,
+            behavior: 1,
+            has_icon: true,
+            ..Default::default()
+        };
+        let mut w = FieldPropsWindow::new(
+            0,
+            1,
+            &pdf_core::FieldKind::Button { reset: false },
+            props,
+            vec![],
+            1,
+        );
+        w.props.layout = 2;
+        w.props.button_label = "Escolha".into();
+        w.set_icon(std::path::PathBuf::from("/tmp/a.png"));
+        let out = w.built();
+        assert_eq!((out.layout, out.button_label.as_str()), (2, "Escolha"));
+        assert_eq!(
+            out.icon_path.as_deref(),
+            Some(std::path::Path::new("/tmp/a.png"))
+        );
+        assert!(out.has_icon);
+        w.clear_icon();
+        let out = w.built();
+        assert!(
+            !out.has_icon && out.icon_path.is_none(),
+            "Limpar tira o ícone"
+        );
+    }
 
     #[test]
     fn props_tabs_build_the_right_ops() {

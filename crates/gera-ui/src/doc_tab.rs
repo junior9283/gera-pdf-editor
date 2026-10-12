@@ -318,6 +318,10 @@ enum PickFor {
     File(crate::organize::Purpose),
     /// Editar PDF: imagem para substituir a selecionada (ou, sem nome, para acrescentar).
     Image(Option<(i32, String)>),
+    /// Ícone do botão nas Propriedades (aba Opções).
+    PropsIcon,
+    /// Campo Imagem ao preencher: a figura do botão (página, id).
+    FieldIcon(i32, i32),
     /// Pasta das partes do Dividir.
     Folder,
     /// Arquivo (imagem ou PDF) da marca d'água.
@@ -2213,7 +2217,13 @@ impl DocTab {
             return;
         };
         let (page, id) = (w.page, w.id);
-        if let Some(outcome) = w.show(ctx) {
+        let outcome = w.show(ctx);
+        if std::mem::take(&mut w.wants_icon) && !self.files.busy() {
+            self.picking = Some(PickFor::PropsIcon);
+            self.files
+                .pick_image(ctx, "Escolher o ícone", crate::open_dialog::IMAGE_EXTS);
+        }
+        if let Some(outcome) = outcome {
             self.prepare.props = None;
             if let Some(props) = outcome {
                 self.worker
@@ -3318,6 +3328,18 @@ impl DocTab {
                 // só exclui depois que a extração deu certo (resposta Extracted)
                 self.delete_after_extract = delete_after.then_some(pages);
             }
+            (Some(PickFor::PropsIcon), Picked::Open(files)) => {
+                if let (Some(w), Some(path)) =
+                    (self.prepare.props.as_mut(), files.into_iter().next())
+                {
+                    w.set_icon(path);
+                }
+            }
+            (Some(PickFor::FieldIcon(page, id)), Picked::Open(files)) => {
+                if let Some(path) = files.into_iter().next() {
+                    self.worker.send(Request::SetButtonIcon { page, id, path });
+                }
+            }
             (Some(PickFor::Image(target)), Picked::Open(files)) => {
                 let Some(path) = files.into_iter().next() else {
                     return;
@@ -3699,7 +3721,7 @@ impl DocTab {
                     self.events.push(DocEvent::OpenLink(target));
                 }
             }
-            A::ImportIcon => self.pick_button_icon(page, id),
+            A::ImportIcon => self.pick_button_icon(ctx, page, id),
             A::JavaScript(_) => {
                 self.status = "Este formulário tem JavaScript que o app não executa.".into()
             }
@@ -3712,9 +3734,14 @@ impl DocTab {
         }
     }
 
-    /// Campo Imagem: escolher a figura do botão (Tarefa 6).
-    fn pick_button_icon(&mut self, _page: i32, _id: i32) {
-        self.status = "Escolher a imagem do botão ainda não está disponível.".into();
+    /// Campo Imagem: escolher a figura do botão (como o Acrobat pede ao clicar no campo).
+    fn pick_button_icon(&mut self, ctx: &egui::Context, page: i32, id: i32) {
+        if self.files.busy() {
+            return;
+        }
+        self.picking = Some(PickFor::FieldIcon(page, id));
+        self.files
+            .pick_image(ctx, "Escolher a imagem", crate::open_dialog::IMAGE_EXTS);
     }
 
     /// Janela Duplicar ou Criar várias cópias (com a prévia na página).

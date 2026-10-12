@@ -132,6 +132,12 @@ pub enum Request {
         fields: Vec<String>,
         exclude: bool,
     },
+    /// Campo Imagem: a figura do arquivo vira o ícone do botão.
+    SetButtonIcon {
+        page: i32,
+        id: i32,
+        path: PathBuf,
+    },
     /// Ação Mostrar/ocultar campos (não entra no desfazer, como no Acrobat).
     ShowFields {
         names: Vec<String>,
@@ -699,6 +705,10 @@ impl State {
             Request::ResetForm => self.edit(send, |d| d.reset_form().map(|()| Changed::Document)),
             Request::ResetFields { fields, exclude } => self.edit(send, |d| {
                 d.reset_named(&fields, exclude).map(|()| Changed::Document)
+            }),
+            Request::SetButtonIcon { page, id, path } => self.edit(send, |d| {
+                d.set_button_icon(page, id, &path)
+                    .map(|()| Changed::Pages(vec![page]))
             }),
             Request::ShowFields { names, hide } => self.edit(send, |d| {
                 d.show_fields(&names, hide).map(|_| Changed::Fields)

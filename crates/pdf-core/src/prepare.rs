@@ -24,6 +24,8 @@ pub enum NewFieldKind {
     Button,
     /// Campo de texto com Formatar = Data (`dd/mm/aaaa`) e o seletor de data ao preencher.
     Date,
+    /// Campo Imagem: botão "somente ícone" que, ao preencher, pede a imagem.
+    Image,
 }
 
 impl NewFieldKind {
@@ -38,6 +40,7 @@ impl NewFieldKind {
             Self::Signature => "Assinatura",
             Self::Button => "Botão",
             Self::Date => "Data",
+            Self::Image => "Imagem",
         }
     }
 }
@@ -143,8 +146,13 @@ pub struct FieldProps {
     pub format: FieldFormat,
     pub validate: FieldValidate,
     pub calc: FieldCalc,
-    /// Botão: rótulo (/MK /CA).
+    /// Botão: rótulo (/MK /CA), layout (/MK /TP, 0 a 6), comportamento (índice em
+    /// `BEHAVIORS`, /H), se tem ícone (desligar tira) e a imagem do ícone novo.
     pub button_label: String,
+    pub layout: u8,
+    pub behavior: u8,
+    pub has_icon: bool,
+    pub icon_path: Option<std::path::PathBuf>,
     /// Ações do widget (aba Ações), na ordem dos gatilhos.
     pub actions: Vec<(crate::actions::FieldTrigger, crate::actions::ActionKind)>,
 }
@@ -522,6 +530,12 @@ impl PdfDoc {
         for mut w in self.inner.load_pdf_page(page)?.widgets() {
             // um campo defeituoso de outro programa fica como está; os nossos são redesenhados
             let _ = w.update();
+            // o MuPDF não desenha o ícone (/MK /I): os botões com ícone ou layout são do app
+            let mut obj = w.annotation().object();
+            if PdfDoc::drawn_by_app(&obj) {
+                let rect = PdfRect::from(w.annotation().rect()?);
+                self.draw_button(&mut obj, rect)?;
+            }
         }
         // o MuPDF redesenha com o /V cru: os campos com Formatar voltam a mostrar o formatado
         self.redraw_values(Some(page), plain)
@@ -598,6 +612,20 @@ impl PdfDoc {
                 let (f, k) = format_scripts(&FieldFormat::Date(DATE_FORMAT.into()));
                 set_aa(&mut self.inner, &mut w, "F", &f)?;
                 set_aa(&mut self.inner, &mut w, "K", &k)?;
+            }
+            NewFieldKind::Image => {
+                w.dict_put("FT", name_obj("Btn")?)?;
+                w.dict_put("Ff", int(PUSHBUTTON)?)?;
+                mk.dict_put("TP", int(1)?)?;
+                mk.dict_put("BC", self.inner.new_object_from_str("[0.6]")?)?;
+                crate::actions::write_field_actions(
+                    &self.inner,
+                    &mut w,
+                    &[(
+                        crate::actions::FieldTrigger::MouseUp,
+                        crate::actions::ActionKind::ImportIcon,
+                    )],
+                )?;
             }
             NewFieldKind::Button => {
                 w.dict_put("FT", name_obj("Btn")?)?;
@@ -994,6 +1022,15 @@ impl PdfDoc {
     fn write_button(&mut self, obj: &mut PdfObject, p: &FieldProps) -> Result<()> {
         let mut mk = child_or_new(&self.inner, obj, "MK", false)?;
         mk.dict_put("CA", PdfObject::new_string(&p.button_label)?)?;
+        mk.dict_put("TP", int(i32::from(p.layout.min(6)))?)?;
+        if let Some(path) = &p.icon_path {
+            let icon = crate::button_icon::icon_from_file(&mut self.inner, path)?;
+            mk.dict_put("I", icon)?;
+        } else if !p.has_icon {
+            mk.dict_delete("I")?;
+        }
+        let (h, _) = crate::button_icon::BEHAVIORS[usize::from(p.behavior.min(3))];
+        obj.dict_put("H", name_obj(h)?)?;
         Ok(())
     }
 
@@ -1021,14 +1058,34 @@ impl PdfDoc {
             String::new()
         };
         let default = text(head.get_dict("DV")?)?;
-        let label = obj
-            .get_dict("MK")?
-            .and_then(|mk| mk.get_dict("CA").ok().flatten());
+        let mk = obj.get_dict("MK")?;
+        let label = mk.as_ref().and_then(|mk| mk.get_dict("CA").ok().flatten());
+        let layout = mk
+            .as_ref()
+            .and_then(|mk| mk.get_dict("TP").ok().flatten())
+            .and_then(|t| t.as_int().ok())
+            .unwrap_or(0)
+            .clamp(0, 6) as u8;
+        let has_icon = mk
+            .as_ref()
+            .is_some_and(|mk| mk.get_dict("I").ok().flatten().is_some());
+        let h = obj
+            .get_dict("H")?
+            .and_then(|h| h.as_name().ok())
+            .unwrap_or_else(|| b"I".to_vec());
+        let behavior = crate::button_icon::BEHAVIORS
+            .iter()
+            .position(|(k, _)| k.as_bytes() == h.as_slice())
+            .unwrap_or(1) as u8;
         Ok(FieldProps {
             format: parse_format(&aa_script(&head, "F")?),
             validate: parse_validate(&aa_script(&head, "V")?),
             calc: parse_calc(&aa_script(&head, "C")?),
             button_label: text(label)?,
+            layout,
+            behavior,
+            has_icon,
+            icon_path: None,
             actions: crate::actions::read_field_actions(&self.inner, &obj)?,
             name: partial_name(&head)?,
             tooltip: text(head.get_dict("TU")?)?,
@@ -1159,7 +1216,19 @@ impl PdfDoc {
         if p.actions != before.actions {
             crate::actions::write_field_actions(&self.inner, &mut obj, &p.actions)?;
         }
-        self.refresh_widgets(page, Some(id))
+        self.refresh_widgets(page, Some(id))?;
+        // botão de ação: o app desenha (rótulo, layout e ícone), como o Acrobat mostraria
+        if flags & PUSHBUTTON != 0
+            && obj
+                .get_dict_inheritable("FT")?
+                .and_then(|t| t.as_name().ok())
+                .as_deref()
+                == Some(b"Btn")
+        {
+            let rect = PdfRect::from(self.widget(page, id)?.annotation().rect()?);
+            self.draw_button(&mut obj, rect)?;
+        }
+        Ok(())
     }
 
     /// Botão de opção `id` sai do grupo atual (que some se ficar vazio; o valor dele deixa de
