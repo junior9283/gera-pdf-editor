@@ -187,6 +187,22 @@ const PUSHBUTTON: i32 = 1 << 16;
 const NO_EXPORT: i32 = 1 << 2;
 const DO_NOT_SPELL_CHECK: i32 = 1 << 22;
 
+/// O nome já é de um campo, ou é o nó de outros ("a" com "a.b" existindo)?
+fn name_taken(n: &str, names: &[String]) -> bool {
+    names
+        .iter()
+        .any(|x| x == n || x.strip_prefix(n).is_some_and(|r| r.starts_with('.')))
+}
+
+/// Primeiro nome automático livre do tipo ("Texto1", "Texto2"…).
+fn auto_name_in(kind: NewFieldKind, names: &[String]) -> String {
+    let p = kind.prefix();
+    (1..)
+        .map(|n| format!("{p}{n}"))
+        .find(|n| !name_taken(n, names))
+        .expect("sequência infinita")
+}
+
 /// Deslocamento do campo colado na mesma página (como colar no Acrobat).
 const PASTE_OFFSET: (f32, f32) = (10.0, 10.0);
 
@@ -504,16 +520,7 @@ impl PdfDoc {
 
     /// Primeiro nome automático livre do tipo ("Texto1", "Texto2"…).
     fn auto_name(&self, kind: NewFieldKind) -> Result<String> {
-        let taken = self.field_names()?;
-        let p = kind.prefix();
-        Ok((1..)
-            .map(|n| format!("{p}{n}"))
-            .find(|n| {
-                !taken
-                    .iter()
-                    .any(|t| t == n || t.starts_with(&format!("{n}.")))
-            })
-            .expect("sequência infinita"))
+        Ok(auto_name_in(kind, &self.field_names()?))
     }
 
     /// `name` já é o nó pai de outros campos ("a" com "a.b" existindo)?
@@ -607,6 +614,25 @@ impl PdfDoc {
         name: &str,
         group: Option<PdfObject>,
     ) -> Result<i32> {
+        let id = self.create_field_unrefreshed(page, rect, kind, name, group)?;
+        self.refresh_widgets(page, None)?;
+        if kind == NewFieldKind::Image {
+            // o campo Imagem é desenhado pelo app (o MuPDF não desenha ícones)
+            let w = self.widget(page, id)?;
+            self.draw_button(&mut w.annotation().object())?;
+        }
+        Ok(id)
+    }
+
+    /// Cria o campo sem redesenhar a página (a detecção cria vários e redesenha uma vez).
+    fn create_field_unrefreshed(
+        &mut self,
+        page: i32,
+        rect: PdfRect,
+        kind: NewFieldKind,
+        name: &str,
+        group: Option<PdfObject>,
+    ) -> Result<i32> {
         let acro = acroform(&mut self.inner)?;
         let mut page_ref = self.inner.load_pdf_page(page)?;
         let rotation = page_ref.rotation()?.rem_euclid(360);
@@ -664,10 +690,7 @@ impl PdfDoc {
                     fields,
                     names: true,
                 };
-                set_aa(&mut self.inner, &mut w, "C", &calc_script(&calc))?;
-                let mut acro_obj = acro.clone();
-                let mut co = child_or_new(&self.inner, &mut acro_obj, "CO", true)?;
-                co.array_push(me.clone())?;
+                self.set_calc(&mut w, me.clone(), &calc)?;
             }
             NewFieldKind::Image => {
                 w.dict_put("FT", name_obj("Btn")?)?;
@@ -726,14 +749,6 @@ impl PdfDoc {
         }
         annot.update()?;
         page_ref.update()?;
-        self.refresh_widgets(page, None)?;
-        if kind == NewFieldKind::Image {
-            // o campo Imagem é desenhado pelo app (o MuPDF não desenha ícones)
-            self.draw_button(&mut annot.object())?;
-        }
-        if kind == NewFieldKind::Barcode {
-            self.draw_barcode(&mut annot.object())?;
-        }
         Ok(id)
     }
 
@@ -862,25 +877,26 @@ impl PdfDoc {
         }
         self.with_snapshot(|d| {
             let mut names = d.field_names()?;
+            let mut touched: Vec<i32> = Vec::new();
             for (page, c) in &found {
                 // nome do rótulo, sem repetir (nem virar nó de outro); sem rótulo, o automático
                 let name = match &c.name {
-                    Some(base) => {
-                        let free = |n: &str| {
-                            !names.iter().any(|x| {
-                                x == n || x.strip_prefix(n).is_some_and(|r| r.starts_with('.'))
-                            })
-                        };
-                        std::iter::once(base.clone())
-                            .chain((2..).map(|k| format!("{base} {k}")))
-                            .find(|n| free(n))
-                            .expect("sequência infinita")
-                    }
-                    None => d.auto_name(c.kind)?,
+                    Some(base) => std::iter::once(base.clone())
+                        .chain((2..).map(|k| format!("{base} {k}")))
+                        .find(|n| !name_taken(n, &names))
+                        .expect("sequência infinita"),
+                    None => auto_name_in(c.kind, &names),
                 };
-                d.create_field(*page, c.rect, c.kind, &name, None)?;
+                d.create_field_unrefreshed(*page, c.rect, c.kind, &name, None)?;
                 names.push(name);
+                if !touched.contains(page) {
+                    touched.push(*page);
+                }
             }
+            // um redesenho por página, no fim
+            touched
+                .iter()
+                .try_for_each(|&p| d.refresh_widgets(p, None))?;
             Ok(found.len())
         })
     }
@@ -998,14 +1014,8 @@ impl PdfDoc {
         let parent = head.get_dict("Parent")?;
         let partial = partial_name(&head)?;
         let full = w_name(&src)?;
-        // livre: nem um campo nem o nó de outros ("a" com "a.b")
-        let taken = |n: &str| {
-            names
-                .iter()
-                .any(|x| x == n || x.strip_prefix(n).is_some_and(|r| r.starts_with('.')))
-        };
         let k = (1..)
-            .find(|k| !taken(&format!("{full}_{k}")))
+            .find(|k| !name_taken(&format!("{full}_{k}"), names))
             .expect("sequência infinita");
         names.push(format!("{full}_{k}"));
         let name = format!("{partial}_{k}");
@@ -1174,14 +1184,21 @@ impl PdfDoc {
             }
         }
         if p.calc != before.calc && p.calc != FieldCalc::Custom {
-            set_aa(&mut self.inner, head, "C", &calc_script(&p.calc))?;
-            let num = head.as_indirect()?;
-            let mut acro = acroform(&mut self.inner)?;
-            let mut co = child_or_new(&self.inner, &mut acro, "CO", true)?;
-            remove_ref(&mut co, num)?;
-            if p.calc != FieldCalc::None {
-                co.array_push(head.clone())?;
-            }
+            let me = head.clone();
+            self.set_calc(head, me, &p.calc)?;
+        }
+        Ok(())
+    }
+
+    /// Grava o Calcular (/AA /C) do campo e o põe no fim da ordem de cálculo (/CO), ou o tira
+    /// dela sem cálculo. `me`: a referência do campo.
+    fn set_calc(&mut self, head: &mut PdfObject, me: PdfObject, calc: &FieldCalc) -> Result<()> {
+        set_aa(&mut self.inner, head, "C", &calc_script(calc))?;
+        let mut acro = acroform(&mut self.inner)?;
+        let mut co = child_or_new(&self.inner, &mut acro, "CO", true)?;
+        remove_ref(&mut co, me.as_indirect()?)?;
+        if *calc != FieldCalc::None {
+            co.array_push(me)?;
         }
         Ok(())
     }
@@ -1309,10 +1326,16 @@ impl PdfDoc {
                 "o valor de exportação não pode ter espaço nem barra",
             ));
         }
+        // como o Acrobat: o formulário é recalculado quando um Calcular, um código de barras ou
+        // um nome (de que outros cálculos dependem) muda
+        let before = self.field_props(page, id)?;
+        let recalc = before.calc != p.calc || before.barcode != p.barcode || before.name != p.name;
         self.with_snapshot(|d| {
             d.write_props(page, id, p, &name, target)?;
-            // como o Acrobat: o formulário é recalculado (um Calcular ou código de barras novo)
-            d.recalculate(&mut Vec::new())
+            if recalc {
+                d.recalculate(&mut Vec::new())?;
+            }
+            Ok(())
         })
     }
 

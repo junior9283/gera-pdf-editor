@@ -299,17 +299,23 @@ impl PdfDoc {
     }
 
     pub fn words_in_rect(&self, page: i32, area: PdfRect) -> Result<Vec<Word>> {
-        Ok(self
-            .load(page)?
-            .words(TextExtractOptions::default())?
+        Ok(page_words(&self.load(page)?)?
             .into_iter()
-            .map(|w| Word {
-                text: w.text,
-                rect: w.bounds.into(),
-            })
             .filter(|w| w.rect.intersects(&area))
             .collect())
     }
+}
+
+/// As palavras da página, com o retângulo de cada uma.
+pub(crate) fn page_words(page: &mupdf::Page) -> Result<Vec<Word>> {
+    Ok(page
+        .words(TextExtractOptions::default())?
+        .into_iter()
+        .map(|w| Word {
+            text: w.text,
+            rect: w.bounds.into(),
+        })
+        .collect())
 }
 
 /// Máximo de áreas numa seleção (linhas longas com muitos pedaços).

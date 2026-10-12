@@ -453,10 +453,10 @@ impl PdfDoc {
             }
             // código de barras: o MuPDF desenhou o texto; o app desenha o código
             let mut obj = widget.annotation().object();
-            if crate::barcode::read_options(&obj).is_some() {
+            if let Some(o) = crate::barcode::read_options(&obj) {
                 // o MuPDF atualiza primeiro (senão refaria o texto por cima depois)
                 widget.update()?;
-                self.draw_barcode(&mut obj)?;
+                self.draw_barcode(&mut obj, o)?;
                 return Ok(old);
             }
         }
@@ -467,15 +467,7 @@ impl PdfDoc {
     /// Ordem dos cálculos: os campos de /AcroForm /CO e depois os outros com Calcular, na ordem
     /// das páginas. Cada campo aparece uma vez (o primeiro widget dele).
     fn calc_order(&self, fields: &[FieldInfo]) -> Result<Vec<FieldInfo>> {
-        let calculated: Vec<&FieldInfo> = fields
-            .iter()
-            .filter(|f| {
-                matches!(
-                    f.calc,
-                    FieldCalc::Simple { .. } | FieldCalc::Sfn(_) | FieldCalc::Barcode { .. }
-                )
-            })
-            .collect();
+        let calculated: Vec<&FieldInfo> = fields.iter().filter(|f| f.calc.is_computed()).collect();
         let mut out: Vec<FieldInfo> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let mut push = |f: &FieldInfo, out: &mut Vec<FieldInfo>| {
@@ -566,10 +558,10 @@ impl PdfDoc {
                     continue;
                 }
                 let mut obj = w.annotation().object();
-                if crate::barcode::read_options(&obj).is_some() {
+                if let Some(o) = crate::barcode::read_options(&obj) {
                     if barcodes < crate::barcode::MAX_PER_PASS {
                         barcodes += 1;
-                        self.draw_barcode(&mut obj)?;
+                        self.draw_barcode(&mut obj, o)?;
                     }
                     continue;
                 }

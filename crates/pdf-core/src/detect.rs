@@ -42,8 +42,7 @@ const SIGNATURE_H: f32 = 30.0;
 
 /// O centro de `inner` está dentro de `outer`?
 fn center_in(inner: &PdfRect, outer: &PdfRect) -> bool {
-    let (cx, cy) = ((inner.x0 + inner.x1) / 2.0, (inner.y0 + inner.y1) / 2.0);
-    cx >= outer.x0 && cx <= outer.x1 && cy >= outer.y0 && cy <= outer.y1
+    outer.contains((inner.x0 + inner.x1) / 2.0, (inner.y0 + inner.y1) / 2.0)
 }
 
 /// Os dois se sobrepõem em mais de 20% do menor?
@@ -260,16 +259,31 @@ pub(crate) fn detect_candidates(
 /// retângulo alinhado aos eixos, um retângulo.
 #[derive(Default)]
 struct Collector {
-    m: Option<mupdf::Matrix>,
+    m: mupdf::Matrix,
     sub: Vec<(f32, f32)>,
+    /// O subcaminho tem curva: não é linha nem caixa de formulário.
+    curved: bool,
     out: Vec<Shape>,
 }
 
 impl Collector {
+    fn new(m: mupdf::Matrix) -> Self {
+        Self {
+            m,
+            sub: Vec::new(),
+            curved: false,
+            out: Vec::new(),
+        }
+    }
+
     fn flush(&mut self) {
         let pts = std::mem::take(&mut self.sub);
+        let curved = std::mem::take(&mut self.curved);
         // um caminho só com milhões de pedaços: para no teto (a página é pulada)
-        if self.out.len() > MAX_SHAPES {
+        if curved
+            || self.out.len() > MAX_SHAPES
+            || !pts.iter().all(|p| p.0.is_finite() && p.1.is_finite())
+        {
             return;
         }
         match pts.len() {
@@ -278,15 +292,9 @@ impl Collector {
                 b: pts[1],
             }),
             4 | 5 => {
-                let xs: Vec<f32> = pts.iter().map(|p| p.0).collect();
-                let ys: Vec<f32> = pts.iter().map(|p| p.1).collect();
-                let (x0, x1) = (
-                    xs.iter().copied().fold(f32::MAX, f32::min),
-                    xs.iter().copied().fold(f32::MIN, f32::max),
-                );
-                let (y0, y1) = (
-                    ys.iter().copied().fold(f32::MAX, f32::min),
-                    ys.iter().copied().fold(f32::MIN, f32::max),
+                let (x0, x1, y0, y1) = pts.iter().fold(
+                    (f32::MAX, f32::MIN, f32::MAX, f32::MIN),
+                    |(x0, x1, y0, y1), p| (x0.min(p.0), x1.max(p.0), y0.min(p.1), y1.max(p.1)),
                 );
                 // só os alinhados aos eixos: cada ponto num canto
                 let corner = |p: &(f32, f32)| {
@@ -302,10 +310,8 @@ impl Collector {
     }
 
     fn point(&self, x: f32, y: f32) -> (f32, f32) {
-        match &self.m {
-            Some(m) => (m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f),
-            None => (x, y),
-        }
+        let m = &self.m;
+        (m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f)
     }
 }
 
@@ -320,8 +326,7 @@ impl mupdf::PathWalker for Collector {
         self.sub.push(p);
     }
     fn curve_to(&mut self, _: f32, _: f32, _: f32, _: f32, ex: f32, ey: f32) {
-        // curva: não é linha nem caixa de formulário
-        self.sub.push((f32::NAN, f32::NAN));
+        self.curved = true;
         let p = self.point(ex, ey);
         self.sub.push(p);
     }
@@ -338,17 +343,10 @@ impl ShapeDevice {
         if self.0.borrow().len() > MAX_SHAPES {
             return;
         }
-        let mut c = Collector {
-            m: Some(m),
-            ..Default::default()
-        };
+        let mut c = Collector::new(m);
         if path.walk(&mut c).is_ok() {
             c.flush();
-            let mut out = self.0.borrow_mut();
-            out.extend(c.out.into_iter().filter(|s| match s {
-                Shape::Line { a, b } => a.0.is_finite() && b.0.is_finite(),
-                Shape::Rect(r) => r.x0.is_finite() && r.y0.is_finite(),
-            }));
+            self.0.borrow_mut().extend(c.out);
         }
     }
 }
@@ -389,15 +387,8 @@ impl PdfDoc {
         let device = mupdf::Device::from_native(ShapeDevice(shapes.clone()))?;
         p.run(&device, &mupdf::Matrix::IDENTITY)?;
         drop(device);
-        let shapes = shapes.borrow().clone();
-        let words: Vec<Word> = p
-            .words(mupdf::TextExtractOptions::default())?
-            .into_iter()
-            .map(|w| Word {
-                text: w.text,
-                rect: w.bounds.into(),
-            })
-            .collect();
+        let shapes = std::mem::take(&mut *shapes.borrow_mut());
+        let words = crate::doc::page_words(&p)?;
         let existing: Vec<PdfRect> = self.fields(page)?.into_iter().map(|f| f.rect).collect();
         Ok(detect_candidates(&shapes, &words, &existing))
     }

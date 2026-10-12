@@ -115,6 +115,16 @@ pub enum FieldCalc {
     Custom,
 }
 
+impl FieldCalc {
+    /// Um cálculo que o app executa (os outros ficam como estão no arquivo).
+    pub fn is_computed(&self) -> bool {
+        matches!(
+            self,
+            Self::Simple { .. } | Self::Sfn(_) | Self::Barcode { .. }
+        )
+    }
+}
+
 /// Começo do script do código de barras que o app grava (Calcular).
 const BARCODE_MARK: &str = "/* Gera PDF Editor: código de barras */";
 

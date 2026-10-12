@@ -42,6 +42,35 @@ pub struct FieldPropsWindow {
     barcode: Option<BarcodeDraft>,
 }
 
+/// Lista de campos com uma caixa cada (os marcados ficam em `list`, na ordem em que foram
+/// marcados).
+pub(crate) fn field_checklist(
+    ui: &mut egui::Ui,
+    id: &str,
+    max_height: f32,
+    names: &[String],
+    list: &mut Vec<String>,
+) {
+    egui::ScrollArea::vertical()
+        .id_salt(id)
+        .max_height(max_height)
+        .show(ui, |ui| {
+            for n in names {
+                let mut on = list.contains(n);
+                if ui
+                    .checkbox(&mut on, crate::links::safe_display(n))
+                    .changed()
+                {
+                    if on {
+                        list.push(n.clone());
+                    } else {
+                        list.retain(|x| x != n);
+                    }
+                }
+            }
+        });
+}
+
 /// Rascunho do código de barras: os campos codificados, se leva os nomes, e as opções.
 pub(crate) struct BarcodeDraft {
     pub fields: Vec<String>,
@@ -66,23 +95,7 @@ impl BarcodeDraft {
     /// Aba Valor: os campos codificados e os nomes.
     fn value_ui(&mut self, ui: &mut egui::Ui, names: &[String]) {
         ui.label("Codificar os dados delimitados por tabulação destes campos:");
-        egui::ScrollArea::vertical()
-            .max_height(180.0)
-            .show(ui, |ui| {
-                for n in names {
-                    let mut on = self.fields.contains(n);
-                    if ui
-                        .checkbox(&mut on, crate::links::safe_display(n))
-                        .changed()
-                    {
-                        if on {
-                            self.fields.push(n.clone());
-                        } else {
-                            self.fields.retain(|x| x != n);
-                        }
-                    }
-                }
-            });
+        field_checklist(ui, "codigo-campos", 180.0, names, &mut self.fields);
         ui.checkbox(&mut self.names, "Incluir os nomes dos campos");
     }
 
@@ -847,21 +860,7 @@ impl CalcDraft {
             ui.label("dos campos a seguir:");
         });
         ui.add_enabled_ui(self.mode == CalcMode::Simple, |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt("calc-campos")
-                .max_height(110.0)
-                .show(ui, |ui| {
-                    for name in names {
-                        let mut on = self.fields.contains(name);
-                        if ui.checkbox(&mut on, name).changed() {
-                            if on {
-                                self.fields.push(name.clone());
-                            } else {
-                                self.fields.retain(|f| f != name);
-                            }
-                        }
-                    }
-                });
+            field_checklist(ui, "calc-campos", 110.0, names, &mut self.fields);
         });
         ui.radio_value(
             &mut self.mode,
