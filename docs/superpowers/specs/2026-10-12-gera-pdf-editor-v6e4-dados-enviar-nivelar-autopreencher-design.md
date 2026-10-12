@@ -117,3 +117,46 @@ Versão alvo 0.22.0. Fecha a linha de formulários.
   - exportar XFDF, limpar, importar;
   - nivelar;
   - sugestão ao digitar.
+
+## Decisões tomadas na execução
+
+1. **Enviar e a rede.** O endereço passa pelo mesmo analisador de URL do envio (crate `url`), e
+   o que sai é a forma canônica.
+   - É recusado:
+     - usuário e senha no endereço;
+     - localhost e nomes sem domínio;
+     - `.local`, `.internal`, `.lan` e `.home`;
+     - IPs de loopback, privados, link-local ou CGNAT, em qualquer grafia.
+   - O envio resolve o nome só para IP público (contra DNS rebinding) e não segue
+     redirecionamentos: um 3xx conta como falha.
+   - Custo: um formulário legítimo de intranet não envia. A alternativa é exportar os dados e
+     mandar o arquivo.
+2. **mailto.**
+   - Só passam os destinatários, `subject`, `cc` e `bcc`. `attach`, `body` e o resto saem,
+     porque alguns programas de e-mail anexam um arquivo local pelo endereço.
+   - A confirmação mostra todos os que recebem, com o bcc marcado como oculto.
+3. **Envio gravado como o Acrobat.** A ação grava `/F << /FS /URL /F (endereço) >>`. Na leitura,
+   valem as duas formas.
+4. **Importar.**
+   - Recusado sem a permissão de preencher formulários.
+   - Campos somente leitura contam como "nome desconhecido" e não mudam. O Acrobat importa neles;
+     aqui segue a regra do preenchimento.
+   - Um `/V` em lista (seleção múltipla) no FDF fica de fora.
+5. **Tetos de leitura**, além dos 2 MB, 10 000 campos e profundidade 32 do plano: nome completo de
+   até 4 KB e total lido (nomes mais valores) de até 8 MB. Um arquivo pequeno com nome pai enorme
+   ou valor compartilhado não multiplica a memória.
+6. **Planilha.**
+   - Células com `;` ou tabulação vão entre aspas, porque o Excel em pt-BR separa por `;`.
+   - O destino precisa ser `.csv` e nunca pode ser um dos arquivos mesclados. O núcleo recusa.
+7. **Nivelar** exige documento modificável (sem assinatura e com permissão de alteração). O
+   comando fica no menu Organizar do Preparar, onde estão as outras ações do formulário.
+8. **Preenchimento automático.**
+   - A lista guarda o campo de cada entrada.
+   - No Avançado, as entradas do mesmo campo vêm primeiro e aparecem já com o campo vazio.
+   - Só em campos de uma linha. O clique na sugestão vale no aperto do botão, porque o clique tira
+     o foco do campo antes de soltar.
+   - Cada aba tem uma cópia da lista. Uma entrada aprendida vai às preferências e às outras abas.
+   - O OK das Preferências mantém o que foi aprendido com a janela aberta, se a lista não foi
+     editada nela.
+9. **Exportar dados** usa a extensão para escolher o formato. Sem extensão vira `.fdf`, como o
+   Acrobat; outra extensão (um `.pdf`, por engano) é recusada.
