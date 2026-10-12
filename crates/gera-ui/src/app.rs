@@ -1157,9 +1157,17 @@ impl GeraApp {
             return;
         };
         let forget = draft.forget_recents;
-        let Some(new) = draft.finish(ok) else {
+        // a lista não editada na janela fica como está agora (o que foi aprendido enquanto a
+        // janela estava aberta não se perde)
+        let list_kept = draft.prefs.autofill.entries == draft.entries_at_open;
+        let Some(mut new) = draft.finish(ok) else {
             return; // Cancelar
         };
+        if list_kept {
+            new.autofill
+                .entries
+                .clone_from(&self.prefs.autofill.entries);
+        }
         if new == self.prefs && !forget {
             return;
         }

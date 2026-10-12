@@ -278,6 +278,12 @@ fn submit_action_round_trips() {
     d.save(&path).unwrap();
     let d = PdfDoc::open(&path, None).unwrap();
     assert_eq!(d.field_props(0, id).unwrap().actions, p.actions);
+    // gravado como o Acrobat: /F << /FS /URL /F (endereço) >>
+    let raw = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+    assert!(
+        raw.contains("/FS /URL") || raw.contains("/FS/URL"),
+        "sem /FS /URL"
+    );
 }
 
 #[test]

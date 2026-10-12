@@ -251,6 +251,8 @@ pub struct DocTab {
     /// Enviar formulário: aguardando a confirmação (endereço e formato) e o envio http em curso.
     submit_confirm: Option<(pdf_core::SubmitTarget, pdf_core::SubmitFormat)>,
     sending: Option<crate::submit::Sending>,
+    /// Envio confirmado, à espera dos dados do worker (um segundo Enviar não sai em dobro).
+    submit_waiting: bool,
     /// Campos copiados no Preparar: os nomes a pôr na área de transferência do sistema.
     prepare_copied: Option<String>,
     /// Linha Editar PDF aberta (as imagens viram objetos editáveis).
@@ -446,6 +448,7 @@ impl DocTab {
             arrange_dialog: None,
             submit_confirm: None,
             sending: None,
+            submit_waiting: false,
             prepare_copied: None,
             edit_pdf_tools: false,
             edit_pdf: Default::default(),
@@ -1601,21 +1604,26 @@ impl DocTab {
                     self.status = format!("Não foi possível ler as propriedades: {msg}");
                 }
                 Response::Exported { dest } => self.send_to_printer(ctx, dest),
+                // sem envio confirmado à espera (ex.: o documento foi reaberto): nada sai
+                Response::SubmitReady { .. } if !self.submit_waiting => {}
                 Response::SubmitReady {
                     target,
                     body,
                     content_type,
-                } => match target {
-                    pdf_core::SubmitTarget::Http(url) => {
-                        self.status = "Enviando o formulário…".into();
-                        self.sending =
-                            Some(crate::submit::post(url, body, content_type.to_string()));
+                } => {
+                    self.submit_waiting = false;
+                    match target {
+                        pdf_core::SubmitTarget::Http(url) => {
+                            self.status = "Enviando o formulário…".into();
+                            self.sending =
+                                Some(crate::submit::post(url, body, content_type.to_string()));
+                        }
+                        pdf_core::SubmitTarget::Mail(url) => {
+                            ctx.open_url(egui::OpenUrl::new_tab(url));
+                            self.status = "Os dados foram para o programa de e-mail.".into();
+                        }
                     }
-                    pdf_core::SubmitTarget::Mail(url) => {
-                        ctx.open_url(egui::OpenUrl::new_tab(url));
-                        self.status = "Os dados foram para o programa de e-mail.".into();
-                    }
-                },
+                }
                 Response::FormDataExported { path, count } => {
                     self.status = format!(
                         "{count} campos exportados em {}",
@@ -1641,6 +1649,7 @@ impl DocTab {
                     self.status = format!("Dados do formulário: {msg}");
                 }
                 Response::SubmitFailed(msg) => {
+                    self.submit_waiting = false;
                     self.status = format!("Não foi possível enviar o formulário: {msg}");
                 }
                 Response::ExportFailed(msg) => {
@@ -3958,9 +3967,10 @@ impl DocTab {
         match choice {
             Some(true) => {
                 let (target, format) = self.submit_confirm.take().unwrap();
-                if self.sending.is_some() {
+                if self.sending.is_some() || self.submit_waiting {
                     self.status = "Já há um envio em andamento.".into();
                 } else {
+                    self.submit_waiting = true;
                     self.worker.send(Request::Submit { target, format });
                 }
             }

@@ -48,6 +48,8 @@ pub struct PrefsDraft {
     pub forget_recents: bool,
     /// Nome como está sendo digitado (aparado só no OK).
     pub author_text: String,
+    /// Lista do preenchimento automático ao abrir (para saber se foi editada).
+    pub entries_at_open: Vec<app_state::autofill::Entry>,
 }
 
 impl PrefsDraft {
@@ -57,6 +59,7 @@ impl PrefsDraft {
             category: Category::default(),
             forget_recents: false,
             author_text: prefs.author.clone().unwrap_or_default(),
+            entries_at_open: prefs.autofill.entries.clone(),
         }
     }
 

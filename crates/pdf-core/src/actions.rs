@@ -421,7 +421,11 @@ fn action_obj(doc: &PdfDocument, a: &ActionKind) -> Result<Option<PdfObject>> {
         }
         ActionKind::Submit { url, format } => {
             s(&mut d, "SubmitForm")?;
-            d.dict_put("F", PdfObject::new_string(url)?)?;
+            // especificação de arquivo /FS /URL, como o Acrobat grava (12.7.5.2)
+            let mut spec = doc.new_dict()?;
+            spec.dict_put("FS", PdfObject::new_name("URL")?)?;
+            spec.dict_put("F", PdfObject::new_string(url)?)?;
+            d.dict_put("F", spec)?;
             d.dict_put("Flags", PdfObject::new_int(format.flags())?)?;
         }
         ActionKind::ImportIcon => {

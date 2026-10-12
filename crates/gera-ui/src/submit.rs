@@ -34,11 +34,17 @@ pub fn post(url: String, body: Vec<u8>, content_type: String) -> Sending {
             .set("Content-Type", &content_type)
             .send_bytes(&body)
         {
+            // redirecionamento não é seguido (o destino podia ser interno): conta como falha
+            Ok(resp) if (300..400).contains(&resp.status()) => Err(format!(
+                "o servidor redirecionou ({}) e o envio não segue redirecionamentos",
+                resp.status()
+            )),
             Ok(resp) => {
                 // a resposta não é mostrada: só lida (com teto) para fechar a conexão direito
+                let status = resp.status();
                 let mut sink = Vec::new();
                 let _ = resp.into_reader().take(MAX_RESPONSE).read_to_end(&mut sink);
-                Ok(200)
+                Ok(status)
             }
             Err(ureq::Error::Status(code, _)) => Err(format!("o servidor respondeu {code}")),
             Err(e) => Err(e.to_string()),
