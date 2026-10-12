@@ -6,7 +6,35 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 ## [Não lançado]
 
-- v6e2 — formulários: detecção de campos, Imagem e Código de barras, ações, alinhar e duplicar.
+- v6e3 — formulários: detecção automática de campos e campo Código de barras.
+
+## [0.20.0] — 2026-10-12 · Organizar campos, ações e campo Imagem (v6e2)
+
+### Adicionado
+- **Organizar campos no Preparar formulário**, como no Acrobat:
+  - seleção múltipla com `Shift`/`Ctrl`+clique, retângulo de seleção e `Ctrl+A`; o último campo
+    clicado é a âncora;
+  - mover vários campos juntos, com guias de alinhamento (`G` liga e desliga) e as setas
+    (`Shift` para 10 pontos);
+  - alinhar à esquerda, à direita, no topo, na base, vertical e horizontalmente (`L R T B V H`),
+    centralizar na página (`Shift+H`, `Shift+V`), distribuir e igualar o tamanho;
+  - copiar e colar (`Ctrl+C`, `Ctrl+V`), **Duplicar** em outras páginas (o mesmo campo, com o
+    mesmo valor) e **Criar várias cópias** com prévia;
+  - **Visualizar** (`P`): preencher sem sair do Preparar;
+  - tudo no menu de contexto e no menu **Organizar** (as teclas de uma letra seguem a preferência
+    "aceleradores de tecla única", como no Acrobat).
+- **Ações** (aba nas propriedades de qualquer campo e em **Propriedades da página**):
+  - gatilhos Mouse para cima/baixo, Mouse entra/sai, Em foco/Fora de foco, Abrir/Fechar página;
+  - Ir para uma página, Abrir um link da web, Mostrar/ocultar um campo, Redefinir um formulário,
+    Executar um item de menu, Abrir um arquivo e Executar um JavaScript (gravado, não executado);
+  - executadas ao preencher; links e arquivos seguem as regras e avisos dos links.
+- **Campo Imagem**: clique ao preencher para escolher a figura; aba **Opções** dos botões com
+  layout, comportamento, rótulo e ícone.
+
+### Segurança
+- Ações que o documento dispara sozinho (abrir página, passar o mouse, foco) só mostram/ocultam
+  campos ou navegam uma vez; links, arquivos, imprimir e Redefinir pedem um clique.
+- Um campo de assinatura oculto não recebe assinatura; um assinado não é copiado.
 
 ## [0.19.0] — 2026-10-11 · Formatar, Validar e Calcular; Botão e Data; ordem de tabulação (v6e)
 

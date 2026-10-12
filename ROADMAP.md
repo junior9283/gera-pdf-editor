@@ -36,9 +36,9 @@ A meta da versão **1.0.0**: todas as ferramentas do Adobe Acrobat Pro, com qual
 - [x] v6d — ferramentas de comentário (0.17.0)
 - [x] v6d2 — carimbos personalizados, FDF/XFDF, Resumir comentários, agrupar (0.18.0)
 - [x] v6e — Formatar, Validar e Calcular; Botão e Data; ordem de tabulação (0.19.0)
-- [ ] v6e2 — próxima: detecção de campos, Imagem e Código de barras, ações de campo, alinhar,
-  seleção múltipla e duplicar
-- [ ] v6e3 — importar e exportar dados do formulário, nivelar, preenchimento automático
+- [x] v6e2 — organizar campos, ações de campo e de página, campo Imagem (0.20.0)
+- [ ] v6e3 — próxima: detecção automática de campos e campo Código de barras
+- [ ] v6e4 — importar e exportar dados do formulário, Enviar, nivelar, preenchimento automático
 
 ## Planejado
 
