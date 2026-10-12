@@ -589,7 +589,14 @@ impl PdfDoc {
             }
             (Some(_), _) => return Err(invalid("já existe um campo com esse nome")),
         };
-        self.with_snapshot(|d| d.create_field(page, rect, kind, name, group))
+        self.with_snapshot(|d| {
+            let id = d.create_field(page, rect, kind, name, group)?;
+            // o código de barras novo já mostra o valor dos campos
+            if kind == NewFieldKind::Barcode {
+                d.recalculate(&mut Vec::new())?;
+            }
+            Ok(id)
+        })
     }
 
     fn create_field(

@@ -76,6 +76,11 @@ fn barcode_field_is_written_like_acrobat() {
     let p = d.field_props(0, bc).unwrap();
     assert_eq!(p.barcode, Some(BarcodeOptions::default()));
     assert_eq!(
+        by(&d, "Código de barras1").value,
+        "Nome\tCidade\n\t",
+        "o código novo já tem valor"
+    );
+    assert_eq!(
         p.calc,
         FieldCalc::Barcode {
             fields: vec!["Nome".into(), "Cidade".into()],

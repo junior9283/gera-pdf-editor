@@ -152,9 +152,12 @@ pub fn prepare_row(ui: &mut egui::Ui, doc: &mut DocTab) -> Option<Command> {
             if ui
                 .add(egui::Button::selectable(
                     active,
-                    app_state::prepare::label(kind),
+                    app_state::prepare::short_label(kind),
                 ))
-                .on_hover_text("Clique na página para colocar, ou arraste para escolher o tamanho")
+                .on_hover_text(format!(
+                    "{}: clique na página para colocar, ou arraste para escolher o tamanho",
+                    app_state::prepare::label(kind)
+                ))
                 .clicked()
             {
                 doc.prepare.set_tool((!active).then_some(kind));

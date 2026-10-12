@@ -38,6 +38,88 @@ pub struct FieldPropsWindow {
     pages: usize,
     /// "Escolher…" do ícone foi clicado: a aba abre o seletor de imagem.
     pub wants_icon: bool,
+    /// Código de barras: abas Valor e Opções (`None` nos outros campos).
+    barcode: Option<BarcodeDraft>,
+}
+
+/// Rascunho do código de barras: os campos codificados, se leva os nomes, e as opções.
+pub(crate) struct BarcodeDraft {
+    pub fields: Vec<String>,
+    pub names: bool,
+    pub options: pdf_core::BarcodeOptions,
+}
+
+impl BarcodeDraft {
+    fn from(props: &FieldProps) -> Option<Self> {
+        let options = props.barcode?;
+        let (fields, names) = match &props.calc {
+            FieldCalc::Barcode { fields, names } => (fields.clone(), *names),
+            _ => (Vec::new(), true),
+        };
+        Some(Self {
+            fields,
+            names,
+            options,
+        })
+    }
+
+    /// Aba Valor: os campos codificados e os nomes.
+    fn value_ui(&mut self, ui: &mut egui::Ui, names: &[String]) {
+        ui.label("Codificar os dados delimitados por tabulação destes campos:");
+        egui::ScrollArea::vertical()
+            .max_height(180.0)
+            .show(ui, |ui| {
+                for n in names {
+                    let mut on = self.fields.contains(n);
+                    if ui
+                        .checkbox(&mut on, crate::links::safe_display(n))
+                        .changed()
+                    {
+                        if on {
+                            self.fields.push(n.clone());
+                        } else {
+                            self.fields.retain(|x| x != n);
+                        }
+                    }
+                }
+            });
+        ui.checkbox(&mut self.names, "Incluir os nomes dos campos");
+    }
+
+    /// Aba Opções: simbologia e correção de erros.
+    fn options_ui(&mut self, ui: &mut egui::Ui) {
+        let o = &mut self.options;
+        egui::Grid::new("opcoes-codigo")
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label("Simbologia");
+                egui::ComboBox::from_id_salt("simbologia")
+                    .selected_text(o.symbology.label())
+                    .show_ui(ui, |ui| {
+                        for s in pdf_core::Symbology::ALL {
+                            if ui
+                                .selectable_value(&mut o.symbology, s, s.label())
+                                .changed()
+                            {
+                                o.ecc = o.ecc.min(s.ecc_levels().len().saturating_sub(1) as u8);
+                            }
+                        }
+                    });
+                ui.end_row();
+                let levels = o.symbology.ecc_levels();
+                if !levels.is_empty() {
+                    ui.label("Correção de erros");
+                    egui::ComboBox::from_id_salt("correcao")
+                        .selected_text(levels[usize::from(o.ecc).min(levels.len() - 1)])
+                        .show_ui(ui, |ui| {
+                            for (k, label) in levels.iter().enumerate() {
+                                ui.selectable_value(&mut o.ecc, k as u8, *label);
+                            }
+                        });
+                    ui.end_row();
+                }
+            });
+    }
 }
 
 impl FieldPropsWindow {
@@ -73,6 +155,7 @@ impl FieldPropsWindow {
             all_names: names.clone(),
             pages,
             wants_icon: false,
+            barcode: BarcodeDraft::from(&props),
             names: names.into_iter().filter(|n| *n != props.name).collect(),
             max_len: props.max_len.map_or_else(String::new, |n| n.to_string()),
             props,
@@ -97,11 +180,14 @@ impl FieldPropsWindow {
 
     fn contents(&mut self, ui: &mut egui::Ui) -> Option<Option<FieldProps>> {
         let mut tabs = vec![(Tab::General, "Geral")];
-        if self.kind == Kind::Push {
+        if self.kind == Kind::Push || self.barcode.is_some() {
             tabs.push((Tab::Options, "Opções"));
         }
+        if self.barcode.is_some() {
+            tabs.push((Tab::Value, "Valor"));
+        }
         tabs.push((Tab::Actions, "Ações"));
-        if self.kind == Kind::Text {
+        if self.kind == Kind::Text && self.barcode.is_none() {
             tabs.extend([
                 (Tab::Format, "Formatar"),
                 (Tab::Validate, "Validar"),
@@ -116,7 +202,15 @@ impl FieldPropsWindow {
         ui.separator();
         match self.tab {
             Tab::Actions => self.actions.ui(ui, &self.all_names, self.pages),
-            Tab::Options => self.button_options(ui),
+            Tab::Options => match self.barcode.as_mut() {
+                Some(b) => b.options_ui(ui),
+                None => self.button_options(ui),
+            },
+            Tab::Value => {
+                if let Some(b) = self.barcode.as_mut() {
+                    b.value_ui(ui, &self.names);
+                }
+            }
             Tab::Format => self.format.ui(ui),
             Tab::Validate => self.validate.ui(ui),
             Tab::Calculate => self.calc.ui(ui, &self.names),
@@ -145,6 +239,13 @@ impl FieldPropsWindow {
             props.calc = self.calc.calc();
         }
         props.actions = self.actions.list.clone();
+        if let Some(b) = &self.barcode {
+            props.calc = FieldCalc::Barcode {
+                fields: b.fields.clone(),
+                names: b.names,
+            };
+            props.barcode = Some(b.options);
+        }
         props
     }
 
@@ -583,6 +684,7 @@ impl CalcDraft {
 enum Tab {
     General,
     Options,
+    Value,
     Actions,
     Format,
     Validate,
@@ -803,6 +905,46 @@ mod tests {
 mod draft_tests {
     use super::*;
     use pdf_core::{CalcOp, FieldCalc, FieldFormat, FieldValidate};
+
+    #[test]
+    fn barcode_tabs_build_the_props() {
+        let props = FieldProps {
+            name: "Código".into(),
+            calc: FieldCalc::Barcode {
+                fields: vec!["Nome".into()],
+                names: true,
+            },
+            barcode: Some(pdf_core::BarcodeOptions::default()),
+            ..Default::default()
+        };
+        let text = pdf_core::FieldKind::Text {
+            multiline: true,
+            password: false,
+            max_len: None,
+        };
+        let names = vec!["Nome".into(), "Cidade".into(), "Código".into()];
+        let mut w = FieldPropsWindow::new(0, 1, &text, props, names, 1);
+        let b = w.barcode.as_mut().expect("abas do código de barras");
+        b.fields.push("Cidade".into());
+        b.names = false;
+        b.options.symbology = pdf_core::Symbology::Pdf417;
+        b.options.ecc = 5;
+        let out = w.built();
+        assert_eq!(
+            out.calc,
+            FieldCalc::Barcode {
+                fields: vec!["Nome".into(), "Cidade".into()],
+                names: false
+            }
+        );
+        assert_eq!(
+            out.barcode,
+            Some(pdf_core::BarcodeOptions {
+                symbology: pdf_core::Symbology::Pdf417,
+                ecc: 5
+            })
+        );
+    }
 
     #[test]
     fn options_tab_builds_the_props() {
