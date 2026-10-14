@@ -24,7 +24,7 @@ fn scanned(dir: &tempfile::TempDir, rotate: i32) -> std::path::PathBuf {
     let out = dir.path().join(format!("digitalizado{rotate}.pdf"));
     create_pdf_from_images(&[png], &out).unwrap();
     if rotate != 0 {
-        let doc = mupdf::pdf::PdfDocument::open(out.to_str().unwrap()).unwrap();
+        let doc = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(&out).unwrap()).unwrap();
         let mut page = doc.find_page(0).unwrap();
         page.dict_put("Rotate", mupdf::pdf::PdfObject::new_int(rotate).unwrap())
             .unwrap();

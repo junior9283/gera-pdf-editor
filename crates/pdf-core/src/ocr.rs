@@ -68,9 +68,25 @@ const MAX_PIXELS: f32 = 16_000_000.0;
 
 /// Pasta com os dados de idioma do Tesseract que têm todos os idiomas de `lang`.
 pub fn tessdata_dir(lang: OcrLanguage) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok();
+    tessdata_candidates(exe.as_deref().and_then(std::path::Path::parent))
+        .into_iter()
+        .find(|dir| {
+            lang.code()
+                .split('+')
+                .all(|l| dir.join(format!("{l}.traineddata")).is_file())
+        })
+}
+
+/// Onde procurar, na ordem: `TESSDATA_PREFIX`, a pasta `tessdata` ao lado do executável (versão
+/// Windows), o AppImage e as pastas do sistema.
+fn tessdata_candidates(exe_dir: Option<&std::path::Path>) -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(p) = std::env::var_os("TESSDATA_PREFIX") {
         candidates.push(PathBuf::from(p));
+    }
+    if let Some(dir) = exe_dir {
+        candidates.push(dir.join("tessdata"));
     }
     // AppImage: os dados vão junto do programa
     if let Some(app) = std::env::var_os("APPDIR") {
@@ -85,11 +101,7 @@ pub fn tessdata_dir(lang: OcrLanguage) -> Option<PathBuf> {
     ] {
         candidates.push(PathBuf::from(p));
     }
-    candidates.into_iter().find(|dir| {
-        lang.code()
-            .split('+')
-            .all(|l| dir.join(format!("{l}.traineddata")).is_file())
-    })
+    candidates
 }
 
 /// Palavra reconhecida no espaço da página (como a tela a mostra): linha de base à esquerda,
@@ -370,5 +382,22 @@ impl PdfDoc {
         contents.array_push(stream(&mut self.inner, &ops)?)?;
         page_obj.dict_put("Contents", contents)?;
         Ok(Some(words.len()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tessdata_next_to_exe_first() {
+        let exe = std::path::Path::new("/opt/gera");
+        let c = tessdata_candidates(Some(exe));
+        let k = c.iter().position(|d| d == &exe.join("tessdata")).unwrap();
+        let system = c.iter().position(|d| d.starts_with("/usr")).unwrap();
+        assert!(
+            k < system,
+            "ao lado do executável vem antes das pastas do sistema"
+        );
     }
 }

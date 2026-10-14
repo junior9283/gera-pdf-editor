@@ -308,16 +308,16 @@ fn a_font_planted_in_the_file_is_not_reused() {
     );
 }
 
+/// PDF de exemplo de `tests/fixtures`, embutido no teste (roda também no Windows).
 fn fixture(name: &str) -> (tempfile::TempDir, PdfDoc) {
+    let bytes: &[u8] = match name {
+        "fonte-oca.pdf" => include_bytes!("fixtures/fonte-oca.pdf"),
+        "fonte-type3.pdf" => include_bytes!("fixtures/fonte-type3.pdf"),
+        _ => panic!("fixture desconhecida: {name}"),
+    };
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(name);
-    std::fs::copy(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures")
-            .join(name),
-        &path,
-    )
-    .unwrap();
+    std::fs::write(&path, bytes).unwrap();
     let d = PdfDoc::open(&path, None).unwrap();
     (dir, d)
 }

@@ -25,7 +25,7 @@ pub fn encrypted_sample(dir: &TempDir) -> PathBuf {
 /// Liga a flag Hidden em todas as anotações do arquivo (anotação "escondida de fábrica").
 #[allow(dead_code)]
 pub fn hide_all_annotations(path: &std::path::Path) {
-    let doc = PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let doc = PdfDocument::from_bytes(&std::fs::read(path).unwrap()).unwrap();
     for p in 0..doc.page_count().unwrap() {
         let mut page = doc.load_pdf_page(p).unwrap();
         let all: Vec<_> = page.annotations().collect();
@@ -42,7 +42,7 @@ pub fn hide_all_annotations(path: &std::path::Path) {
 /// Quantas anotações o arquivo tem, contando as escondidas.
 #[allow(dead_code)]
 pub fn count_raw_annotations(path: &std::path::Path) -> usize {
-    let doc = PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let doc = PdfDocument::from_bytes(&std::fs::read(path).unwrap()).unwrap();
     (0..doc.page_count().unwrap())
         .map(|p| doc.load_pdf_page(p).unwrap().annotations().count())
         .sum()
@@ -51,7 +51,7 @@ pub fn count_raw_annotations(path: &std::path::Path) -> usize {
 /// Troca a cor (/C) de todas as anotações: `None` remove a chave (anotação "sem cor").
 #[allow(dead_code)]
 pub fn set_raw_colors(path: &std::path::Path, color: Option<mupdf::color::AnnotationColor>) {
-    let doc = PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let doc = PdfDocument::from_bytes(&std::fs::read(path).unwrap()).unwrap();
     for p in 0..doc.page_count().unwrap() {
         let mut page = doc.load_pdf_page(p).unwrap();
         let all: Vec<_> = page.annotations().collect();
@@ -70,7 +70,7 @@ pub fn set_raw_colors(path: &std::path::Path, color: Option<mupdf::color::Annota
 /// A cor (/C) crua da primeira anotação da página 0.
 #[allow(dead_code)]
 pub fn raw_color(path: &std::path::Path) -> Option<mupdf::color::AnnotationColor> {
-    let doc = PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let doc = PdfDocument::from_bytes(&std::fs::read(path).unwrap()).unwrap();
     let page = doc.load_pdf_page(0).unwrap();
     let a = page.annotations().next().unwrap();
     a.color().unwrap()

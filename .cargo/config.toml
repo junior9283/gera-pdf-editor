@@ -1,0 +1,5 @@
+# Windows (compilação cruzada com MinGW-w64): runtime C/C++ ligado estaticamente, o .exe não
+# pede libstdc++-6.dll, libgcc nem libwinpthread
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=-static"]

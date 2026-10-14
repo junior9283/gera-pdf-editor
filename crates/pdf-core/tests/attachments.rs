@@ -145,6 +145,7 @@ fn attaching_more_than_100_mb_as_a_comment_is_refused() {
     assert!(d.annotations(0).unwrap().is_empty());
 }
 
+#[cfg(unix)]
 #[test]
 fn a_fifo_is_refused_without_blocking() {
     let dir = tempfile::tempdir().unwrap();

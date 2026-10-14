@@ -8,7 +8,8 @@ pub const FIXED: usize = 2;
 
 /// Identidade de um documento: o caminho canônico, ou o próprio caminho se não der para resolver.
 pub fn canonical(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    // no Windows, sem o prefixo \\?\ quando é seguro (para mostrar e gravar como o usuário escreve)
+    dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Nome do arquivo para a aba, com no máximo `max` caracteres (o excesso vira "…").
@@ -187,6 +188,7 @@ mod tests {
         assert_eq!(t.find(&p("a")), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn canonical_unifies_relative_and_symlinked_paths() {
         let dir = tempfile::tempdir().unwrap();

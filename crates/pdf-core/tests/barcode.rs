@@ -43,7 +43,7 @@ fn by(d: &PdfDoc, name: &str) -> pdf_core::FieldInfo {
 fn barcode_field_is_written_like_acrobat() {
     let (_d, path, mut d, bc) = form();
     d.save(&path).unwrap();
-    let raw = mupdf::pdf::PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let raw = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
     let page = raw.load_pdf_page(0).unwrap();
     let w = page
         .widgets()
@@ -311,7 +311,7 @@ fn moving_updates_the_paper_metadata_size() {
     d.move_field(0, bc, PdfRect::new(300.0, 100.0, 516.0, 316.0))
         .unwrap();
     d.save(&path).unwrap();
-    let raw = mupdf::pdf::PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let raw = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
     let page = raw.load_pdf_page(0).unwrap();
     let w = page
         .widgets()

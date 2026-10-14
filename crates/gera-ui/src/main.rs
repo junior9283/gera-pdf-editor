@@ -1,3 +1,5 @@
+// sem janela de console no Windows
+#![cfg_attr(windows, windows_subsystem = "windows")]
 mod app;
 mod attachments_panel;
 mod bench;
@@ -8,6 +10,8 @@ mod clipboard;
 mod comment_tools;
 mod comments_panel;
 mod create;
+#[cfg(unix)]
+mod cups;
 mod desktop;
 mod destinations_panel;
 mod doc_tab;
@@ -22,8 +26,12 @@ mod open_dialog;
 mod organize;
 mod page_labels_dialog;
 mod pagination_tool;
+#[cfg(target_os = "linux")]
+mod portal_print;
 mod prepare;
 mod print_job;
+#[cfg(windows)]
+mod print_win;
 mod redact_tool;
 mod search;
 mod shell;
@@ -31,6 +39,7 @@ mod sidebar;
 mod stamp_dialogs;
 mod submit;
 mod summary_dialog;
+mod system_print;
 mod thumbnails;
 mod view;
 
@@ -49,14 +58,25 @@ fn main() -> eframe::Result {
         }
     }
     desktop::integrate_appimage();
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1100.0, 800.0])
+    let mut viewport = egui::ViewportBuilder::default();
+    // no Windows abre maximizada, como o Acrobat; um tamanho inicial junto faz a janela
+    // maximizada ficar com só esse tamanho
+    if cfg!(not(windows)) {
+        viewport = viewport.with_inner_size([1100.0, 800.0]);
+    }
+    viewport = viewport
         .with_title("Gera PDF Editor")
-        .with_app_id(desktop::APP_ID);
+        .with_app_id(desktop::APP_ID)
+        .with_maximized(cfg!(windows));
     if let Some(icon) = icon::app_icon() {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
     }
     let options = eframe::NativeOptions {
+        // no Windows, o wgpu (DirectX 12, ou o WARP por software sem placa de vídeo): o OpenGL do
+        // Windows sem driver não abre a janela
+        #[cfg(windows)]
+        renderer: eframe::Renderer::Wgpu,
+        #[cfg(not(windows))]
         renderer: eframe::Renderer::Glow,
         viewport,
         ..Default::default()

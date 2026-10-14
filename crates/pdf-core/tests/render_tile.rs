@@ -123,3 +123,33 @@ fn content_box_of_a_giant_page_does_not_allocate_the_page() {
     );
     assert!(r.is_some(), "o X aparece mesmo na escala reduzida");
 }
+
+#[test]
+fn a_band_matches_the_same_rows_of_the_full_page() {
+    let (_dir, d) = doc(1, 0);
+    let full = d.render(0, 1.5, false).unwrap();
+    let r = d.band_renderer(0, 1.5, false).unwrap();
+    assert_eq!(r.size(), (full.width, full.height));
+    let (h, bgra) = r.band_bgra(100, 64).unwrap();
+    assert_eq!((h, bgra.len()), (64, full.width as usize * 64 * 4));
+    let row = full.width as usize * 3;
+    let same = &full.rgb[100 * row..164 * row];
+    // BGRA contra RGB; a suavização nas bordas do recorte pode mudar alguns pixels
+    let differ = bgra
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(same.as_chunks::<3>().0)
+        .filter(|(b, r)| {
+            b[2].abs_diff(r[0]) > 40 || b[1].abs_diff(r[1]) > 40 || b[0].abs_diff(r[2]) > 40
+        })
+        .count();
+    assert!(differ * 100 < same.len() / 3, "{differ}");
+    // a última faixa sai cortada na altura da página; fora dela, erro
+    assert_eq!(r.band_bgra(full.height - 10, 64).unwrap().0, 10);
+    assert!(r.band_bgra(full.height, 64).is_err());
+    assert!(r.band_bgra(0, 0).is_err());
+    // girada: largura e altura trocam
+    let turned = d.band_renderer(0, 1.5, true).unwrap();
+    assert_eq!(turned.size(), (full.height, full.width));
+}

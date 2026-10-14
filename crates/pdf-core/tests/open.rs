@@ -30,3 +30,16 @@ fn out_of_range_page_is_an_error() {
         Err(PdfError::PageOutOfRange(-1))
     ));
 }
+
+#[cfg(unix)]
+#[test]
+fn a_file_name_that_is_not_utf8_still_opens() {
+    // nome em Latin-1 (zip antigo, Samba): no Linux o caminho são só bytes
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tempfile::tempdir().unwrap();
+    let name = std::ffi::OsStr::from_bytes(b"relat\xf3rio.pdf");
+    let path = dir.path().join(name);
+    std::fs::write(&path, pdf_core::sample::sample_pdf(1, 0)).unwrap();
+    let d = pdf_core::PdfDoc::open(&path, None).unwrap();
+    assert_eq!(d.page_count().unwrap(), 1);
+}

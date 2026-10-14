@@ -1,64 +1,27 @@
-//! Impressão pelo CUPS: impressoras disponíveis, pasta temporária privada e o `lp` numa thread.
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+//! Impressão: a pasta temporária privada e os envios numa thread (portal do Linux,
+//! `portal_print.rs`; CUPS no diálogo do app, `cups.rs`; GDI no Windows, `print_win.rs`).
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
-/// Programa do CUPS, trocável por variável de ambiente (os testes E2E usam um `lp` falso).
-fn program(var: &str, default: &str) -> String {
-    std::env::var(var)
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| default.into())
-}
-
-fn parse_default(out: &str) -> Option<String> {
-    out.lines()
-        .find_map(|l| l.strip_prefix("system default destination:"))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-fn parse_list(out: &str) -> Vec<String> {
-    out.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(String::from)
-        .collect()
-}
-
-/// Impressoras do CUPS e a padrão (lista vazia se o CUPS não estiver disponível).
-pub fn printers() -> (Vec<String>, Option<String>) {
-    let lpstat = program("GERA_LPSTAT", "lpstat");
-    let run = |arg: &str| {
-        Command::new(&lpstat)
-            .arg(arg)
-            .env("LC_ALL", "C") // a saída é lida em inglês
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default()
-    };
-    (parse_list(&run("-e")), parse_default(&run("-d")))
-}
-
-/// Lê as impressoras numa thread (o `lpstat` pode demorar com o CUPS lento ou parado).
+/// Lê as impressoras do CUPS numa thread (diálogo do app; o CUPS pode demorar).
+#[cfg(unix)]
 pub fn printers_in_background(ctx: &egui::Context) -> Receiver<(Vec<String>, Option<String>)> {
     let (tx, rx) = mpsc::channel();
     let ctx = ctx.clone();
     let _ = std::thread::Builder::new()
         .name("impressoras".into())
         .spawn(move || {
-            let _ = tx.send(printers());
+            let _ = tx.send(crate::cups::printers());
             ctx.request_repaint();
         });
     rx
 }
 
 /// Pasta `base/name` só do usuário (0700), recusando link simbólico ou pasta de outro dono.
+#[cfg(unix)]
 fn private_dir(base: &Path, name: &str) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     let dir = base.join(name);
     let me = std::fs::metadata("/proc/self")?.uid();
     match std::fs::symlink_metadata(&dir) {
@@ -78,9 +41,30 @@ fn private_dir(base: &Path, name: &str) -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
+/// Pasta `base/name` do usuário (a pasta temporária do Windows já é só dele), recusando link
+/// simbólico ou junção.
+#[cfg(windows)]
+fn private_dir(base: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let dir = base.join(name);
+    match std::fs::symlink_metadata(&dir) {
+        Ok(m) if m.file_type().is_symlink() || !m.is_dir() => Err(std::io::Error::other(format!(
+            "{} não é uma pasta segura para a impressão",
+            dir.display()
+        ))),
+        Ok(_) => Ok(dir),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(&dir)?;
+            Ok(dir)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Pasta das cópias de impressão (saem sem senha): `$XDG_RUNTIME_DIR/gera-pdf-editor`, ou uma
 /// pasta com o uid no nome dentro do temporário do sistema, que é compartilhado entre usuários.
+#[cfg(unix)]
 pub(crate) fn spool_dir() -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
     match std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
         Some(runtime) => private_dir(Path::new(&runtime), "gera-pdf-editor"),
         None => {
@@ -88,6 +72,12 @@ pub(crate) fn spool_dir() -> std::io::Result<PathBuf> {
             private_dir(&std::env::temp_dir(), &format!("gera-pdf-editor-{uid}"))
         }
     }
+}
+
+/// Pasta das cópias de impressão no Windows: dentro do temporário do usuário (`%TEMP%`).
+#[cfg(windows)]
+pub(crate) fn spool_dir() -> std::io::Result<PathBuf> {
+    private_dir(&std::env::temp_dir(), "gera-pdf-editor")
 }
 
 /// Prefixos das cópias na pasta privada: impressão, imagem colada, anexo aberto e páginas copiadas. Todas levam o
@@ -123,11 +113,34 @@ fn sweep_stale(dir: &Path) {
             .and_then(|n| SPOOL_PREFIXES.iter().find_map(|p| n.strip_prefix(p)))
             .and_then(|n| n.split('-').next())
             .and_then(|p| p.parse::<u32>().ok());
-        if let Some(pid) = pid {
-            if !Path::new("/proc").join(pid.to_string()).exists() {
-                let _ = std::fs::remove_file(entry.path());
-            }
+        if pid.is_some_and(|pid| !alive(pid)) {
+            let _ = std::fs::remove_file(entry.path());
         }
+    }
+}
+
+/// O processo `pid` ainda está rodando?
+#[cfg(unix)]
+fn alive(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).exists()
+}
+
+#[cfg(windows)]
+fn alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: o handle aberto é fechado; o código de saída vai para uma variável local
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(h, &mut code) != 0;
+        CloseHandle(h);
+        ok && code == STILL_ACTIVE as u32
     }
 }
 
@@ -138,26 +151,53 @@ pub fn sweep() {
     }
 }
 
-/// Roda o `lp` e apaga o temporário em qualquer caso. Devolve a saída ou a mensagem de erro.
-fn run_lp(program: &str, args: &[String], file: &Path) -> Result<String, String> {
-    let out = Command::new(program).args(args).env("LC_ALL", "C").output();
-    let _ = std::fs::remove_file(file);
-    let out = out.map_err(|e| format!("não foi possível executar {program}: {e}"))?;
-    let text = |b: &[u8]| String::from_utf8_lossy(b).trim().to_string();
-    if out.status.success() {
-        Ok(text(&out.stdout))
-    } else {
-        let err = text(&out.stderr);
-        Err(if err.is_empty() {
-            format!("{program} terminou com erro")
-        } else {
-            err
-        })
+/// Como imprimir: o que a janela do sistema escolheu, ou as opções do diálogo do app.
+pub enum PrintKind {
+    /// Diálogo do app (Linux sem portal): o CUPS com as opções.
+    #[cfg(unix)]
+    Cups(crate::cups::CupsJob),
+    /// Portal de impressão do Linux: o token das opções escolhidas na janela.
+    #[cfg(target_os = "linux")]
+    Portal { token: u32, title: String },
+    /// Janela "Imprimir" do Windows.
+    #[cfg(windows)]
+    Windows(crate::print_win::WinChoice),
+}
+
+impl PrintKind {
+    /// Para onde vai (a mensagem "Enviando para…").
+    pub fn destination(&self) -> String {
+        match self {
+            #[cfg(unix)]
+            Self::Cups(job) => job.options.printer.clone(),
+            #[cfg(target_os = "linux")]
+            Self::Portal { .. } => "a impressora escolhida".into(),
+            #[cfg(windows)]
+            Self::Windows(c) => c.printer.clone(),
+        }
+    }
+
+    /// Imprime também as marcações (a janela do sistema imprime sempre "Documento e
+    /// marcações", como o padrão do Acrobat).
+    pub fn with_annots(&self) -> bool {
+        #[cfg(unix)]
+        if let Self::Cups(job) = self {
+            return job.options.with_annots;
+        }
+        true
     }
 }
 
-/// Envios ao CUPS em andamento (cada um numa thread, para não travar a janela). Ao fechar o
-/// app, espera os envios terminarem: a impressão não se perde e o temporário é apagado.
+/// Um pedido de impressão: como imprimir e o PDF temporário já exportado.
+pub struct PrintRequest {
+    pub kind: PrintKind,
+    /// Página atual (1-based).
+    pub current: usize,
+    pub file: PathBuf,
+}
+
+/// Envios em andamento (cada um numa thread, para não travar a janela). Ao fechar o app, espera
+/// os envios terminarem: a impressão não se perde e o temporário é apagado.
 #[derive(Default)]
 pub struct PrintJobs {
     running: Vec<(String, Receiver<Result<String, String>>)>,
@@ -165,31 +205,58 @@ pub struct PrintJobs {
 }
 
 impl PrintJobs {
-    pub fn start(
-        &mut self,
-        ctx: &egui::Context,
-        printer: String,
-        args: Vec<String>,
-        file: PathBuf,
-    ) {
+    /// Envia o pedido à impressora numa thread; opções inválidas voltam como erro na hora (e o
+    /// temporário é apagado).
+    pub fn start(&mut self, ctx: &egui::Context, req: PrintRequest) -> Result<(), String> {
         let ctx = ctx.clone();
-        let lp = program("GERA_LP", "lp");
-        self.spawn(lp, printer, args, file, move || ctx.request_repaint());
+        let printer = req.kind.destination();
+        let wake = move || ctx.request_repaint();
+        match req.kind {
+            #[cfg(unix)]
+            PrintKind::Cups(ref job) => {
+                let job = crate::cups::job(job, &req).inspect_err(|_| {
+                    let _ = std::fs::remove_file(&req.file);
+                })?;
+                self.spawn(printer, job, wake);
+            }
+            #[cfg(target_os = "linux")]
+            PrintKind::Portal { token, ref title } => {
+                let (title, file) = (title.clone(), req.file.clone());
+                self.spawn(
+                    printer,
+                    move || {
+                        let r = crate::portal_print::session()
+                            .and_then(|c| crate::portal_print::print(&c, &title, &file, token));
+                        let _ = std::fs::remove_file(&file);
+                        r.map(|()| String::new())
+                    },
+                    wake,
+                );
+            }
+            #[cfg(windows)]
+            PrintKind::Windows(choice) => {
+                let (file, current) = (req.file.clone(), req.current);
+                self.spawn(
+                    printer,
+                    move || crate::print_win::print(&choice, &file, current),
+                    wake,
+                );
+            }
+        }
+        Ok(())
     }
 
     fn spawn(
         &mut self,
-        lp: String,
         printer: String,
-        args: Vec<String>,
-        file: PathBuf,
+        job: impl FnOnce() -> Result<String, String> + Send + 'static,
         wake: impl Fn() + Send + 'static,
     ) {
         let (tx, rx) = mpsc::channel();
         let spawned = std::thread::Builder::new()
             .name("impressao".into())
             .spawn(move || {
-                let _ = tx.send(run_lp(&lp, &args, &file));
+                let _ = tx.send(job());
                 wake();
             });
         if let Ok(handle) = spawned {
@@ -232,43 +299,12 @@ impl Drop for PrintJobs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
-    #[test]
-    fn default_printer_is_read_from_lpstat_output() {
-        assert_eq!(
-            parse_default("system default destination: HP_LaserJet\n"),
-            Some("HP_LaserJet".into())
-        );
-        assert_eq!(parse_default("no system default destination\n"), None);
-    }
-
-    #[test]
-    fn printer_list_skips_blank_lines() {
-        assert_eq!(
-            parse_list("HP\n\nPDF\n"),
-            vec!["HP".to_string(), "PDF".to_string()]
-        );
-    }
-
-    #[test]
-    fn a_print_job_runs_lp_and_removes_the_temporary_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("x.pdf");
-        std::fs::write(&file, b"%PDF").unwrap();
-        let args = vec!["-d".to_string(), "HP".into(), file.display().to_string()];
-        let out = run_lp("echo", &args, &file).unwrap();
-        assert!(out.contains("-d HP"), "{out}");
-        assert!(!file.exists(), "o temporário sempre some");
-        std::fs::write(&file, b"%PDF").unwrap();
-        assert!(run_lp("false", &[], &file).is_err());
-        assert!(!file.exists(), "some também quando o lp falha");
-        assert!(run_lp("/nao/existe/lp", &[], &file).is_err());
-    }
-
+    #[cfg(unix)]
     #[test]
     fn the_spool_folder_is_private_and_refuses_symlinks() {
         let base = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
         let dir = private_dir(base.path(), "gera-teste").unwrap();
         let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
@@ -310,11 +346,14 @@ mod tests {
         let file = dir.path().join("x.pdf");
         std::fs::write(&file, b"%PDF").unwrap();
         let mut jobs = PrintJobs::default();
+        let f = file.clone();
         jobs.spawn(
-            "sleep".into(),
             "HP".into(),
-            vec!["0.3".into()],
-            file.clone(),
+            move || {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                let _ = std::fs::remove_file(&f);
+                Ok(String::new())
+            },
             || {},
         );
         drop(jobs); // o app fechando logo depois de clicar Imprimir

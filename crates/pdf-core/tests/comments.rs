@@ -88,7 +88,7 @@ fn editing_text_updates_the_modification_date_and_undo_restores_it() {
 
 /// Flags /F das anotações com /IRT (filhas), lidas direto do arquivo.
 fn child_flags(path: &std::path::Path) -> Vec<mupdf::pdf::AnnotationFlags> {
-    let doc = mupdf::pdf::PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(path).unwrap()).unwrap();
     let page = doc.load_pdf_page(0).unwrap();
     page.annotations()
         .filter(|a| a.object().get_dict("IRT").unwrap().is_some())
@@ -117,7 +117,7 @@ fn replies_and_states_never_print() {
 
 /// Põe a flag Hidden (como o Acrobat grava os status) nas filhas do arquivo.
 fn hide_children_like_acrobat(path: &std::path::Path) {
-    let doc = mupdf::pdf::PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(path).unwrap()).unwrap();
     let mut page = doc.load_pdf_page(0).unwrap();
     let all: Vec<_> = page.annotations().collect();
     for mut a in all {
@@ -181,7 +181,7 @@ fn deleting_the_root_takes_replies_of_replies() {
 
 /// Grava uma resposta como outro programa: só /IRT e /RT /R, sem NoView.
 fn plain_reply_in_file(path: &std::path::Path) {
-    let doc = mupdf::pdf::PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(path).unwrap()).unwrap();
     let mut page = doc.load_pdf_page(0).unwrap();
     let parent = page.annotations().next().unwrap();
     let mut r = page

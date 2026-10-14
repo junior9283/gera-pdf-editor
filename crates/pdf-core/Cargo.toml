@@ -39,6 +39,10 @@ similar = "3.2"
 # código de barras (v6e3): PDF417, QR Code e Data Matrix — porte do ZXing, Apache-2.0
 rxing = { version = "0.9", default-features = false, features = ["encoders", "qrcode", "pdf417", "datamatrix", "encoding_rs"] }
 
+[target.'cfg(windows)'.dependencies]
+# espaço livre em disco no Windows (MIT/Apache)
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 tempfile = "3"
 # os testes leem de volta o código desenhado
