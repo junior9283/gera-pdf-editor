@@ -218,7 +218,7 @@ fn an_unrelated_certificate_in_the_signature_is_not_part_of_the_chain() {
 fn details_changed_after_signing_show_the_signed_ones() {
     let (_d, path) = signed(0);
     // revisão posterior trocando o motivo no dicionário da assinatura
-    let doc = mupdf::pdf::PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
     let page = doc.load_pdf_page(0).unwrap();
     let w = page.widgets().next().unwrap();
     let mut v = w.annotation().object().get_dict("V").unwrap().unwrap();
@@ -378,7 +378,7 @@ fn the_certificate_was_valid_when_signing() {
 fn swapping_a_page_resource_after_signing_is_not_permitted() {
     // o /Contents fica igual, mas a fonte usada pela página é trocada numa revisão posterior
     let (_d, path) = signed(0);
-    let doc = mupdf::pdf::PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
     let page = doc.find_page(0).unwrap();
     let mut font = page
         .get_dict_inheritable("Resources")

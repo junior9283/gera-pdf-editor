@@ -197,7 +197,7 @@ fn restricted_file_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let a = text_pdf(dir.path(), "a.pdf", &[pg(&["texto"])], 0);
     let locked = dir.path().join("restrito.pdf");
-    let doc = mupdf::pdf::PdfDocument::open(a.to_str().unwrap()).unwrap();
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(&a).unwrap()).unwrap();
     let mut w = mupdf::pdf::PdfWriteOptions::default();
     w.set_encryption(mupdf::pdf::Encryption::Aes256)
         .set_owner_password("dono")
@@ -212,7 +212,7 @@ fn wrong_password_is_reported() {
     let dir = tempfile::tempdir().unwrap();
     let a = text_pdf(dir.path(), "a.pdf", &[pg(&["texto"])], 0);
     let locked = dir.path().join("senha.pdf");
-    let doc = mupdf::pdf::PdfDocument::open(a.to_str().unwrap()).unwrap();
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(&a).unwrap()).unwrap();
     let mut w = mupdf::pdf::PdfWriteOptions::default();
     w.set_encryption(mupdf::pdf::Encryption::Aes256)
         .set_owner_password("dono")
@@ -385,7 +385,7 @@ fn report_has_summary_pairs_and_locked_annotations() {
         .all(|a| a.author == "Comparação" && a.page >= 1));
     assert!(marks.iter().any(|a| a.contents.contains("dormiu")));
     // travadas, com o assunto do tipo; o PDF diz que é um resultado de comparação
-    let raw = mupdf::pdf::PdfDocument::open(dest.to_str().unwrap()).unwrap();
+    let raw = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(&dest).unwrap()).unwrap();
     let page = raw.load_pdf_page(1).unwrap();
     for annot in page.annotations() {
         if annot.r#type().unwrap() == mupdf::pdf::PdfAnnotationType::Highlight {

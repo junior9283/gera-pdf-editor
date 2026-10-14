@@ -71,6 +71,13 @@ pub struct PdfDoc {
 
 /// Abre o arquivo e, se for protegido, autentica com `password`.
 pub(crate) fn open_authenticated(path: &Path, password: Option<&str>) -> Result<PdfDocument> {
+    // no Windows, um arquivo aberto não pode ser substituído: o PDF vai para a memória e o
+    // Salvar grava por cima dele
+    #[cfg(windows)]
+    let mut inner = std::fs::read(path)
+        .map_err(|e| PdfError::Open(e.to_string()))
+        .and_then(|b| PdfDocument::from_bytes(&b).map_err(|e| PdfError::Open(e.to_string())))?;
+    #[cfg(not(windows))]
     let mut inner =
         PdfDocument::open(utf8_path(path)?).map_err(|e| PdfError::Open(e.to_string()))?;
     if inner.needs_password()? {
@@ -1035,11 +1042,7 @@ pub(crate) fn write_atomic(
         .map_err(PdfError::from)
         // os dados precisam estar no disco antes do rename: numa queda de energia o original
         // nunca pode ser trocado por um arquivo truncado
-        .and_then(|()| {
-            std::fs::File::open(&tmp)?
-                .sync_all()
-                .map_err(PdfError::from)
-        })
+        .and_then(|()| sync(&tmp).map_err(PdfError::from))
         .and_then(|()| std::fs::rename(&tmp, dest).map_err(PdfError::from));
     if written.is_err() {
         let _ = std::fs::remove_file(&tmp);
@@ -1051,13 +1054,21 @@ pub(crate) fn write_atomic(
 pub(crate) fn write_bytes_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = temp_path(dest)?;
     let written = std::fs::write(&tmp, bytes)
-        .and_then(|()| std::fs::File::open(&tmp)?.sync_all())
+        .and_then(|()| sync(&tmp))
         .and_then(|()| std::fs::rename(&tmp, dest))
         .map_err(PdfError::from);
     if written.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
     written
+}
+
+/// Garante os dados de `path` no disco (no Windows, o flush pede o arquivo aberto para escrita).
+fn sync(path: &Path) -> std::io::Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .sync_all()
 }
 
 fn temp_path(dest: &Path) -> Result<PathBuf> {

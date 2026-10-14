@@ -145,7 +145,7 @@ fn moving_a_signature_keeps_its_drawing_and_undo_removes_it() {
 
 fn raw_annot(path: &std::path::Path) -> String {
     // dicionário da (única) anotação, como texto, para conferir as chaves gravadas
-    let doc = mupdf::pdf::PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
     let page = doc.load_pdf_page(0).unwrap();
     let a = page.annotations().next().unwrap();
     a.object().resolve().unwrap().unwrap().to_string()

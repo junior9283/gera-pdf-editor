@@ -329,7 +329,7 @@ fn hierarchical() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("h.pdf");
     std::fs::write(&path, pdf_core::sample::form_pdf()).unwrap();
-    let mut doc = mupdf::pdf::PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let mut doc = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
     let mut fields = doc
         .catalog()
         .unwrap()
@@ -740,7 +740,7 @@ fn duplicate_across_pages_shares_the_value() {
         );
     }
     // e a aparência dos outros widgets também mostra o valor
-    let raw = mupdf::pdf::PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let raw = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
     for p in [0, 2] {
         let page = raw.load_pdf_page(p).unwrap();
         let w = page.widgets().next().unwrap();

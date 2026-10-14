@@ -140,7 +140,7 @@ fn readonly_fields_refuse_values() {
 
 /// /AS (aparência escolhida) e /V de cada botão do grupo "plano", lidos direto do arquivo.
 fn radio_states(path: &std::path::Path) -> Vec<String> {
-    let doc = mupdf::pdf::PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
     let page = doc.load_pdf_page(0).unwrap();
     page.widgets()
         .filter(|w| w.name().unwrap().as_deref() == Some("plano"))

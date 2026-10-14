@@ -20,7 +20,7 @@ fn png(dir: &tempfile::TempDir) -> std::path::PathBuf {
 }
 
 fn normal_ap(path: &std::path::Path) -> String {
-    let doc = mupdf::pdf::PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
     let page = doc.load_pdf_page(0).unwrap();
     let w = page.widgets().next().unwrap();
     let ap = w.annotation().object().get_dict("AP").unwrap().unwrap();
@@ -51,7 +51,7 @@ fn image_field_is_created_like_acrobat() {
     assert!(!p.has_icon);
     // a aparência é a do app desde a criação (o redesenho segue o layout)
     d.save(&_p).unwrap();
-    let raw = mupdf::pdf::PdfDocument::open(_p.to_str().unwrap()).unwrap();
+    let raw = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(&_p).unwrap()).unwrap();
     let page = raw.load_pdf_page(0).unwrap();
     let obj = page.widgets().next().unwrap().annotation().object();
     assert!(obj.get_dict("GeraAP").unwrap().is_some());
@@ -139,7 +139,7 @@ fn buttons_from_other_programs_keep_their_appearance() {
     d.move_field(0, nome.id, PdfRect::new(100.0, 300.0, 250.0, 320.0))
         .unwrap();
     d.save(&path).unwrap();
-    let raw = mupdf::pdf::PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let raw = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
     let page = raw.load_pdf_page(0).unwrap();
     for w in page.widgets() {
         let ap = w.annotation().object().get_dict("AP").unwrap().unwrap();
@@ -169,7 +169,7 @@ fn icon_buttons_on_rotated_pages_are_drawn_upright() {
         .unwrap();
     d.set_button_icon(0, id, &png(&dir)).unwrap();
     d.save(&path).unwrap();
-    let raw = mupdf::pdf::PdfDocument::open(path.to_str().unwrap()).unwrap();
+    let raw = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
     let page = raw.load_pdf_page(0).unwrap();
     let w = page.widgets().next().unwrap();
     let obj = w.annotation().object();
