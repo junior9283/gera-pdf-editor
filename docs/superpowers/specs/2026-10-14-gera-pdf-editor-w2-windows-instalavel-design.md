@@ -68,3 +68,24 @@ lado do ZIP portátil:
   - configurações em `%APPDATA%`, nada na pasta do programa;
   - atualizar por cima;
   - desinstalar e conferir que não sobra nada além das configurações.
+
+## Decisões tomadas na execução
+
+1. **Atalhos para todos os usuários** (`SetShellVarContext all`), porque a instalação é por
+   máquina. Sem isso, o atalho do menu Iniciar ia só para quem instalou.
+2. **Abrir o app ao concluir sem elevação**, pelo Explorer. Aberto direto pelo instalador, ele
+   herdaria o administrador, e arrastar arquivos do Explorer para a janela pararia de funcionar.
+3. **Atualização na mesma pasta.** A pasta da instalação anterior é lida no `.onInit`, depois do
+   `SetRegView 64`. O `InstallDirRegKey` lia na visão de 32 bits e nunca achava.
+4. **Desinstalar remove só os arquivos que instalou**, nunca pastas inteiras: a pasta escolhida
+   pode ter outros arquivos (por exemplo, a do Tesseract).
+5. **App aberto.** Instalar e desinstalar pedem para fechar (Repetir/Cancelar). No modo silencioso,
+   cancelam com o código 2.
+6. **Conta sem administrador é recusada** com aviso. Com o UAC desligado, ela chegaria a instalar
+   pela metade.
+7. **Imagem própria no assistente** (o ícone e o nome), no lugar da genérica do NSIS. A descrição
+   dos componentes fica embaixo, para os nomes não serem cortados.
+8. **Dicionário LZMA de 64 MB.** O instalador tem cerca de 14,9 MB e o ZIP portátil 18,8 MB.
+9. **Testes no Windows sem trocar o padrão de PDF da VM.** O Gera aparece em "Selecione um aplicativo
+   padrão para .pdf", e a abertura foi testada pelo comando registrado. A entrada de teclado e mouse
+   no instalador exige um script elevado (UIPI).
