@@ -66,7 +66,7 @@ fn photo_pdf_cs(w: usize, h: usize, cs: &str) -> Vec<u8> {
 }
 
 fn image_size(path: &std::path::Path, name: &str) -> (i32, i32) {
-    let doc = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(path).unwrap()).unwrap();
     let img = doc
         .find_page(0)
         .unwrap()

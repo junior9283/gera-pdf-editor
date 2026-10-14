@@ -74,7 +74,7 @@ fn field(d: &PdfDoc, name: &str) -> FieldInfo {
 
 /// O que a aparência (/AP /N) do widget `name` desenha.
 fn appearance(path: &std::path::Path, name: &str) -> String {
-    let doc = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(path).unwrap()).unwrap();
     let page = doc.load_pdf_page(0).unwrap();
     let w = page
         .widgets()

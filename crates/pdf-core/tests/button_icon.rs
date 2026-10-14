@@ -20,7 +20,7 @@ fn png(dir: &tempfile::TempDir) -> std::path::PathBuf {
 }
 
 fn normal_ap(path: &std::path::Path) -> String {
-    let doc = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(path).unwrap()).unwrap();
     let page = doc.load_pdf_page(0).unwrap();
     let w = page.widgets().next().unwrap();
     let ap = w.annotation().object().get_dict("AP").unwrap().unwrap();
