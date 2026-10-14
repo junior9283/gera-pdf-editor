@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Gera dist/Gera_PDF_Editor-<versão>-windows-x64-portatil.zip (versão portátil do Windows).
+# Gera, para o Windows, dist/Gera_PDF_Editor-<versão>-windows-x64-portatil.zip (versão portátil)
+# e dist/Gera_PDF_Editor-<versão>-windows-x64-instalador.exe (instalador, pelo NSIS).
 #
 # Compilação cruzada no Linux com MinGW-w64 (alvo x86_64-pc-windows-gnu): o .exe não pede DLL
 # fora do Windows (o runtime C/C++ vai ligado). Requisitos: `rustup target add
 # x86_64-pc-windows-gnu`, o g++ do MinGW-w64 (Fedora: mingw64-gcc-c++ e
-# mingw64-winpthreads-static; Ubuntu: g++-mingw-w64-x86-64-posix) e o zip.
+# mingw64-winpthreads-static; Ubuntu: g++-mingw-w64-x86-64-posix), o zip e o NSIS (Fedora:
+# mingw-nsis-base e mingw32-nsis; Ubuntu: nsis).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source packaging/lib.sh
@@ -20,6 +22,12 @@ cp "target/$TARGET/release/gera-pdf-editor.exe" "$APP/GeraPDFEditor.exe"
 copy_licenses "$APP/licencas" LICENSE.txt
 # dados de idioma do OCR: o app os procura em tessdata\ ao lado do .exe
 copy_tessdata "$APP/tessdata"
+# instalador: a pasta do app, com atalhos, registro para PDF e desinstalador (antes do LEIA-ME,
+# que é só da versão portátil)
+SETUP="dist/Gera_PDF_Editor-$VERSION-windows-x64-instalador.exe"
+makensis -V2 -DVERSION="$VERSION" -DSOURCE="$PWD/$APP" -DOUTFILE="$PWD/$SETUP" \
+  packaging/windows/instalador.nsi
+ls -l "$SETUP"
 # instruções curtas em texto do Windows (CRLF)
 sed 's/$/\r/' > "$APP/LEIA-ME.txt" <<TXT
 Gera PDF Editor $VERSION - versão portátil para Windows 10 e 11 (64 bits)

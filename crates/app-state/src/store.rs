@@ -38,10 +38,17 @@ fn base_dir(kind: &str) -> Option<PathBuf> {
     }
 }
 
+/// Marcador que o instalador do Windows põe ao lado do .exe: a cópia instalada guarda as
+/// configurações sempre em %APPDATA% (o ZIP portátil não tem o marcador).
+const INSTALLED_MARKER: &str = "instalado";
+
 /// `dados` ao lado do executável, se der para gravar ali (pendrive, pasta do usuário); senão
-/// `fallback` (Arquivos de Programas, mídia somente leitura).
+/// `fallback` (Arquivos de Programas, mídia somente leitura, cópia instalada).
 #[cfg_attr(not(windows), allow(dead_code))]
 fn portable_base(exe_dir: &Path, fallback: Option<PathBuf>) -> Option<PathBuf> {
+    if exe_dir.join(INSTALLED_MARKER).exists() {
+        return fallback;
+    }
     let dir = exe_dir.join("dados");
     let probe = dir.join(".gravavel");
     let writable = std::fs::create_dir_all(&dir).is_ok()
@@ -192,6 +199,20 @@ mod tests {
             std::fs::read_dir(&base).unwrap().count(),
             0,
             "o teste de escrita não fica"
+        );
+    }
+
+    #[test]
+    fn installed_marker_goes_to_appdata() {
+        // instalado em Arquivos de Programas: as configurações nunca ficam ao lado do programa
+        let exe = tempfile::tempdir().unwrap();
+        std::fs::write(exe.path().join(INSTALLED_MARKER), b"").unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let base = portable_base(exe.path(), Some(other.path().join("Gera PDF Editor")));
+        assert_eq!(base, Some(other.path().join("Gera PDF Editor")));
+        assert!(
+            !exe.path().join("dados").exists(),
+            "nem testa a gravação ali"
         );
     }
 
