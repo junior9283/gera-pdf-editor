@@ -9,6 +9,7 @@ mod certificates;
 mod clipboard;
 mod comment_tools;
 mod comments_panel;
+mod crash;
 mod create;
 #[cfg(unix)]
 mod cups;
@@ -46,7 +47,21 @@ mod view;
 use std::path::PathBuf;
 use std::time::Instant;
 
-fn main() -> eframe::Result {
+fn main() {
+    crash::install_panic_hook();
+    if let Err(e) = run() {
+        // no Windows não há console: sem isto, a janela abria e fechava sem explicação
+        crash::report(
+            "O Gera PDF Editor não conseguiu abrir a janela.",
+            &e.to_string(),
+            "Costuma ser o driver de vídeo: atualize-o pelo Windows Update ou pelo site do fabricante \
+             da placa e tente de novo.",
+        );
+        std::process::exit(1);
+    }
+}
+
+fn run() -> eframe::Result {
     let started = Instant::now();
     let mut paths = Vec::new();
     let (mut bench, mut scroll) = (false, false);
@@ -76,6 +91,10 @@ fn main() -> eframe::Result {
         // Windows sem driver não abre a janela
         #[cfg(windows)]
         renderer: eframe::Renderer::Wgpu,
+        // só o DirectX 12 (ou o WARP por software, sem placa): o Vulkan do Windows tem camadas de
+        // programas de overlay e de gravação que derrubam aplicativos de terceiros
+        #[cfg(windows)]
+        wgpu_options: windows_wgpu(),
         #[cfg(not(windows))]
         renderer: eframe::Renderer::Glow,
         viewport,
@@ -92,4 +111,16 @@ fn main() -> eframe::Result {
             )))
         }),
     )
+}
+
+/// A configuração do wgpu no Windows: DirectX 12 (a variável `WGPU_BACKEND` ainda vale, para teste).
+#[cfg(windows)]
+fn windows_wgpu() -> eframe::egui_wgpu::WgpuConfiguration {
+    use eframe::egui_wgpu::{wgpu, WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
+    let mut setup = WgpuSetupCreateNew::without_display_handle();
+    setup.instance_descriptor.backends = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::DX12);
+    WgpuConfiguration {
+        wgpu_setup: WgpuSetup::CreateNew(setup),
+        ..Default::default()
+    }
 }

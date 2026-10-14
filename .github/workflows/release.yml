@@ -63,4 +63,5 @@ jobs:
         run: |
           gh release view "$TAG" >/dev/null 2>&1 \
             || gh release create "$TAG" --title "$TAG" --notes "Veja o CHANGELOG.md."
-          gh release upload "$TAG" dist/Gera_PDF_Editor-*-windows-x64-* --clobber
+          (cd dist && sha256sum Gera_PDF_Editor-*-windows-x64-* > SHA256SUMS-windows.txt)
+          gh release upload "$TAG" dist/Gera_PDF_Editor-*-windows-x64-* dist/SHA256SUMS-windows.txt --clobber

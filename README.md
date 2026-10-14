@@ -60,8 +60,19 @@ Funciona no Windows 10 e 11 (64 bits), também sem placa de vídeo. Na
   onde quiser (inclusive num pendrive) e abra `GeraPDFEditor.exe`. As configurações ficam na pasta
   `dados`, ao lado do programa.
 
-Os arquivos ainda não têm assinatura digital de código: na primeira vez, o Windows (SmartScreen) pode
-avisar "editor desconhecido"; clique em "Mais informações" ▸ "Executar assim mesmo".
+Os arquivos ainda não têm assinatura digital de código (é um projeto sem empresa por trás, e o certificado
+é pago). Por isso, o Windows (SmartScreen) e alguns antivírus podem avisar "editor desconhecido" ou, às
+vezes, classificar o arquivo como suspeito por engano, porque ele é novo e pouco baixado.
+
+- Confira o arquivo: a release traz o `SHA256SUMS-windows.txt`; no PowerShell, `Get-FileHash <arquivo>`
+  deve dar o mesmo valor. O código-fonte é este repositório, e os arquivos são gerados pelo GitHub Actions.
+- Se o Windows Defender bloquear: abra "Segurança do Windows" ▸ "Histórico de proteção", restaure o
+  arquivo e, se quiser ajudar, envie-o como "incorretamente detectado" em
+  <https://www.microsoft.com/wdsi/filesubmission>.
+- Se o app abrir e fechar logo em seguida, ele agora mostra uma mensagem com o motivo (em geral, o driver
+  de vídeo) e grava um relatório em `%APPDATA%\Gera PDF Editor\config\erro.log` (instalado) ou em
+  `dados\config\erro.log` (portátil). Atualize o driver de vídeo e, se continuar, abra uma
+  [issue](https://github.com/junior9283/gera-pdf-editor/issues) com esse relatório.
 
 A impressão usa a janela "Imprimir" do sistema (no Linux, a do KDE ou do GNOME).
 

@@ -8,6 +8,20 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 - v6f — editar PDF: painel Formatar, ferramenta Link, plano de fundo.
 
+## [0.24.1] — 2026-10-14 · Windows: erros na abertura aparecem em vez de o app sumir
+
+### Corrigido
+- No Windows, se a janela não conseguia abrir (em geral, o driver de vídeo), o programa fechava sem
+  nenhum aviso: parecia "abrir e fechar". Agora aparece uma mensagem com o motivo e o erro é gravado em
+  `erro.log`; o mesmo vale para um erro interno inesperado.
+- No Windows, a interface usa só o DirectX 12 (ou o renderizador por software, sem placa de vídeo). O
+  Vulkan foi tirado porque as camadas de programas de overlay e de gravação de tela derrubam aplicativos
+  de terceiros.
+
+### Adicionado
+- A release traz o `SHA256SUMS-windows.txt`, e o README explica o aviso de antivírus (arquivo sem
+  assinatura digital) e como enviar um falso positivo à Microsoft.
+
 ## [0.24.0] — 2026-10-14 · Versão Windows instalável (w2)
 
 ### Adicionado
