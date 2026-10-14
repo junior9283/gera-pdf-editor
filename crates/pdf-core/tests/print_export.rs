@@ -75,6 +75,7 @@ fn export_for_print_writes_a_readable_unencrypted_copy() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_failed_export_leaves_no_file_behind() {
     use std::os::unix::ffi::OsStrExt;

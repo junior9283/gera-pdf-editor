@@ -123,3 +123,26 @@ fn content_box_of_a_giant_page_does_not_allocate_the_page() {
     );
     assert!(r.is_some(), "o X aparece mesmo na escala reduzida");
 }
+
+#[test]
+fn a_band_matches_the_same_rows_of_the_full_page() {
+    let (_dir, d) = doc(1, 0);
+    let full = d.render(0, 1.5, false).unwrap();
+    let band = d.render_band(0, 1.5, 100, 64).unwrap();
+    assert_eq!((band.width, band.height), (full.width, 64));
+    let row = full.width as usize * 3;
+    let same = &full.rgb[100 * row..164 * row];
+    // a suavização nas bordas do recorte pode mudar alguns pixels
+    let differ = band
+        .rgb
+        .iter()
+        .zip(same)
+        .filter(|(a, b)| a.abs_diff(**b) > 40)
+        .count();
+    assert!(differ * 100 < same.len(), "{differ} de {}", same.len());
+    // a última faixa sai cortada na altura da página; fora dela, erro
+    let last = d.render_band(0, 1.5, full.height - 10, 64).unwrap();
+    assert_eq!(last.height, 10);
+    assert!(d.render_band(0, 1.5, full.height, 64).is_err());
+    assert!(d.render_band(0, 1.5, 0, 0).is_err());
+}

@@ -174,6 +174,7 @@ mod tests {
         assert!(sanitize(&"é".repeat(64)).is_some());
     }
 
+    #[cfg(unix)]
     #[test]
     fn catalog_lists_categories_and_stamps() {
         let dir = tempfile::tempdir().unwrap();

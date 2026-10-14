@@ -187,6 +187,7 @@ mod tests {
         assert_eq!(t.find(&p("a")), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn canonical_unifies_relative_and_symlinked_paths() {
         let dir = tempfile::tempdir().unwrap();

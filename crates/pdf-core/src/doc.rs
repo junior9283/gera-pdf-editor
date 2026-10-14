@@ -251,6 +251,34 @@ impl PdfDoc {
         Ok(packed_rgb(&pix, invert))
     }
 
+    /// Faixa de `rows` linhas a partir da linha `y0` da página renderizada em `scale`, na largura
+    /// inteira (impressão no Windows: só a faixa fica na memória). A última sai cortada.
+    pub fn render_band(&self, page: i32, scale: f32, y0: u32, rows: u32) -> Result<RenderedPage> {
+        let page = self.load(page)?;
+        if !scale.is_finite()
+            || scale <= 0.0
+            || scale > MAX_TILE_SCALE
+            || !(1..=4096).contains(&rows)
+        {
+            return Err(PdfError::InvalidScale(scale));
+        }
+        let ctm = Matrix::new_scale(scale, scale);
+        let full = page.bounds()?.transform(&ctm).round();
+        let top = i64::from(full.y0) + i64::from(y0);
+        let bottom = (top + i64::from(rows)).min(i64::from(full.y1));
+        if top >= bottom || i64::from(full.x1) - i64::from(full.x0) > 32_768 {
+            return Err(PdfError::InvalidScale(scale));
+        }
+        let rect = mupdf::IRect::new(full.x0, top as i32, full.x1, bottom as i32);
+        let mut pix = mupdf::Pixmap::new_with_rect(&Colorspace::device_rgb(), rect, false)?;
+        pix.clear_with(255)?;
+        {
+            let device = mupdf::Device::from_pixmap(&pix)?;
+            page.run(&device, &ctm)?;
+        }
+        Ok(packed_rgb(&pix, false))
+    }
+
     /// Caixa da tinta da página (sem anotações), em coordenadas do MuPDF, para "Ajustar ao
     /// conteúdo visível". `None` numa página em branco.
     pub fn content_box(&self, page: i32) -> Result<Option<PdfRect>> {

@@ -164,7 +164,9 @@ pub struct PrintRequest {
     /// Página atual (1-based) e total de páginas.
     pub current: usize,
     pub total: usize,
-    /// Alguma página é maior que o papel ("Reduzir páginas grandes").
+    /// Alguma página é maior que o papel ("Reduzir páginas grandes"; no Windows, a montagem das
+    /// folhas compara cada página com o papel).
+    #[cfg_attr(windows, allow(dead_code))]
     pub oversized: bool,
     pub file: PathBuf,
 }
