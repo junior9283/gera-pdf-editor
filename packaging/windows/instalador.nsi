@@ -16,6 +16,7 @@ SetCompressorDictSize 64
 !include "MUI2.nsh"
 !include "x64.nsh"
 !include "FileFunc.nsh"
+!include "LogicLib.nsh"
 
 !define APP "Gera PDF Editor"
 !define EXE "GeraPDFEditor.exe"
@@ -33,7 +34,6 @@ SetCompressorDictSize 64
 Name "${APP}"
 OutFile "${OUTFILE}"
 InstallDir "$PROGRAMFILES64\${APP}"
-InstallDirRegKey HKLM "${APPKEY}" "InstallDir"
 RequestExecutionLevel admin
 BrandingText "${APP} ${VERSION}"
 
@@ -75,10 +75,42 @@ Function .onInit
     MessageBox MB_ICONSTOP "O ${APP} precisa do Windows de 64 bits."
     Abort
   ${EndIf}
+  ; instalação por máquina: só com administrador (com o UAC desligado, uma conta comum chegaria
+  ; aqui sem poder gravar em Arquivos de Programas)
+  UserInfo::GetAccountType
+  Pop $0
+  ${If} $0 != "Admin"
+    MessageBox MB_ICONSTOP "Para instalar o ${APP} é preciso entrar como administrador." /SD IDOK
+    Abort
+  ${EndIf}
   SetRegView 64
+  ; atualização: a pasta da instalação anterior (lida na visão de 64 bits do registro)
+  ReadRegStr $0 HKLM "${APPKEY}" "InstallDir"
+  ${If} $0 != ""
+    StrCpy $INSTDIR $0
+  ${EndIf}
   ; instalação por máquina: atalhos no menu Iniciar e na área de trabalho de todos os usuários
   SetShellVarContext all
 FunctionEnd
+
+; o programa aberto não pode ser trocado nem apagado: pede para fechar (Repetir) ou cancela
+!macro WaitClosed UN
+Function ${UN}WaitClosed
+  retry:
+  IfFileExists "${EXEPATH}" 0 done
+  ClearErrors
+  FileOpen $0 "${EXEPATH}" a
+  IfErrors busy
+  FileClose $0
+  Goto done
+  busy:
+  MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "Feche o ${APP} e clique em Repetir." /SD IDCANCEL IDRETRY retry
+  Abort
+  done:
+FunctionEnd
+!macroend
+!insertmacro WaitClosed ""
+!insertmacro WaitClosed "un."
 
 Function un.onInit
   SetRegView 64
@@ -96,6 +128,7 @@ FunctionEnd
 Section "${APP} (obrigatório)" SecApp
   SectionIn RO
   SetOutPath "$INSTDIR"
+  Call WaitClosed
   ; o que build-windows.sh monta (o desinstalador remove a mesma lista)
   File /r "${SOURCE}\*.*"
   FileOpen $0 "$INSTDIR\${MARKER}" w
@@ -130,7 +163,8 @@ Section "${APP} (obrigatório)" SecApp
   WriteRegStr HKLM "${UNKEY}" "QuietUninstallString" '"${UNINST}" /S'
   WriteRegDWORD HKLM "${UNKEY}" "NoModify" 1
   WriteRegDWORD HKLM "${UNKEY}" "NoRepair" 1
-  ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
+  ; o tamanho do que este instalador traz (sem varrer a pasta, que pode ter outros arquivos)
+  SectionGetSize ${SecApp} $0
   WriteRegDWORD HKLM "${UNKEY}" "EstimatedSize" $0
 
   ; o Explorer relê as associações (ícone dos PDF)
@@ -147,13 +181,19 @@ SectionEnd
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 Section "Uninstall"
-  ; só o que o instalador pôs (a pasta montada por build-windows.sh; nunca a pasta inteira, caso
-  ; o usuário tenha escolhido uma pasta comum)
+  Call un.WaitClosed
+  ; só os arquivos que o instalador pôs (a pasta montada por build-windows.sh), nunca pastas
+  ; inteiras: o usuário pode ter escolhido uma pasta com outros arquivos
   Delete "${EXEPATH}"
   Delete "$INSTDIR\${MARKER}"
   Delete "${UNINST}"
-  RMDir /r "$INSTDIR\tessdata"
-  RMDir /r "$INSTDIR\licencas"
+  Delete "$INSTDIR\tessdata\por.traineddata"
+  Delete "$INSTDIR\tessdata\eng.traineddata"
+  RMDir "$INSTDIR\tessdata"
+  Delete "$INSTDIR\licencas\LICENSE.txt"
+  Delete "$INSTDIR\licencas\THIRD_PARTY_NOTICES.md"
+  Delete "$INSTDIR\licencas\OFL-GreatVibes.txt"
+  RMDir "$INSTDIR\licencas"
   RMDir "$INSTDIR"
   Delete "$SMPROGRAMS\${APP}.lnk"
   Delete "$DESKTOP\${APP}.lnk"
