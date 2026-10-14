@@ -22,4 +22,9 @@
 - **serde / serde_json** (Erick Tryzelaar, David Tolnay) — MIT ou Apache-2.0.
 - **quick-xml** (Johann Tuffe e contribuidores, ler e gravar comentários em XFDF) — MIT.
 
+- **Versão Windows**: o runtime do GCC/MinGW-w64 vai ligado ao .exe — libstdc++ e libgcc (GPL-3.0
+  com a GCC Runtime Library Exception, que permite essa distribuição) e winpthreads (MIT e BSD);
+  **wgpu** (gfx-rs, interface gráfica pelo DirectX 12) — MIT ou Apache-2.0; **windows-sys**
+  (Microsoft) — MIT ou Apache-2.0. Os dados de OCR vão na pasta `tessdata`.
+
 As demais dependências transitivas e suas licenças são listadas por `cargo tree` e `Cargo.lock`.

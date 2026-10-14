@@ -58,7 +58,9 @@ fn main() -> eframe::Result {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1100.0, 800.0])
         .with_title("Gera PDF Editor")
-        .with_app_id(desktop::APP_ID);
+        .with_app_id(desktop::APP_ID)
+        // no Windows abre maximizada, como o Acrobat (e não passa da tela num notebook)
+        .with_maximized(cfg!(windows));
     if let Some(icon) = icon::app_icon() {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
     }
