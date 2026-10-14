@@ -41,7 +41,7 @@ que roda em container neste PC (acesso por SSH). Versão alvo 0.23.0. Entra no r
    - `dados\` ao lado do `.exe`, com `config\` e `cache\`;
    - se a pasta do `.exe` não for gravável (Arquivos de Programas, mídia somente leitura), vale
      `%APPDATA%\Gera PDF Editor`.
-   - `GERA_CONFIG_DIR` continua mandando, para os testes.
+   - `XDG_CONFIG_HOME` e `XDG_CACHE_HOME`, quando definidos, continuam mandando (testes).
 4. **Impressão no Windows por GDI**, sem programa externo:
    - lista e padrão vêm de `EnumPrintersW` e `GetDefaultPrinterW`;
    - cada folha é renderizada pelo MuPDF na resolução da impressora (no máximo 600 ppp) e
