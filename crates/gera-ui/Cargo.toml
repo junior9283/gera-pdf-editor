@@ -20,6 +20,17 @@ chrono = { version = "0.4.38", default-features = false, features = ["clock"] }
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
 eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
 
+[target.'cfg(windows)'.dependencies]
+# Windows: interface pelo wgpu (DirectX 12/WARP) e a API do sistema (impressão por GDI)
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts"] }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Graphics_Printing",
+  "Win32_Storage_Xps",
+  "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 tempfile = "3"
 

@@ -1,3 +1,5 @@
+// sem janela de console no Windows
+#![cfg_attr(windows, windows_subsystem = "windows")]
 mod app;
 mod attachments_panel;
 mod bench;
@@ -8,6 +10,8 @@ mod clipboard;
 mod comment_tools;
 mod comments_panel;
 mod create;
+#[cfg(unix)]
+mod cups;
 mod desktop;
 mod destinations_panel;
 mod doc_tab;
@@ -24,6 +28,8 @@ mod page_labels_dialog;
 mod pagination_tool;
 mod prepare;
 mod print_job;
+#[cfg(windows)]
+mod print_win;
 mod redact_tool;
 mod search;
 mod shell;
@@ -57,6 +63,11 @@ fn main() -> eframe::Result {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
     }
     let options = eframe::NativeOptions {
+        // no Windows, o wgpu (DirectX 12, ou o WARP por software sem placa de vídeo): o OpenGL do
+        // Windows sem driver não abre a janela
+        #[cfg(windows)]
+        renderer: eframe::Renderer::Wgpu,
+        #[cfg(not(windows))]
         renderer: eframe::Renderer::Glow,
         viewport,
         ..Default::default()

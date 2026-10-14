@@ -11,7 +11,7 @@ use crate::view::DocView;
 use app_state::layout::ViewMode;
 use app_state::nav::{nav_target, NavKey};
 use app_state::prefs::LeftPanel;
-use app_state::print::{any_oversized, lp_args, PrintOptions};
+use app_state::print::{any_oversized, PrintOptions};
 use app_state::transform::PageMap;
 use app_state::zoom::{self, Fit};
 use pdf_core::{AnnotInfo, DocSummary, HistoryState, PdfError, Request, Response, Worker};
@@ -2465,17 +2465,18 @@ impl DocTab {
             let _ = std::fs::remove_file(&file);
             return;
         };
-        let oversized = any_oversized(view.sizes.iter().map(|s| (s.width, s.height)));
-        match lp_args(&options, page + 1, view.sizes.len(), oversized, &file) {
-            Ok(args) => {
-                self.status = format!("Enviando para {}…", options.printer);
-                self.print_jobs.start(ctx, options.printer, args, file);
-            }
-            Err(e) => {
-                let _ = std::fs::remove_file(&file);
-                self.status = format!("Não foi possível imprimir: {e}");
-            }
-        }
+        let printer = options.printer.clone();
+        let req = print_job::PrintRequest {
+            oversized: any_oversized(view.sizes.iter().map(|s| (s.width, s.height))),
+            options,
+            current: page + 1,
+            total: view.sizes.len(),
+            file,
+        };
+        self.status = match self.print_jobs.start(ctx, req) {
+            Ok(()) => format!("Enviando para {printer}…"),
+            Err(e) => format!("Não foi possível imprimir: {e}"),
+        };
     }
 
     /// Arquivo → Propriedades: pede ao worker; a janela abre quando a resposta chega.

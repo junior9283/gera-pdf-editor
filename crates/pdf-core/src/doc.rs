@@ -71,7 +71,8 @@ pub struct PdfDoc {
 
 /// Abre o arquivo e, se for protegido, autentica com `password`.
 pub(crate) fn open_authenticated(path: &Path, password: Option<&str>) -> Result<PdfDocument> {
-    let mut inner = PdfDocument::open(path).map_err(|e| PdfError::Open(e.to_string()))?;
+    let mut inner =
+        PdfDocument::open(utf8_path(path)?).map_err(|e| PdfError::Open(e.to_string()))?;
     if inner.needs_password()? {
         match password {
             None => return Err(PdfError::PasswordRequired),
