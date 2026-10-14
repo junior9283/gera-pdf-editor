@@ -47,15 +47,21 @@ reaprender nada. A implementação é **original**: nenhum código, ícone ou re
 O AppImage roda na maioria das distribuições x86-64 modernas (Fedora, Ubuntu, Debian, openSUSE, Arch…)
 e já traz os dados de OCR em português e inglês.
 
-### Windows (versão portátil)
+### Windows
 
-1. Baixe o `Gera_PDF_Editor-<versão>-windows-x64-portatil.zip` da
-   [última versão](https://github.com/junior9283/gera-pdf-editor/releases/latest).
-2. Extraia a pasta `Gera PDF Editor` onde quiser (inclusive num pendrive) e abra `GeraPDFEditor.exe`.
+Funciona no Windows 10 e 11 (64 bits), também sem placa de vídeo. Na
+[última versão](https://github.com/junior9283/gera-pdf-editor/releases/latest) há duas opções:
 
-Não há instalação: as configurações ficam na pasta `dados`, ao lado do programa. Funciona no Windows 10 e
-11 (64 bits), também sem placa de vídeo. Para abrir um PDF, arraste-o até a janela ou use
-"Abrir com" ▸ `GeraPDFEditor.exe`.
+- **Instalador** (`Gera_PDF_Editor-<versão>-windows-x64-instalador.exe`): instala em Arquivos de
+  Programas, cria o atalho no menu Iniciar e registra o app para PDF. Para usá-lo como padrão,
+  escolha-o em "Abrir com" ▸ "Sempre" ou em Configurações ▸ Aplicativos padrão (o próprio instalador
+  oferece abrir essa tela). Desinstale por "Aplicativos instalados"; as suas configurações ficam.
+- **Portátil** (`Gera_PDF_Editor-<versão>-windows-x64-portatil.zip`): extraia a pasta `Gera PDF Editor`
+  onde quiser (inclusive num pendrive) e abra `GeraPDFEditor.exe`. As configurações ficam na pasta
+  `dados`, ao lado do programa.
+
+Os arquivos ainda não têm assinatura digital de código: na primeira vez, o Windows (SmartScreen) pode
+avisar "editor desconhecido"; clique em "Mais informações" ▸ "Executar assim mesmo".
 
 A impressão usa a janela "Imprimir" do sistema (no Linux, a do KDE ou do GNOME).
 
@@ -113,8 +119,8 @@ interface) e revisão de código independente antes de entrar na `main`.
 | v6e3 | Detecção automática de campos e campo Código de barras | ✅ 0.21.1 |
 | v6e4 | Dados do formulário, Enviar, nivelar e preenchimento automático | ✅ 0.22.0 |
 | w1 | Versão Windows portátil e impressão pela janela do sistema | ✅ 0.23.0 |
-| w2 | Versão Windows instalável | 🚧 próxima |
-| v6f–v6n | Avaliação para a 1.0.0: as lacunas restantes em relação ao Acrobat Pro | ⏳ |
+| w2 | Versão Windows instalável | ✅ 0.24.0 |
+| v6f–v6n | Avaliação para a 1.0.0: as lacunas restantes em relação ao Acrobat Pro | 🚧 próxima |
 
 O histórico de cada versão está no [CHANGELOG](CHANGELOG.md) e o plano detalhado no [ROADMAP](ROADMAP.md).
 As especificações e os planos de cada etapa ficam em [`docs/superpowers`](docs/superpowers).
@@ -142,7 +148,7 @@ cargo test --workspace            # todos os testes
 cargo clippy --workspace --all-targets
 scripts/measure.sh                # metas de desempenho (abertura, memória, binário)
 packaging/build-appimage.sh       # gera dist/Gera_PDF_Editor-x86_64.AppImage
-packaging/build-windows.sh        # gera o ZIP portátil do Windows (compilação cruzada com MinGW-w64)
+packaging/build-windows.sh        # gera o ZIP portátil e o instalador do Windows (MinGW-w64 e NSIS)
 ```
 
 ## Arquitetura
@@ -175,5 +181,5 @@ precisa disponibilizar o código-fonte nos mesmos termos.
 aiming at feature and quality parity with Adobe Acrobat Pro: viewing, commenting, page organization,
 forms, fill & sign, digital signatures, protection, compression, conversion, OCR and content editing.
 The UI is currently in Brazilian Portuguese; contributions (including translations) are welcome — see
-[CONTRIBUTING.md](CONTRIBUTING.md). Download the AppImage (Linux) or the portable ZIP (Windows) from the
+[CONTRIBUTING.md](CONTRIBUTING.md). Download the AppImage (Linux) or the installer / portable ZIP (Windows) from the
 [latest release](https://github.com/junior9283/gera-pdf-editor/releases/latest).

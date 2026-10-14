@@ -6,7 +6,20 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 ## [Não lançado]
 
-- w2 — versão Windows instalável.
+- v6f — editar PDF: painel Formatar, ferramenta Link, plano de fundo.
+
+## [0.24.0] — 2026-10-14 · Versão Windows instalável (w2)
+
+### Adicionado
+- **Instalador para Windows 10 e 11** (`Gera_PDF_Editor-<versão>-windows-x64-instalador.exe`), em
+  português:
+  - instala em Arquivos de Programas, com atalho no menu Iniciar e, se quiser, na área de trabalho;
+  - registra o app para PDF ("Abrir com" e Aplicativos padrão, que o instalador oferece abrir no fim);
+  - aparece em "Aplicativos instalados";
+  - atualiza por cima na mesma pasta e pede para fechar o app se ele estiver aberto;
+  - desinstala só o que instalou, mantendo as configurações do usuário (em `%APPDATA%`).
+- A versão instalada guarda as configurações em `%APPDATA%\Gera PDF Editor`; a portátil continua com
+  a pasta `dados` ao lado do programa.
 
 ## [0.23.0] — 2026-10-14 · Versão Windows portátil e impressão pela janela do sistema (w1)
 
