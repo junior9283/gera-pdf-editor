@@ -22,6 +22,12 @@ cp "target/$TARGET/release/gera-pdf-editor.exe" "$APP/GeraPDFEditor.exe"
 copy_licenses "$APP/licencas" LICENSE.txt
 # dados de idioma do OCR: o app os procura em tessdata\ ao lado do .exe
 copy_tessdata "$APP/tessdata"
+# instalador: a pasta do app, com atalhos, registro para PDF e desinstalador (antes do LEIA-ME,
+# que é só da versão portátil)
+SETUP="dist/Gera_PDF_Editor-$VERSION-windows-x64-instalador.exe"
+makensis -V2 -DVERSION="$VERSION" -DSOURCE="$PWD/$APP" -DOUTFILE="$PWD/$SETUP" \
+  packaging/windows/instalador.nsi
+ls -l "$SETUP"
 # instruções curtas em texto do Windows (CRLF)
 sed 's/$/\r/' > "$APP/LEIA-ME.txt" <<TXT
 Gera PDF Editor $VERSION - versão portátil para Windows 10 e 11 (64 bits)
@@ -41,8 +47,3 @@ ZIP="dist/Gera_PDF_Editor-$VERSION-windows-x64-portatil.zip"
 rm -f "$ZIP"
 (cd "$STAGE" && zip -qr -9 "$OLDPWD/$ZIP" "Gera PDF Editor")
 ls -l "$ZIP"
-# instalador: a mesma pasta do app, com atalhos, registro para PDF e desinstalador
-SETUP="dist/Gera_PDF_Editor-$VERSION-windows-x64-instalador.exe"
-makensis -V2 -DVERSION="$VERSION" -DSOURCE="$PWD/$APP" -DOUTFILE="$PWD/$SETUP" -DROOT="$PWD" \
-  packaging/windows/instalador.nsi
-ls -l "$SETUP"

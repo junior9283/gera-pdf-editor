@@ -40,7 +40,7 @@ fn base_dir(kind: &str) -> Option<PathBuf> {
 
 /// Marcador que o instalador do Windows põe ao lado do .exe: a cópia instalada guarda as
 /// configurações sempre em %APPDATA% (o ZIP portátil não tem o marcador).
-pub const INSTALLED_MARKER: &str = "instalado";
+const INSTALLED_MARKER: &str = "instalado";
 
 /// `dados` ao lado do executável, se der para gravar ali (pendrive, pasta do usuário); senão
 /// `fallback` (Arquivos de Programas, mídia somente leitura, cópia instalada).

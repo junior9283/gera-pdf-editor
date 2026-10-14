@@ -1,23 +1,17 @@
 ; Instalador do Gera PDF Editor para Windows 10/11 (64 bits), gerado pelo makensis no Linux:
-;   makensis -DVERSION=0.24.0 -DSOURCE=<pasta do app> -DOUTFILE=<instalador.exe> -DROOT=<repositório> instalador.nsi
+;   makensis -DVERSION=0.24.0 -DSOURCE=<pasta do app> -DOUTFILE=<instalador.exe> instalador.nsi
 ; Instala em Arquivos de Programas (com administrador), cria atalhos, registra o app para PDF
 ; ("Abrir com" e Aplicativos padrão) e entra em "Aplicativos instalados". Desinstalar mantém as
 ; configurações do usuário (%APPDATA%\Gera PDF Editor).
 Unicode true
 SetCompressor /SOLID lzma
+SetCompressorDictSize 64
 
-!ifndef VERSION
-  !error "use -DVERSION=... -DSOURCE=... -DOUTFILE=... -DROOT=..."
+!ifndef VERSION | SOURCE | OUTFILE
+  !error "use -DVERSION=... -DSOURCE=<pasta do app> -DOUTFILE=<instalador.exe>"
 !endif
-!ifndef SOURCE
-  !error "falta -DSOURCE (a pasta do app montada pelo build-windows.sh)"
-!endif
-!ifndef OUTFILE
-  !error "falta -DOUTFILE"
-!endif
-!ifndef ROOT
-  !error "falta -DROOT (a raiz do repositório)"
-!endif
+; o makensis compila de dentro da pasta deste script: a raiz do repositório fica duas acima
+!define ROOT "../.."
 
 !include "MUI2.nsh"
 !include "x64.nsh"
@@ -29,6 +23,12 @@ SetCompressor /SOLID lzma
 !define APPKEY "Software\${APP}"
 !define UNKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\GeraPDFEditor"
 !define URL "https://github.com/junior9283/gera-pdf-editor"
+!define EXEPATH "$INSTDIR\${EXE}"
+!define OPENCMD '"$INSTDIR\${EXE}" "%1"'
+!define UNINST "$INSTDIR\Desinstalar.exe"
+!define APPPATHS "Software\Microsoft\Windows\CurrentVersion\App Paths\${EXE}"
+; o mesmo nome de app-state/src/store.rs (INSTALLED_MARKER): com ele, as configurações vão para %APPDATA%
+!define MARKER "instalado"
 
 Name "${APP}"
 OutFile "${OUTFILE}"
@@ -44,11 +44,10 @@ VIAddVersionKey /LANG=1046 "FileVersion" "${VERSION}"
 VIAddVersionKey /LANG=1046 "ProductVersion" "${VERSION}"
 VIAddVersionKey /LANG=1046 "LegalCopyright" "AGPL-3.0"
 
-!define MUI_ICON "${ROOT}\packaging\icons\gera-pdf-editor.ico"
-!define MUI_UNICON "${ROOT}\packaging\icons\gera-pdf-editor.ico"
+!define MUI_ICON "${ROOT}/packaging/icons/gera-pdf-editor.ico"
+!define MUI_UNICON "${ROOT}/packaging/icons/gera-pdf-editor.ico"
 !define MUI_ABORTWARNING
-!define MUI_WELCOMEFINISHPAGE_BITMAP "${ROOT}\packaging\windows\assistente.bmp"
-!define MUI_UNWELCOMEFINISHPAGE_BITMAP "${ROOT}\packaging\windows\assistente.bmp"
+!define MUI_WELCOMEFINISHPAGE_BITMAP "${ROOT}/packaging/windows/assistente.bmp"
 !define MUI_COMPONENTSPAGE_SMALLDESC
 ; o app abre sem a elevação do instalador (pelo Explorer): arrastar arquivos para a janela
 ; continua funcionando
@@ -62,7 +61,7 @@ VIAddVersionKey /LANG=1046 "LegalCopyright" "AGPL-3.0"
 !define MUI_FINISHPAGE_SHOWREADME_FUNCTION DefaultApps
 
 !insertmacro MUI_PAGE_WELCOME
-!insertmacro MUI_PAGE_LICENSE "${ROOT}\LICENSE"
+!insertmacro MUI_PAGE_LICENSE "${ROOT}/LICENSE"
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
@@ -87,7 +86,7 @@ Function un.onInit
 FunctionEnd
 
 Function OpenApp
-  Exec '"$WINDIR\explorer.exe" "$INSTDIR\${EXE}"'
+  Exec '"$WINDIR\explorer.exe" "${EXEPATH}"'
 FunctionEnd
 
 Function DefaultApps
@@ -97,25 +96,24 @@ FunctionEnd
 Section "${APP} (obrigatório)" SecApp
   SectionIn RO
   SetOutPath "$INSTDIR"
-  ; o LEIA-ME é o da versão portátil (pasta "dados"): não serve para a instalada
-  File /r /x "LEIA-ME.txt" "${SOURCE}\*.*"
-  ; marcador: a cópia instalada guarda as configurações em %APPDATA%
-  FileOpen $0 "$INSTDIR\instalado" w
+  ; o que build-windows.sh monta (o desinstalador remove a mesma lista)
+  File /r "${SOURCE}\*.*"
+  FileOpen $0 "$INSTDIR\${MARKER}" w
   FileClose $0
-  WriteUninstaller "$INSTDIR\Desinstalar.exe"
-  CreateShortcut "$SMPROGRAMS\${APP}.lnk" "$INSTDIR\${EXE}"
+  WriteUninstaller "${UNINST}"
+  CreateShortcut "$SMPROGRAMS\${APP}.lnk" "${EXEPATH}"
 
   WriteRegStr HKLM "${APPKEY}" "InstallDir" "$INSTDIR"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\App Paths\${EXE}" "" "$INSTDIR\${EXE}"
+  WriteRegStr HKLM "${APPPATHS}" "" "${EXEPATH}"
 
   ; PDF: ProgID, "Abrir com" e Aplicativos padrão (o modelo recomendado pela Microsoft)
   WriteRegStr HKLM "Software\Classes\${PROGID}" "" "Documento PDF"
   WriteRegStr HKLM "Software\Classes\${PROGID}\DefaultIcon" "" "$INSTDIR\${EXE},0"
-  WriteRegStr HKLM "Software\Classes\${PROGID}\shell\open\command" "" '"$INSTDIR\${EXE}" "%1"'
+  WriteRegStr HKLM "Software\Classes\${PROGID}\shell\open\command" "" '${OPENCMD}'
   WriteRegStr HKLM "Software\Classes\.pdf\OpenWithProgids" "${PROGID}" ""
   WriteRegStr HKLM "Software\Classes\Applications\${EXE}" "FriendlyAppName" "${APP}"
   WriteRegStr HKLM "Software\Classes\Applications\${EXE}\SupportedTypes" ".pdf" ""
-  WriteRegStr HKLM "Software\Classes\Applications\${EXE}\shell\open\command" "" '"$INSTDIR\${EXE}" "%1"'
+  WriteRegStr HKLM "Software\Classes\Applications\${EXE}\shell\open\command" "" '${OPENCMD}'
   WriteRegStr HKLM "${APPKEY}\Capabilities" "ApplicationName" "${APP}"
   WriteRegStr HKLM "${APPKEY}\Capabilities" "ApplicationDescription" "Editor de PDF livre e de código aberto"
   WriteRegStr HKLM "${APPKEY}\Capabilities\FileAssociations" ".pdf" "${PROGID}"
@@ -128,19 +126,19 @@ Section "${APP} (obrigatório)" SecApp
   WriteRegStr HKLM "${UNKEY}" "DisplayIcon" "$INSTDIR\${EXE},0"
   WriteRegStr HKLM "${UNKEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "${UNKEY}" "URLInfoAbout" "${URL}"
-  WriteRegStr HKLM "${UNKEY}" "UninstallString" '"$INSTDIR\Desinstalar.exe"'
-  WriteRegStr HKLM "${UNKEY}" "QuietUninstallString" '"$INSTDIR\Desinstalar.exe" /S'
+  WriteRegStr HKLM "${UNKEY}" "UninstallString" '"${UNINST}"'
+  WriteRegStr HKLM "${UNKEY}" "QuietUninstallString" '"${UNINST}" /S'
   WriteRegDWORD HKLM "${UNKEY}" "NoModify" 1
   WriteRegDWORD HKLM "${UNKEY}" "NoRepair" 1
   ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
   WriteRegDWORD HKLM "${UNKEY}" "EstimatedSize" $0
 
   ; o Explorer relê as associações (ícone dos PDF)
-  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
+  ${RefreshShellIcons}
 SectionEnd
 
 Section "Atalho na área de trabalho" SecDesktop
-  CreateShortcut "$DESKTOP\${APP}.lnk" "$INSTDIR\${EXE}"
+  CreateShortcut "$DESKTOP\${APP}.lnk" "${EXEPATH}"
 SectionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
@@ -149,10 +147,11 @@ SectionEnd
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 Section "Uninstall"
-  ; só o que o instalador pôs (nunca a pasta inteira, caso o usuário tenha escolhido uma pasta comum)
-  Delete "$INSTDIR\${EXE}"
-  Delete "$INSTDIR\instalado"
-  Delete "$INSTDIR\Desinstalar.exe"
+  ; só o que o instalador pôs (a pasta montada por build-windows.sh; nunca a pasta inteira, caso
+  ; o usuário tenha escolhido uma pasta comum)
+  Delete "${EXEPATH}"
+  Delete "$INSTDIR\${MARKER}"
+  Delete "${UNINST}"
   RMDir /r "$INSTDIR\tessdata"
   RMDir /r "$INSTDIR\licencas"
   RMDir "$INSTDIR"
@@ -164,8 +163,8 @@ Section "Uninstall"
   DeleteRegKey HKLM "Software\Classes\Applications\${EXE}"
   DeleteRegValue HKLM "Software\RegisteredApplications" "${APP}"
   DeleteRegKey HKLM "${APPKEY}"
-  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\App Paths\${EXE}"
+  DeleteRegKey HKLM "${APPPATHS}"
   DeleteRegKey HKLM "${UNKEY}"
-  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
+  ${un.RefreshShellIcons}
   ; as configurações do usuário (%APPDATA%\Gera PDF Editor) ficam, como no Acrobat
 SectionEnd
