@@ -1190,8 +1190,8 @@ impl DocTab {
     /// Caminho sugerido no Salvar como: o próprio arquivo, ou, para um anexo aberto, o nome dele
     /// na pasta pessoal (a cópia na pasta privada não é lugar para guardar).
     pub fn save_suggestion(&self) -> PathBuf {
-        match (&self.attachment_name, std::env::var_os("HOME")) {
-            (Some(name), Some(home)) => PathBuf::from(home).join(name),
+        match (&self.attachment_name, app_state::store::home_dir()) {
+            (Some(name), Some(home)) => home.join(name),
             _ => self.path.clone(),
         }
     }

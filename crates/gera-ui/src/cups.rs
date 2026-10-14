@@ -26,7 +26,6 @@ fn parse_list(out: &str) -> Vec<String> {
         .collect()
 }
 
-
 /// Impressoras do CUPS e a padrão (lista vazia se o CUPS não estiver disponível).
 pub fn printers() -> (Vec<String>, Option<String>) {
     let lpstat = program("GERA_LPSTAT", "lpstat");

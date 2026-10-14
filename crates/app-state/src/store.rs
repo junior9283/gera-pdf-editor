@@ -6,23 +6,66 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 const APP_DIR: &str = "gera-pdf-editor";
 
-/// Arquivo `name` na pasta de configuração do app (`$XDG_CONFIG_HOME` ou `~/.config`).
-pub fn config_file(name: &str) -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join(APP_DIR).join(name))
+/// Pasta base de `kind` ("config" ou "cache"). Com `$XDG_CONFIG_HOME`/`$XDG_CACHE_HOME`
+/// definidos, eles mandam (também nos testes). No Linux, `~/.config` ou `~/.cache`; no Windows, a
+/// versão portátil guarda em `dados\` ao lado do .exe, ou em `%APPDATA%\Gera PDF Editor` se
+/// a pasta do .exe não for gravável.
+fn base_dir(kind: &str) -> Option<PathBuf> {
+    let xdg = if kind == "config" {
+        "XDG_CONFIG_HOME"
+    } else {
+        "XDG_CACHE_HOME"
+    };
+    if let Some(dir) = std::env::var_os(xdg).filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(dir).join(APP_DIR));
+    }
+    #[cfg(windows)]
+    {
+        let fallback =
+            std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Gera PDF Editor"));
+        let exe = std::env::current_exe().ok()?;
+        Some(portable_base(exe.parent()?, fallback)?.join(kind))
+    }
+    #[cfg(not(windows))]
+    {
+        let home = PathBuf::from(std::env::var_os("HOME")?);
+        Some(home.join(format!(".{kind}")).join(APP_DIR))
+    }
 }
 
-/// PDF novo criado pelo app (Criar PDF, abrir imagem) na pasta de documentos criados
-/// (`$XDG_CACHE_HOME` ou `~/.cache`): "<stem>.pdf", "<stem> (2).pdf"…, sem sobrescrever.
-pub fn created_pdf(stem: &str) -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
+/// `dados` ao lado do executável, se der para gravar ali (pendrive, pasta do usuário); senão
+/// `fallback` (Arquivos de Programas, mídia somente leitura).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn portable_base(exe_dir: &Path, fallback: Option<PathBuf>) -> Option<PathBuf> {
+    let dir = exe_dir.join("dados");
+    let probe = dir.join(".gravavel");
+    let writable = std::fs::create_dir_all(&dir).is_ok()
+        && std::fs::write(&probe, b"").is_ok()
+        && std::fs::remove_file(&probe).is_ok();
+    if writable {
+        Some(dir)
+    } else {
+        fallback
+    }
+}
+
+/// Pasta pessoal do usuário (`HOME`; no Windows, `USERPROFILE`).
+pub fn home_dir() -> Option<PathBuf> {
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(var)
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-    let dir = base.join(APP_DIR).join("criados");
+}
+
+/// Arquivo `name` na pasta de configuração do app.
+pub fn config_file(name: &str) -> Option<PathBuf> {
+    Some(base_dir("config")?.join(name))
+}
+
+/// PDF novo criado pelo app (Criar PDF, abrir imagem) na pasta de documentos criados (no cache):
+/// "<stem>.pdf", "<stem> (2).pdf"…, sem sobrescrever.
+pub fn created_pdf(stem: &str) -> Option<PathBuf> {
+    let dir = base_dir("cache")?.join("criados");
     std::fs::create_dir_all(&dir).ok()?;
     let first = dir.join(format!("{stem}.pdf"));
     if !first.exists() {
@@ -133,6 +176,34 @@ impl Drop for BackgroundSaver {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn portable_dir_next_to_exe() {
+        let exe = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let base = portable_base(exe.path(), Some(other.path().to_path_buf())).unwrap();
+        assert_eq!(base, exe.path().join("dados"));
+        assert!(base.is_dir());
+        assert_eq!(
+            std::fs::read_dir(&base).unwrap().count(),
+            0,
+            "o teste de escrita não fica"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn falls_back_when_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let exe = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(exe.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let base = portable_base(exe.path(), Some(other.path().join("Gera PDF Editor")));
+        std::fs::set_permissions(exe.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(base, Some(other.path().join("Gera PDF Editor")));
+        assert!(!exe.path().join("dados").exists());
+    }
+
     use super::*;
 
     #[test]
