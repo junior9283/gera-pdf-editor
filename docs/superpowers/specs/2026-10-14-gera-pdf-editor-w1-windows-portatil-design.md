@@ -114,3 +114,47 @@ que roda em container neste PC (acesso por SSH). Versão alvo 0.23.0. Entra no r
     (número de páginas e conteúdo);
   - a pasta `dados\` criada ao lado do `.exe`, sem nada em `%APPDATA%`.
 - **Medidas no Windows**: tamanho do ZIP e do `.exe`, tempo de abertura e memória.
+
+## Decisões tomadas na execução
+
+1. **libstdc++ estática.** O `mupdf-sys` pede a `stdc++` como biblioteca dinâmica, e o rustc mantém o
+   modo dinâmico mesmo com `-static`. O `build.rs` do pdf-core põe uma pasta com só a
+   `libstdc++.a` antes das do compilador. Vale para o app e para os testes: nenhum `.exe` depende de
+   DLL do MinGW. O `.cargo/config.toml` liga o resto com `+crt-static`.
+2. **Abrir pela memória no Windows.** O Windows não deixa substituir um arquivo aberto, e o MuPDF o
+   mantém aberto. No Windows, o PDF é lido para a memória ao abrir (pico de 2× o tamanho do arquivo
+   durante a abertura), e o Salvar grava por cima. O `sync` abre o temporário para escrita, porque
+   o flush do Windows exige isso. No Linux o arquivo continua aberto pelo MuPDF, e nomes que não
+   são UTF-8 abrem como bytes.
+3. **Janela maximizada no Windows**, como o Acrobat, sem tamanho inicial (os dois juntos deixavam a
+   janela "maximizada" com 1100 px).
+4. **Caminho canônico** pelo `dunce`, que tira o `\\?\` só quando é seguro.
+5. **Pasta portátil** resolvida uma vez por execução (o teste de gravação não se repete).
+6. **Impressão pela janela do sistema** (decisão 4a), conforme a execução:
+   - **Windows** (`PrintDlgEx`):
+     - a janela do app é a dona;
+     - DEVMODE inicial com a orientação da primeira página;
+     - páginas das miniaturas pré-selecionadas;
+     - cópias e agrupar feitos pelo app (com o DEVMODE em 1 cópia), porque a flag que deixa isso
+       com o driver desabilita as cópias nos drivers que não as fazem.
+   - **Desenho no Windows**:
+     - cada página tem a sua lista de desenho e é rasterizada em faixas de 512 linhas, em BGRA
+       direto num DIB de 32 bits, até 600 ppp;
+     - a página deitada na folha em pé (ou o contrário) gira 90° no sentido anti-horário
+       (retrato/paisagem automático do Acrobat).
+   - **Linux** (portal):
+     - `page-ranges` contadas a partir de 0, como o GtkPrintSettings;
+     - espera de até 10 minutos pela resposta;
+     - nos testes E2E, o D-Bus aponta para um endereço inexistente, para não abrir a janela do KDE
+       na tela real.
+7. **Sem o módulo `print_layout`**: com a janela do sistema, o app só ajusta e centraliza uma página
+   por folha; páginas por folha e ordem são do driver.
+8. **Desempenho no Windows fora das metas** (pedido do dono em 14/10: "não se preocupe com as
+   métricas de desempenho no Windows"). Na VM sem placa de vídeo: abertura de 0,7 a 0,9 s e working
+   set de 93 MB; o teste de tempo `hostile_pages_finish_quickly` leva 4,0 s, acima do limite de 3 s.
+   As metas valem para o Linux.
+9. **Ambiente de teste**:
+   - a VM não tem "Microsoft Print to PDF" (a ativação pede reinicialização);
+   - a "Adobe PDF" está com a licença expirada;
+   - os testes de impressão usam a impressora "Gera Teste" (driver IPP de classe, porta `FILE:`),
+     criada só para isso.
