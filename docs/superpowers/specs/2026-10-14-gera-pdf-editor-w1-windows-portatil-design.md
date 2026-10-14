@@ -49,6 +49,21 @@ que roda em container neste PC (acesso por SSH). Versão alvo 0.23.0. Entra no r
    - cópias, frente e verso e orientação vão no `DEVMODE`;
    - páginas por folha, ajuste e ordem saem de uma montagem de folhas pura, em app-state, com
      testes, usada só no Windows (no Linux, o CUPS faz isso).
+4a. **Impressão pela janela do sistema** (pedido do dono em 14/10, durante a etapa: "mude a
+   impressão para que seja pela janela do sistema operacional, tanto para Windows quanto para
+   Linux"). Arquivo ▸ Imprimir não abre mais o diálogo do app:
+   - **Windows**: a janela padrão "Imprimir" (`PrintDlgEx`), já com a orientação da primeira
+     página. A impressora, as páginas (todas, a atual ou intervalos), as cópias, o agrupamento e
+     as Preferências do driver (frente e verso, cor, páginas por folha do driver) vêm dela. O
+     app desenha cada página ajustada à área imprimível (decisão 4), com o DEVMODE escolhido.
+   - **Linux**: a janela do portal de impressão (`org.freedesktop.portal.Print`, a mesma do KDE
+     e do GNOME). Ela escolhe a impressora e as opções, e o app manda o PDF (com as marcações)
+     para o sistema imprimir.
+   - **Reserva**: sem o portal (ambiente mínimo, sem D-Bus), abre o diálogo do app com o CUPS,
+     como antes.
+   - As opções que só o diálogo do app tinha (páginas por folha do app, ordem inversa, só
+     documento sem marcações) passam a ser as do sistema ou do driver. Custo: no Windows sem
+     driver com "páginas por folha", essa opção não existe.
 5. **Espaço livre em disco** por `GetDiskFreeSpaceExW`.
 6. **Integração com a área de trabalho** do Linux (`.desktop`, ícones em `~/.local/share`) não
    existe no Windows. O app portátil não associa `.pdf` sozinho: o usuário abre por "Abrir com"
