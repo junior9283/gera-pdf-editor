@@ -128,7 +128,7 @@ fn content_box_of_a_giant_page_does_not_allocate_the_page() {
 fn a_band_matches_the_same_rows_of_the_full_page() {
     let (_dir, d) = doc(1, 0);
     let full = d.render(0, 1.5, false).unwrap();
-    let r = d.band_renderer(0, 1.5).unwrap();
+    let r = d.band_renderer(0, 1.5, false).unwrap();
     assert_eq!(r.size(), (full.width, full.height));
     let (h, bgra) = r.band_bgra(100, 64).unwrap();
     assert_eq!((h, bgra.len()), (64, full.width as usize * 64 * 4));
@@ -149,4 +149,7 @@ fn a_band_matches_the_same_rows_of_the_full_page() {
     assert_eq!(r.band_bgra(full.height - 10, 64).unwrap().0, 10);
     assert!(r.band_bgra(full.height, 64).is_err());
     assert!(r.band_bgra(0, 0).is_err());
+    // girada: largura e altura trocam
+    let turned = d.band_renderer(0, 1.5, true).unwrap();
+    assert_eq!(turned.size(), (full.height, full.width));
 }

@@ -3,6 +3,21 @@
 use crate::print_job::PrintKind;
 use std::sync::mpsc::{channel, Receiver};
 
+/// A janela do app (HWND), dona da janela "Imprimir": fica desabilitada enquanto ela está aberta.
+#[cfg(windows)]
+static OWNER: std::sync::OnceLock<isize> = std::sync::OnceLock::new();
+
+/// Guarda a janela do app (chamado ao criar o app).
+#[cfg(windows)]
+pub fn set_owner(cc: &eframe::CreationContext<'_>) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    if let Ok(handle) = cc.window_handle() {
+        if let RawWindowHandle::Win32(w) = handle.as_raw() {
+            let _ = OWNER.set(w.hwnd.get());
+        }
+    }
+}
+
 /// Páginas já escolhidas (1-based), como nas miniaturas: [(1, 3), (7, 7)].
 pub type Preset = Option<Vec<(u32, u32)>>;
 
@@ -31,11 +46,11 @@ pub fn ask(
     let ctx = ctx.clone();
     #[cfg(windows)]
     let show = {
-        // a janela do app é a dona da janela de impressão (fica desabilitada enquanto ela está
-        // aberta)
-        // SAFETY: só lê a janela ativa desta thread (a do app)
-        let owner =
-            unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow() } as isize;
+        // a janela do app; sem ela (não deveria acontecer), a janela ativa desta thread
+        let owner = OWNER.get().copied().unwrap_or_else(|| {
+            // SAFETY: só lê a janela ativa desta thread (a do app)
+            unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow() as isize }
+        });
         let _ = title;
         move || windows(owner, total, landscape, preset)
     };
@@ -65,8 +80,7 @@ fn windows(owner: isize, total: usize, landscape: bool, preset: Preset) -> Outco
 #[cfg(target_os = "linux")]
 fn portal(title: &str, preset: Preset) -> Outcome {
     use crate::portal_print::{prepare, session, Prepared};
-    let ranges = preset.as_deref().map(crate::thumbnails::ranges_text);
-    match session().and_then(|conn| prepare(&conn, title, ranges.as_deref())) {
+    match session().and_then(|conn| prepare(&conn, title, preset.as_deref())) {
         Ok(Prepared::Token(token)) => Outcome::Chosen(PrintKind::Portal {
             token,
             title: title.to_string(),

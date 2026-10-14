@@ -55,19 +55,41 @@ fn call(
     options.insert("handle_token", Value::from(handle.clone()));
     options.insert("modal", Value::from(true));
     body(options).map_err(|e| format!("{method}: {e}"))?;
-    let msg = responses.next().ok_or("o portal não respondeu")?;
+    // a resposta chega quando o usuário fecha a janela; um portal travado não prende o app
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(responses.next());
+    });
+    let msg = rx
+        .recv_timeout(std::time::Duration::from_secs(600))
+        .ok()
+        .flatten()
+        .ok_or("o portal de impressão não respondeu")?;
     msg.body()
         .deserialize::<(u32, HashMap<String, OwnedValue>)>()
         .map_err(|e| e.to_string())
 }
 
-/// Mostra a janela de impressão do sistema; `ranges` ("1-3,7") já escolhe as páginas.
-pub fn prepare(conn: &Connection, title: &str, ranges: Option<&str>) -> Result<Prepared, String> {
+/// Mostra a janela de impressão do sistema; `ranges` (a partir de 1) já escolhe as páginas.
+pub fn prepare(
+    conn: &Connection,
+    title: &str,
+    ranges: Option<&[(u32, u32)]>,
+) -> Result<Prepared, String> {
     let proxy = Proxy::new(conn, DEST, PATH, IFACE).map_err(|e| e.to_string())?;
     let mut settings: HashMap<&str, Value<'_>> = HashMap::new();
     if let Some(r) = ranges {
+        // como o GtkPrintSettings: páginas contadas a partir de 0 ("0-2,6")
+        let text = r
+            .iter()
+            .map(|&(a, b)| match (a.saturating_sub(1), b.saturating_sub(1)) {
+                (a, b) if a == b => a.to_string(),
+                (a, b) => format!("{a}-{b}"),
+            })
+            .collect::<Vec<_>>()
+            .join(",");
         settings.insert("print-pages", Value::from("ranges"));
-        settings.insert("page-ranges", Value::from(r));
+        settings.insert("page-ranges", Value::from(text));
     }
     let empty: HashMap<&str, Value<'_>> = HashMap::new();
     let (code, results) = call(conn, "PreparePrint", |options| {
@@ -159,14 +181,15 @@ mod tests {
             results.insert("token", Value::from(7u32));
             let code = if title == "cancelar" { 1u32 } else { 0 };
             if code == 0 {
-                // as páginas pedidas chegam como configuração da janela
+                // as páginas pedidas chegam como configuração da janela, contadas a partir de 0
+                // (como o GtkPrintSettings): as páginas 1 a 3 são "0-2"
                 let r: String = settings
                     .get("page-ranges")
                     .unwrap()
                     .clone()
                     .try_into()
                     .unwrap();
-                assert_eq!(r, "1-3");
+                assert_eq!(r, "0-2");
             }
             conn.emit_signal(
                 header.sender().cloned(),
@@ -210,16 +233,28 @@ mod tests {
         }
     }
 
+    /// O dbus-daemon do teste sai mesmo quando uma asserção falha.
+    struct Daemon(std::process::Child);
+
+    impl Drop for Daemon {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
     #[test]
     fn prints_through_the_portal() {
         // barramento próprio do teste (não toca na sessão do usuário)
-        let mut daemon = std::process::Command::new("dbus-daemon")
-            .args(["--session", "--nofork", "--print-address=1"])
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .expect("dbus-daemon");
+        let mut daemon = Daemon(
+            std::process::Command::new("dbus-daemon")
+                .args(["--session", "--nofork", "--print-address=1"])
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("dbus-daemon"),
+        );
         let mut addr = String::new();
-        BufReader::new(daemon.stdout.as_mut().unwrap())
+        BufReader::new(daemon.0.stdout.as_mut().unwrap())
             .read_line(&mut addr)
             .unwrap();
         let addr = addr.trim().to_string();
@@ -242,7 +277,7 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(
-            prepare(&conn, "contrato.pdf", Some("1-3")).unwrap(),
+            prepare(&conn, "contrato.pdf", Some(&[(1, 3)])).unwrap(),
             Prepared::Token(7)
         );
         assert_eq!(
@@ -254,7 +289,5 @@ mod tests {
         std::fs::write(&file, b"%PDF-1.7 teste").unwrap();
         print(&conn, "contrato.pdf", &file, 7).unwrap();
         assert_eq!(*printed.lock().unwrap(), [(7, b"%PDF-1.7 teste".to_vec())]);
-        let _ = daemon.kill();
-        let _ = daemon.wait();
     }
 }

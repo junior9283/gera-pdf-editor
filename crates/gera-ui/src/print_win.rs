@@ -92,6 +92,8 @@ pub struct WinChoice {
     pub devmode: Vec<u8>,
     pub pages: WinPages,
     pub copies: u16,
+    /// Agrupar: as cópias saem como documentos inteiros (1, 2, 3, 1, 2, 3).
+    pub collate: bool,
 }
 
 /// DEVMODE atual de `printer` (o padrão do driver), com a orientação pedida.
@@ -145,7 +147,9 @@ pub fn ask(
     preset: Option<Vec<(u32, u32)>>,
 ) -> Result<Option<WinChoice>, String> {
     use windows_sys::Win32::Foundation::{GlobalFree, HGLOBAL};
-    use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+    use windows_sys::Win32::System::Com::{
+        CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
+    };
     use windows_sys::Win32::System::Memory::{
         GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
     };
@@ -170,8 +174,17 @@ pub fn ask(
         if let Some(name) = default_printer() {
             if let Some(dm) = default_devmode(&name, landscape) {
                 hdevmode = GlobalAlloc(GMEM_MOVEABLE, dm.len());
-                if !hdevmode.is_null() {
-                    let p = GlobalLock(hdevmode).cast::<u8>();
+                let p = if hdevmode.is_null() {
+                    std::ptr::null_mut()
+                } else {
+                    GlobalLock(hdevmode).cast::<u8>()
+                };
+                if p.is_null() {
+                    if !hdevmode.is_null() {
+                        GlobalFree(hdevmode);
+                    }
+                    hdevmode = std::ptr::null_mut();
+                } else {
                     std::ptr::copy_nonoverlapping(dm.as_ptr(), p, dm.len());
                     GlobalUnlock(hdevmode);
                 }
@@ -181,9 +194,9 @@ pub fn ask(
         pd.lStructSize = std::mem::size_of::<PRINTDLGEXW>() as u32;
         pd.hwndOwner = owner as _;
         pd.hDevMode = hdevmode;
-        pd.Flags = PD_USEDEVMODECOPIESANDCOLLATE
-            | PD_NOSELECTION
-            | if n > 0 { PD_PAGENUMS } else { PD_ALLPAGES };
+        // as cópias e o agrupar ficam com o app (com a flag de usar os do DEVMODE, a janela
+        // desabilita as cópias quando o driver não as faz)
+        pd.Flags = PD_NOSELECTION | if n > 0 { PD_PAGENUMS } else { PD_ALLPAGES };
         pd.nPageRanges = n as u32;
         pd.nMaxPageRanges = MAX_RANGES as u32;
         pd.lpPageRanges = ranges.as_mut_ptr();
@@ -192,6 +205,7 @@ pub fn ask(
         pd.nCopies = 1;
         pd.nStartPage = START_PAGE_GENERAL;
         let hr = PrintDlgExW(&mut pd);
+        CoUninitialize();
         let result = if hr < 0 {
             Err(format!(
                 "a janela de impressão do Windows falhou (0x{:08X})",
@@ -235,6 +249,7 @@ pub fn ask(
                 devmode,
                 pages,
                 copies: pd.nCopies.clamp(1, 999) as u16,
+                collate: pd.Flags & PD_COLLATE != 0,
             }))
         };
         for h in [pd.hDevMode, pd.hDevNames] {
@@ -290,12 +305,20 @@ fn print_file(
         |n| n.to_string_lossy().into_owned(),
     );
     dc.start(&name, output)?;
-    // uma página por folha, ajustada à área imprimível (páginas por folha: as do driver)
-    for _ in 0..choice.copies.max(1) {
-        for &page in &pages {
-            let size = doc.page_size(page as i32).map_err(|e| e.to_string())?;
-            dc.page(|dc| dc.draw(&doc, page as i32, (size.width, size.height)))?;
-        }
+    // uma página por folha, ajustada à área imprimível (páginas por folha: as do driver); as
+    // cópias agrupadas repetem o documento, as outras repetem cada página
+    let copies = usize::from(choice.copies.max(1));
+    let order: Vec<usize> = if choice.collate {
+        (0..copies).flat_map(|_| pages.iter().copied()).collect()
+    } else {
+        pages
+            .iter()
+            .flat_map(|&p| std::iter::repeat_n(p, copies))
+            .collect()
+    };
+    for page in order {
+        let size = doc.page_size(page as i32).map_err(|e| e.to_string())?;
+        dc.page(|dc| dc.draw(&doc, page as i32, (size.width, size.height)))?;
     }
     dc.end()?;
     Ok(String::new())
@@ -325,6 +348,15 @@ impl PrinterDc {
                     buf.as_mut_ptr().cast::<u8>(),
                     devmode.len(),
                 );
+            }
+            // as cópias são feitas pelo app: o driver imprime uma
+            if devmode.len() >= std::mem::offset_of!(DEVMODEW, dmColor) {
+                // SAFETY: o buffer cobre os campos públicos até dmCopies
+                unsafe {
+                    let d = &mut *buf.as_mut_ptr().cast::<DEVMODEW>();
+                    d.dmFields |= DM_COPIES;
+                    d.Anonymous1.Anonymous1.dmCopies = 1;
+                }
             }
             buf.as_ptr().cast::<DEVMODEW>()
         } else {
@@ -391,7 +423,11 @@ impl PrinterDc {
     /// rasterizada em faixas na resolução da impressora (no máximo `MAX_DPI`).
     fn draw(&mut self, doc: &pdf_core::PdfDoc, page: i32, size: (f32, f32)) -> Result<(), String> {
         use windows_sys::Win32::Graphics::Gdi::*;
-        let (pw, ph) = (size.0.max(1.0), size.1.max(1.0));
+        // retrato/paisagem automático, como o Acrobat: a página deitada na folha em pé (ou o
+        // contrário) é girada para ocupar a folha
+        let turn = (size.0 > size.1) != (self.size.0 > self.size.1) && size.0 != size.1;
+        let (pw, ph) = if turn { (size.1, size.0) } else { size };
+        let (pw, ph) = (pw.max(1.0), ph.max(1.0));
         // escala que cabe na área imprimível, em pontos do papel por ponto da página
         let fit = (self.size.0 * 72.0 / self.dpi.0 / pw).min(self.size.1 * 72.0 / self.dpi.1 / ph);
         // destino em pixels do dispositivo (a origem do DC é o canto da área imprimível)
@@ -400,7 +436,7 @@ impl PrinterDc {
         let dx = ((self.size.0 - dw) / 2.0).round() as i32;
         let dy = ((self.size.1 - dh) / 2.0).round() as i32;
         let renderer = doc
-            .band_renderer(page, fit * self.dpi.0.min(MAX_DPI) / 72.0)
+            .band_renderer(page, fit * self.dpi.0.min(MAX_DPI) / 72.0, turn)
             .map_err(|e| e.to_string())?;
         let (bw, total_h) = renderer.size();
         // SAFETY: DC válido; o modo de ampliação só afeta este DC
@@ -505,7 +541,8 @@ mod tests {
             devmode: default_devmode(&wide(&printer), true).unwrap(),
             printer,
             pages: WinPages::Ranges(vec![(1, 3)]),
-            copies: 1,
+            copies: 2,
+            collate: true,
         };
         print_file(&choice, &file, 1, out.to_str()).unwrap();
         // o spooler grava o arquivo depois: espera até 60 s
@@ -515,8 +552,38 @@ mod tests {
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
         let printed = pdf_core::PdfDoc::open(&out, None).unwrap();
-        assert_eq!(printed.page_count().unwrap(), 3);
+        assert_eq!(printed.page_count().unwrap(), 6, "3 páginas × 2 cópias");
         let size = printed.page_size(0).unwrap();
         assert!(size.width > size.height, "DEVMODE em paisagem");
+    }
+
+    /// Páginas deitadas numa folha em pé: o app gira cada uma (o resultado é todo em pé, com o
+    /// conteúdo ocupando a folha).
+    #[test]
+    #[ignore = "precisa de uma impressora que grave em arquivo (rodar no Windows)"]
+    fn landscape_pages_are_turned_on_portrait_paper() {
+        let printer = std::env::var("GERA_TEST_PRINTER").unwrap_or("Microsoft Print to PDF".into());
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("deitado.pdf");
+        std::fs::write(&file, pdf_core::sample::sample_pdf(2, 90)).unwrap();
+        let out = dir.path().join("saída.pdf");
+        let choice = WinChoice {
+            devmode: default_devmode(&wide(&printer), false).unwrap(),
+            printer,
+            pages: WinPages::All,
+            copies: 1,
+            collate: false,
+        };
+        print_file(&choice, &file, 1, out.to_str()).unwrap();
+        let t = std::time::Instant::now();
+        while pdf_core::PdfDoc::open(&out, None).is_err() && t.elapsed().as_secs() < 60 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let printed = pdf_core::PdfDoc::open(&out, None).unwrap();
+        assert_eq!(printed.page_count().unwrap(), 2);
+        let size = printed.page_size(0).unwrap();
+        assert!(size.width < size.height, "folha em pé");
+        std::fs::copy(&out, "C:\\gera\\girado.pdf").unwrap();
     }
 }

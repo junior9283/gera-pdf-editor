@@ -546,8 +546,11 @@ impl PdfDoc {
                 (ops.into_bytes(), res, [0.0, 0.0, up.width, up.height])
             }
             WatermarkSource::PdfPage { path, page } => {
-                let src = PdfDocument::open(crate::doc::utf8_path(path)?)
-                    .map_err(|e| refused(format!("não foi possível abrir o PDF: {e}")))?;
+                #[cfg(windows)]
+                let src = PdfDocument::open(crate::doc::utf8_path(path)?);
+                #[cfg(not(windows))]
+                let src = PdfDocument::open(path.as_path());
+                let src = src.map_err(|e| refused(format!("não foi possível abrir o PDF: {e}")))?;
                 if src.needs_password()? {
                     return Err(refused("o PDF escolhido é protegido por senha"));
                 }

@@ -74,6 +74,8 @@ impl GeraApp {
         bench: Option<Bench>,
     ) -> Self {
         crate::print_job::sweep();
+        #[cfg(windows)]
+        crate::system_print::set_owner(cc);
         let prefs = store::config_file(PREFS_FILE).map_or_else(Prefs::default, |p| Prefs::load(&p));
         cc.egui_ctx.set_visuals(visuals(prefs.dark));
         crate::fill_sign::install_script_font(&cc.egui_ctx);

@@ -1730,6 +1730,7 @@ dependencies = [
  "egui",
  "pdf-core",
  "png",
+ "raw-window-handle",
  "rfd",
  "tempfile",
  "ureq",

@@ -79,9 +79,9 @@ pub(crate) fn open_authenticated(path: &Path, password: Option<&str>) -> Result<
         let bytes = std::fs::read(path).map_err(|e| open(&e))?;
         PdfDocument::from_bytes(&bytes).map_err(|e| open(&e))?
     };
+    // no Linux o caminho são bytes (um nome em Latin-1 também abre)
     #[cfg(not(windows))]
-    let mut inner =
-        PdfDocument::open(utf8_path(path)?).map_err(|e| PdfError::Open(e.to_string()))?;
+    let mut inner = PdfDocument::open(path).map_err(|e| PdfError::Open(e.to_string()))?;
     if inner.needs_password()? {
         match password {
             None => return Err(PdfError::PasswordRequired),
@@ -262,13 +262,17 @@ impl PdfDoc {
 
     /// A página `page` em `scale` pronta para ser rasterizada em faixas (impressão no Windows):
     /// a lista de desenho (com as anotações) é montada uma vez e cada faixa só rasteriza o seu
-    /// recorte.
-    pub fn band_renderer(&self, page: i32, scale: f32) -> Result<BandRenderer> {
+    /// recorte. Com `turn`, a página sai girada 90° no sentido anti-horário (página deitada na
+    /// folha em pé).
+    pub fn band_renderer(&self, page: i32, scale: f32, turn: bool) -> Result<BandRenderer> {
         let page = self.load(page)?;
         if !scale.is_finite() || scale <= 0.0 || scale > MAX_TILE_SCALE {
             return Err(PdfError::InvalidScale(scale));
         }
-        let ctm = Matrix::new_scale(scale, scale);
+        // 90° no sentido anti-horário (o topo da página deitada vai para a esquerda), como as
+        // impressoras fazem com a paisagem
+        let mut ctm = Matrix::new_rotate(if turn { 270.0 } else { 0.0 });
+        ctm.scale(scale, scale);
         let full = page.bounds()?.transform(&ctm).round();
         if full.x1 - full.x0 > 32_768 || full.y1 <= full.y0 {
             return Err(PdfError::InvalidScale(scale));
