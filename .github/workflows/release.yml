@@ -36,3 +36,31 @@ jobs:
           gh release view "$TAG" >/dev/null 2>&1 \
             || gh release create "$TAG" --title "$TAG" --notes "Veja o CHANGELOG.md."
           gh release upload "$TAG" dist/Gera_PDF_Editor-x86_64.AppImage --clobber
+
+  windows:
+    # versão portátil do Windows, compilada no Linux com MinGW-w64 (variante posix: o Tesseract
+    # usa std::thread)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Dependências do sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake pkg-config zip \
+            gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix tesseract-ocr-por tesseract-ocr-eng
+          sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+          sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - run: packaging/build-windows.sh
+      - name: Publicar o ZIP na release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title "$TAG" --notes "Veja o CHANGELOG.md."
+          gh release upload "$TAG" dist/Gera_PDF_Editor-*-windows-x64-portatil.zip --clobber
