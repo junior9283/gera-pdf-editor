@@ -1,25 +1,18 @@
-//! Impressão: as impressoras do sistema (CUPS no Linux, `cups.rs`; GDI no Windows,
-//! `print_win.rs`), a pasta temporária privada e os envios numa thread.
+//! Impressão: a pasta temporária privada e os envios numa thread (portal do Linux,
+//! `portal_print.rs`; CUPS no diálogo do app, `cups.rs`; GDI no Windows, `print_win.rs`).
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
-/// Impressoras do sistema e a padrão (lista vazia se não houver como saber).
-pub fn printers() -> (Vec<String>, Option<String>) {
-    #[cfg(unix)]
-    return crate::cups::printers();
-    #[cfg(windows)]
-    return crate::print_win::printers();
-}
-
-/// Lê as impressoras numa thread (o CUPS ou o spooler podem demorar).
+/// Lê as impressoras do CUPS numa thread (diálogo do app; o CUPS pode demorar).
+#[cfg(unix)]
 pub fn printers_in_background(ctx: &egui::Context) -> Receiver<(Vec<String>, Option<String>)> {
     let (tx, rx) = mpsc::channel();
     let ctx = ctx.clone();
     let _ = std::thread::Builder::new()
         .name("impressoras".into())
         .spawn(move || {
-            let _ = tx.send(printers());
+            let _ = tx.send(crate::cups::printers());
             ctx.request_repaint();
         });
     rx
@@ -158,11 +151,50 @@ pub fn sweep() {
     }
 }
 
-/// Um pedido de impressão: as opções do diálogo e o PDF temporário já exportado.
+/// Como imprimir: o que a janela do sistema escolheu, ou as opções do diálogo do app.
+pub enum PrintKind {
+    /// Diálogo do app (Linux sem portal): o CUPS com as opções.
+    #[cfg(unix)]
+    Cups(app_state::print::PrintOptions),
+    /// Portal de impressão do Linux: o token das opções escolhidas na janela.
+    #[cfg(target_os = "linux")]
+    Portal { token: u32, title: String },
+    /// Janela "Imprimir" do Windows.
+    #[cfg(windows)]
+    Windows(crate::print_win::WinChoice),
+}
+
+impl PrintKind {
+    /// Para onde vai (a mensagem "Enviando para…").
+    pub fn destination(&self) -> String {
+        match self {
+            #[cfg(unix)]
+            Self::Cups(o) => o.printer.clone(),
+            #[cfg(target_os = "linux")]
+            Self::Portal { .. } => "a impressora escolhida".into(),
+            #[cfg(windows)]
+            Self::Windows(c) => c.printer.clone(),
+        }
+    }
+
+    /// Imprime também as marcações (a janela do sistema imprime sempre "Documento e
+    /// marcações", como o padrão do Acrobat).
+    pub fn with_annots(&self) -> bool {
+        match self {
+            #[cfg(unix)]
+            Self::Cups(o) => o.with_annots,
+            #[allow(unreachable_patterns)]
+            _ => true,
+        }
+    }
+}
+
+/// Um pedido de impressão: como imprimir e o PDF temporário já exportado.
 pub struct PrintRequest {
-    pub options: app_state::print::PrintOptions,
+    pub kind: PrintKind,
     /// Página atual (1-based) e total de páginas.
     pub current: usize,
+    #[cfg_attr(windows, allow(dead_code))]
     pub total: usize,
     /// Alguma página é maior que o papel ("Reduzir páginas grandes"; no Windows, a montagem das
     /// folhas compara cada página com o papel).
@@ -184,14 +216,40 @@ impl PrintJobs {
     /// temporário é apagado).
     pub fn start(&mut self, ctx: &egui::Context, req: PrintRequest) -> Result<(), String> {
         let ctx = ctx.clone();
-        let printer = req.options.printer.clone();
-        #[cfg(unix)]
-        let job = crate::cups::job(&req).inspect_err(|_| {
-            let _ = std::fs::remove_file(&req.file);
-        })?;
-        #[cfg(windows)]
-        let job = move || crate::print_win::print(&req);
-        self.spawn(printer, job, move || ctx.request_repaint());
+        let printer = req.kind.destination();
+        let wake = move || ctx.request_repaint();
+        match req.kind {
+            #[cfg(unix)]
+            PrintKind::Cups(ref options) => {
+                let job = crate::cups::job(options, &req).inspect_err(|_| {
+                    let _ = std::fs::remove_file(&req.file);
+                })?;
+                self.spawn(printer, job, wake);
+            }
+            #[cfg(target_os = "linux")]
+            PrintKind::Portal { token, ref title } => {
+                let (title, file) = (title.clone(), req.file.clone());
+                self.spawn(
+                    printer,
+                    move || {
+                        let r = crate::portal_print::session()
+                            .and_then(|c| crate::portal_print::print(&c, &title, &file, token));
+                        let _ = std::fs::remove_file(&file);
+                        r.map(|()| String::new())
+                    },
+                    wake,
+                );
+            }
+            #[cfg(windows)]
+            PrintKind::Windows(choice) => {
+                let (file, current) = (req.file.clone(), req.current);
+                self.spawn(
+                    printer,
+                    move || crate::print_win::print(&choice, &file, current),
+                    wake,
+                );
+            }
+        }
         Ok(())
     }
 

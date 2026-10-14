@@ -16,6 +16,7 @@ pub mod menus;
 pub mod page_props;
 pub mod panels;
 pub mod preferences;
+#[cfg(unix)]
 pub mod print_dialog;
 pub mod properties;
 pub mod protect_dialog;

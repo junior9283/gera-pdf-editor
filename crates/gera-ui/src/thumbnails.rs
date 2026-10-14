@@ -57,9 +57,9 @@ pub fn zoom(width: f32, enlarge: bool) -> f32 {
     w.clamp(*WIDTH_RANGE.start(), *WIDTH_RANGE.end())
 }
 
-/// Páginas (a partir de 0) como faixas do diálogo Imprimir: "1-3, 5".
-pub fn ranges_text(pages: &[i32]) -> String {
-    let mut out: Vec<String> = Vec::new();
+/// Páginas (a partir de 0) como faixas para a janela Imprimir (a partir de 1): [(1, 3), (5, 5)].
+pub fn page_ranges(pages: &[i32]) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
     let mut k = 0;
     while k < pages.len() {
         let start = pages[k];
@@ -68,14 +68,10 @@ pub fn ranges_text(pages: &[i32]) -> String {
             k += 1;
             end = pages[k];
         }
-        out.push(if start == end {
-            format!("{}", start + 1)
-        } else {
-            format!("{}-{}", start + 1, end + 1)
-        });
+        out.push((start.max(0) as u32 + 1, end.max(0) as u32 + 1));
         k += 1;
     }
-    out.join(", ")
+    out
 }
 
 /// Página para onde as setas, Início e Fim levam (a partir da `current`).

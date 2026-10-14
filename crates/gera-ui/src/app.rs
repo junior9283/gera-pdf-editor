@@ -558,7 +558,7 @@ impl GeraApp {
             Command::Compare => self.run_tool(ctx, tools_catalog::COMPARE),
             Command::Print => {
                 if let Some(doc) = self.active_doc() {
-                    doc.open_print_dialog(ctx);
+                    doc.open_print_dialog(ctx, None);
                 }
             }
             Command::Properties => {

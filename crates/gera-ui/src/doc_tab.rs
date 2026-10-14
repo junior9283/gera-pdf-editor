@@ -5,13 +5,14 @@ use crate::edit::{screen_rect, EditState};
 use crate::print_job::{self, PrintJobs};
 use crate::search::SearchState;
 use crate::shell::commands::{self, Command};
+#[cfg(unix)]
 use crate::shell::print_dialog::{PrintChoice, PrintDialog};
 use crate::sidebar::{self, SidebarAction};
 use crate::view::DocView;
 use app_state::layout::ViewMode;
 use app_state::nav::{nav_target, NavKey};
 use app_state::prefs::LeftPanel;
-use app_state::print::{any_oversized, PrintOptions};
+use app_state::print::any_oversized;
 use app_state::transform::PageMap;
 use app_state::zoom::{self, Fit};
 use pdf_core::{AnnotInfo, DocSummary, HistoryState, PdfError, Request, Response, Worker};
@@ -120,7 +121,7 @@ pub enum DocEvent {
 
 /// Impressão esperando a cópia temporária: opções, página atual no clique e o arquivo pedido.
 struct PendingPrint {
-    options: PrintOptions,
+    kind: print_job::PrintKind,
     page: usize,
     file: PathBuf,
 }
@@ -292,10 +293,17 @@ pub struct DocTab {
     /// Propriedades mostradas na janela (aberta enquanto houver).
     properties: Option<crate::shell::properties::PropertiesDialog>,
     /// Diálogo "Imprimir" aberto.
+    /// Diálogo do app (Linux sem portal de impressão).
+    #[cfg(unix)]
     print_dialog: Option<PrintDialog>,
+    /// Janela de impressão do sistema aberta: a resposta chega por aqui; as páginas já
+    /// escolhidas vão também para o diálogo do app, se for ele que abrir.
+    print_ask: Option<Receiver<crate::system_print::Outcome>>,
+    print_preset: Option<Vec<(u32, u32)>>,
     /// Impressão esperando a cópia temporária ficar pronta: opções e a página atual no clique.
     print_pending: Option<PendingPrint>,
     /// Lista de impressoras sendo lida do CUPS em segundo plano.
+    #[cfg(unix)]
     printers_rx: Option<Receiver<(Vec<String>, Option<String>)>>,
     print_jobs: PrintJobs,
     /// Última virada de página pela roda (tempo do egui), para não virar várias de uma vez.
@@ -468,8 +476,12 @@ impl DocTab {
             ocr: None,
             focus_search: false,
             properties: None,
+            #[cfg(unix)]
             print_dialog: None,
+            print_ask: None,
+            print_preset: None,
             print_pending: None,
+            #[cfg(unix)]
             printers_rx: None,
             print_jobs: PrintJobs::default(),
             turned_at: f64::NEG_INFINITY,
@@ -2425,30 +2437,109 @@ impl DocTab {
         egui::Panel::bottom("status").show(ui, |ui| ui.label(text));
     }
 
-    /// Arquivo → Imprimir: abre o diálogo na hora; as impressoras chegam do CUPS em segundo plano.
-    pub fn open_print_dialog(&mut self, ctx: &egui::Context) {
+    /// Arquivo → Imprimir: a janela de impressão do sistema; `preset` já escolhe as páginas
+    /// (Imprimir páginas das miniaturas).
+    pub fn open_print_dialog(&mut self, ctx: &egui::Context, preset: Option<Vec<(u32, u32)>>) {
         if !self.security.permissions.print {
             self.deny("imprimir");
             return;
         }
-        if self.view.is_some() && self.print_pending.is_none() {
-            self.print_dialog = Some(PrintDialog::new(self.last.current_page));
-            self.printers_rx = Some(print_job::printers_in_background(ctx));
+        let Some(view) = self.view.as_ref() else {
+            return;
+        };
+        if self.print_pending.is_some() || self.print_ask.is_some() {
+            return;
+        }
+        let landscape = view.sizes.first().is_some_and(|s| s.width > s.height);
+        let total = view.sizes.len();
+        self.print_preset = preset.clone();
+        self.print_ask = Some(crate::system_print::ask(
+            ctx,
+            self.title(),
+            total,
+            landscape,
+            preset,
+        ));
+    }
+
+    /// Diálogo do app (Linux sem a janela do sistema): as impressoras chegam do CUPS em segundo
+    /// plano.
+    #[cfg(unix)]
+    fn open_app_print_dialog(&mut self, ctx: &egui::Context) {
+        let mut dialog = PrintDialog::new(self.last.current_page);
+        if let Some(pages) = self.print_preset.take() {
+            dialog.options.pages = app_state::print::Pages::Ranges;
+            dialog.options.ranges = pages
+                .iter()
+                .map(|(a, b)| {
+                    if a == b {
+                        a.to_string()
+                    } else {
+                        format!("{a}-{b}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+        }
+        self.print_dialog = Some(dialog);
+        self.printers_rx = Some(print_job::printers_in_background(ctx));
+    }
+
+    /// O diálogo do app aberto (Linux sem a janela do sistema).
+    #[cfg(unix)]
+    fn app_print_dialog(&mut self, ui: &mut egui::Ui) {
+        if let (Some(rx), Some(dialog)) = (&self.printers_rx, self.print_dialog.as_mut()) {
+            if let Ok((list, default)) = rx.try_recv() {
+                dialog.set_printers(list, default);
+                self.printers_rx = None;
+            }
+        }
+        let choice = match (self.print_dialog.as_mut(), self.view.as_mut()) {
+            (Some(dialog), Some(view)) => dialog.show(ui, view, &self.worker),
+            _ => None,
+        };
+        match choice {
+            Some(PrintChoice::Print(options)) => {
+                self.print_dialog = None;
+                self.start_print(print_job::PrintKind::Cups(options));
+            }
+            Some(PrintChoice::Cancel) => self.print_dialog = None,
+            None => {}
         }
     }
 
-    /// Opções escolhidas: o worker grava a cópia temporária; o envio continua em `send_to_printer`.
-    fn start_print(&mut self, options: PrintOptions) {
+    /// A resposta da janela de impressão do sistema.
+    fn poll_print_ask(&mut self, ctx: &egui::Context) {
+        use crate::system_print::Outcome;
+        let Some(outcome) = self.print_ask.as_ref().and_then(|rx| rx.try_recv().ok()) else {
+            return;
+        };
+        self.print_ask = None;
+        match outcome {
+            Outcome::Chosen(kind) => self.start_print(kind),
+            Outcome::Cancelled => {}
+            #[cfg(unix)]
+            Outcome::Unavailable => self.open_app_print_dialog(ctx),
+            #[cfg(windows)]
+            Outcome::Unavailable => {}
+            Outcome::Failed(e) => self.status = format!("Não foi possível imprimir: {e}"),
+        }
+        let _ = ctx;
+    }
+
+    /// Impressão escolhida: o worker grava a cópia temporária; o envio continua em
+    /// `send_to_printer`.
+    fn start_print(&mut self, kind: print_job::PrintKind) {
         self.commit_field();
         match print_job::temp_file() {
             Ok(dest) => {
                 self.worker.send(Request::ExportForPrint {
                     dest: dest.clone(),
-                    with_annots: options.with_annots,
+                    with_annots: kind.with_annots(),
                 });
-                self.status = format!("Preparando a impressão para {}…", options.printer);
+                self.status = format!("Preparando a impressão para {}…", kind.destination());
                 self.print_pending = Some(PendingPrint {
-                    options,
+                    kind,
                     page: self.last.current_page,
                     file: dest,
                 });
@@ -2459,16 +2550,16 @@ impl DocTab {
 
     /// A cópia temporária ficou pronta: monta os argumentos e entrega ao CUPS.
     fn send_to_printer(&mut self, ctx: &egui::Context, file: PathBuf) {
-        let (Some(PendingPrint { options, page, .. }), Some(view)) =
+        let (Some(PendingPrint { kind, page, .. }), Some(view)) =
             (self.print_pending.take(), self.view.as_ref())
         else {
             let _ = std::fs::remove_file(&file);
             return;
         };
-        let printer = options.printer.clone();
+        let printer = kind.destination();
         let req = print_job::PrintRequest {
             oversized: any_oversized(view.sizes.iter().map(|s| (s.width, s.height))),
-            options,
+            kind,
             current: page + 1,
             total: view.sizes.len(),
             file,
@@ -2526,24 +2617,9 @@ impl DocTab {
                 }
             }
         }
-        if let (Some(rx), Some(dialog)) = (&self.printers_rx, self.print_dialog.as_mut()) {
-            if let Ok((list, default)) = rx.try_recv() {
-                dialog.set_printers(list, default);
-                self.printers_rx = None;
-            }
-        }
-        let choice = match (self.print_dialog.as_mut(), self.view.as_mut()) {
-            (Some(dialog), Some(view)) => dialog.show(ui, view, &self.worker),
-            _ => None,
-        };
-        match choice {
-            Some(PrintChoice::Print(options)) => {
-                self.print_dialog = None;
-                self.start_print(options);
-            }
-            Some(PrintChoice::Cancel) => self.print_dialog = None,
-            None => {}
-        }
+        self.poll_print_ask(ui.ctx());
+        #[cfg(unix)]
+        self.app_print_dialog(ui);
         if !self.cert.signatures.is_empty() && self.organize.is_none() {
             let open = egui::Panel::top("assinaturas")
                 .frame(egui::Frame::NONE)
@@ -2825,11 +2901,8 @@ impl DocTab {
                 ThumbAction::Go(page) => self.jump(page, None),
                 ThumbAction::Org(a) => self.org_action(ctx, a),
                 ThumbAction::Print(pages) => {
-                    self.open_print_dialog(ctx);
-                    if let Some(d) = self.print_dialog.as_mut() {
-                        d.options.pages = app_state::print::Pages::Ranges;
-                        d.options.ranges = crate::thumbnails::ranges_text(&pages);
-                    }
+                    let preset = crate::thumbnails::page_ranges(&pages);
+                    self.open_print_dialog(ctx, Some(preset));
                 }
                 ThumbAction::Zoom(width) => self.events.push(DocEvent::ThumbWidth(width)),
                 ThumbAction::CopyTo { pages, target } => self.copy_pages(pages, target),

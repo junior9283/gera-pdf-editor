@@ -1,9 +1,4 @@
-//! Impressão no Windows (GDI): as impressoras do sistema e o envio das folhas.
-use crate::print_job::PrintRequest;
-use windows_sys::Win32::Graphics::Printing::{
-    EnumPrintersW, GetDefaultPrinterW, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL,
-    PRINTER_INFO_4W,
-};
+//! Impressão no Windows: a janela "Imprimir" do sistema e o envio das folhas pelo GDI.
 
 /// Texto UTF-16 terminado em NUL para String.
 fn from_wide(p: *const u16) -> String {
@@ -17,8 +12,13 @@ fn from_wide(p: *const u16) -> String {
     }
 }
 
-/// Impressoras locais e de rede e a padrão do Windows.
+/// Impressoras locais e de rede e a padrão do Windows (o teste de impressão confere a lista).
+#[cfg(test)]
 pub fn printers() -> (Vec<String>, Option<String>) {
+    use windows_sys::Win32::Graphics::Printing::{
+        EnumPrintersW, GetDefaultPrinterW, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL,
+        PRINTER_INFO_4W,
+    };
     let flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS;
     let (mut needed, mut count) = (0u32, 0u32);
     // SAFETY: primeira chamada só mede o tamanho; a segunda escreve no buffer desse tamanho
@@ -62,17 +62,6 @@ pub fn printers() -> (Vec<String>, Option<String>) {
     (list, default)
 }
 
-/// Imprime o pedido (numa thread); apaga o temporário em qualquer caso.
-pub fn print(req: &PrintRequest) -> Result<String, String> {
-    // testes de interface: a impressora "Microsoft Print to PDF" grava neste arquivo
-    let output = cfg!(feature = "e2e")
-        .then(|| std::env::var("GERA_PRINT_OUTPUT").ok())
-        .flatten();
-    let result = print_file(req, output.as_deref());
-    let _ = std::fs::remove_file(&req.file);
-    result
-}
-
 /// Cadeia UTF-16 terminada em NUL.
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
@@ -83,10 +72,215 @@ const MAX_DPI: f32 = 600.0;
 /// Linhas por faixa renderizada (só a faixa fica na memória).
 const BAND: u32 = 512;
 
-fn print_file(req: &PrintRequest, output: Option<&str>) -> Result<String, String> {
-    use app_state::print_layout::{landscape, page_list, sheets};
-    let o = &req.options;
-    let doc = pdf_core::PdfDoc::open(&req.file, None).map_err(|e| e.to_string())?;
+/// Páginas escolhidas na janela "Imprimir" (1-based).
+#[derive(Debug, Clone, PartialEq)]
+pub enum WinPages {
+    All,
+    Current,
+    Ranges(Vec<(u32, u32)>),
+}
+
+/// O que a janela "Imprimir" do Windows devolveu: a impressora, as configurações do driver
+/// (DEVMODE: orientação, frente e verso, cor, cópias quando o driver as faz), as páginas e as
+/// cópias que o app repete quando o driver não faz.
+#[derive(Debug, Clone)]
+pub struct WinChoice {
+    pub printer: String,
+    pub devmode: Vec<u8>,
+    pub pages: WinPages,
+    pub copies: u16,
+}
+
+/// DEVMODE atual de `printer` (o padrão do driver), com a orientação pedida.
+fn default_devmode(printer: &[u16], landscape: bool) -> Option<Vec<u8>> {
+    use windows_sys::Win32::Graphics::Gdi::*;
+    use windows_sys::Win32::Graphics::Printing::{DocumentPropertiesW, PRINTER_HANDLE};
+    let (hwnd, handle) = (std::ptr::null_mut(), PRINTER_HANDLE::default());
+    // SAFETY: o tamanho vem do driver e o buffer (alinhado) tem esse tamanho
+    unsafe {
+        let size = DocumentPropertiesW(
+            hwnd,
+            handle,
+            printer.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            0,
+        );
+        if size <= 0 {
+            return None;
+        }
+        let mut buf = vec![0u64; (size as usize).div_ceil(8)];
+        let dm = buf.as_mut_ptr().cast::<DEVMODEW>();
+        if DocumentPropertiesW(
+            hwnd,
+            handle,
+            printer.as_ptr(),
+            dm,
+            std::ptr::null(),
+            DM_OUT_BUFFER,
+        ) < 0
+        {
+            return None;
+        }
+        let d = &mut *dm;
+        d.dmFields |= DM_ORIENTATION;
+        d.Anonymous1.Anonymous1.dmOrientation = if landscape {
+            DMORIENT_LANDSCAPE as i16
+        } else {
+            DMORIENT_PORTRAIT as i16
+        };
+        Some(std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), size as usize).to_vec())
+    }
+}
+
+/// Mostra a janela "Imprimir" do Windows (dona: `owner`). `landscape` vem da primeira página;
+/// `preset` pré-seleciona páginas (Imprimir páginas das miniaturas). `None`: cancelada.
+pub fn ask(
+    owner: isize,
+    total: usize,
+    landscape: bool,
+    preset: Option<Vec<(u32, u32)>>,
+) -> Result<Option<WinChoice>, String> {
+    use windows_sys::Win32::Foundation::{GlobalFree, HGLOBAL};
+    use windows_sys::Win32::Graphics::Printing::GetDefaultPrinterW;
+    use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+    use windows_sys::Win32::System::Memory::{
+        GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+    };
+    use windows_sys::Win32::UI::Controls::Dialogs::*;
+    const MAX_RANGES: usize = 64;
+    let total = total.max(1) as u32;
+    let mut ranges = vec![PRINTPAGERANGE::default(); MAX_RANGES];
+    let mut n = 0;
+    for (k, (a, b)) in preset.iter().flatten().take(MAX_RANGES).enumerate() {
+        ranges[k] = PRINTPAGERANGE {
+            nFromPage: (*a).clamp(1, total),
+            nToPage: (*b).clamp(1, total),
+        };
+        n = k + 1;
+    }
+    // SAFETY: as memórias globais e o DEVMODE são criados, lidos e liberados aqui; a estrutura
+    // da janela e as faixas vivem até o fim da chamada
+    unsafe {
+        CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
+        // a impressora padrão já com a orientação da primeira página
+        let mut len = 0u32;
+        GetDefaultPrinterW(std::ptr::null_mut(), &mut len);
+        let mut name = vec![0u16; len as usize];
+        let mut hdevmode: HGLOBAL = std::ptr::null_mut();
+        if len > 0 && GetDefaultPrinterW(name.as_mut_ptr(), &mut len) != 0 {
+            if let Some(dm) = default_devmode(&name, landscape) {
+                hdevmode = GlobalAlloc(GMEM_MOVEABLE, dm.len());
+                if !hdevmode.is_null() {
+                    let p = GlobalLock(hdevmode).cast::<u8>();
+                    std::ptr::copy_nonoverlapping(dm.as_ptr(), p, dm.len());
+                    GlobalUnlock(hdevmode);
+                }
+            }
+        }
+        let mut pd: PRINTDLGEXW = std::mem::zeroed();
+        pd.lStructSize = std::mem::size_of::<PRINTDLGEXW>() as u32;
+        pd.hwndOwner = owner as _;
+        pd.hDevMode = hdevmode;
+        pd.Flags = PD_USEDEVMODECOPIESANDCOLLATE
+            | PD_NOSELECTION
+            | if n > 0 { PD_PAGENUMS } else { PD_ALLPAGES };
+        pd.nPageRanges = n as u32;
+        pd.nMaxPageRanges = MAX_RANGES as u32;
+        pd.lpPageRanges = ranges.as_mut_ptr();
+        pd.nMinPage = 1;
+        pd.nMaxPage = total;
+        pd.nCopies = 1;
+        pd.nStartPage = START_PAGE_GENERAL;
+        let hr = PrintDlgExW(&mut pd);
+        let result = if hr < 0 {
+            Err(format!(
+                "a janela de impressão do Windows falhou (0x{:08X})",
+                hr as u32
+            ))
+        } else if pd.dwResultAction != PD_RESULT_PRINT {
+            Ok(None)
+        } else {
+            let names = GlobalLock(pd.hDevNames).cast::<DEVNAMES>();
+            let printer = if names.is_null() {
+                String::new()
+            } else {
+                let offset = usize::from((*names).wDeviceOffset);
+                let s = from_wide(names.cast::<u16>().add(offset));
+                GlobalUnlock(pd.hDevNames);
+                s
+            };
+            let dm = GlobalLock(pd.hDevMode).cast::<windows_sys::Win32::Graphics::Gdi::DEVMODEW>();
+            let devmode = if dm.is_null() {
+                Vec::new()
+            } else {
+                let size = usize::from((*dm).dmSize) + usize::from((*dm).dmDriverExtra);
+                let bytes = std::slice::from_raw_parts(dm.cast::<u8>(), size).to_vec();
+                GlobalUnlock(pd.hDevMode);
+                bytes
+            };
+            let pages = if pd.Flags & PD_CURRENTPAGE != 0 {
+                WinPages::Current
+            } else if pd.Flags & PD_PAGENUMS != 0 {
+                WinPages::Ranges(
+                    ranges[..pd.nPageRanges as usize]
+                        .iter()
+                        .map(|r| (r.nFromPage, r.nToPage))
+                        .collect(),
+                )
+            } else {
+                WinPages::All
+            };
+            Ok(Some(WinChoice {
+                printer,
+                devmode,
+                pages,
+                copies: pd.nCopies.clamp(1, 999) as u16,
+            }))
+        };
+        for h in [pd.hDevMode, pd.hDevNames] {
+            if !h.is_null() {
+                GlobalFree(h);
+            }
+        }
+        result
+    }
+}
+
+/// Imprime o PDF `file` com o que a janela escolheu (numa thread); apaga o temporário em
+/// qualquer caso. `current` é a página atual (1-based).
+pub fn print(choice: &WinChoice, file: &std::path::Path, current: usize) -> Result<String, String> {
+    // testes de interface: a impressora grava neste arquivo
+    let output = cfg!(feature = "e2e")
+        .then(|| std::env::var("GERA_PRINT_OUTPUT").ok())
+        .flatten();
+    let result = print_file(choice, file, current, output.as_deref());
+    let _ = std::fs::remove_file(file);
+    result
+}
+
+/// As páginas (0-based) a imprimir.
+fn page_list(pages: &WinPages, current: usize, count: usize) -> Vec<usize> {
+    match pages {
+        WinPages::All => (0..count).collect(),
+        WinPages::Current => vec![current.clamp(1, count.max(1)) - 1],
+        WinPages::Ranges(r) => r
+            .iter()
+            .flat_map(|&(a, b)| a.min(b)..=a.max(b))
+            .filter(|&p| p >= 1 && (p as usize) <= count)
+            .map(|p| p as usize - 1)
+            .collect(),
+    }
+}
+
+fn print_file(
+    choice: &WinChoice,
+    file: &std::path::Path,
+    current: usize,
+    output: Option<&str>,
+) -> Result<String, String> {
+    use app_state::print_layout::sheets;
+    let doc = pdf_core::PdfDoc::open(file, None).map_err(|e| e.to_string())?;
     let count = doc.page_count().map_err(|e| e.to_string())?.max(0) as usize;
     let sizes: Vec<(f32, f32)> = (0..count as i32)
         .map(|p| {
@@ -95,24 +289,25 @@ fn print_file(req: &PrintRequest, output: Option<&str>) -> Result<String, String
                 .unwrap_or((612.0, 792.0))
         })
         .collect();
-    let pages = page_list(o, req.current, req.total.min(count))?;
-    let lay = landscape(o, sizes[pages[0]]);
-    let printer = wide(&o.printer);
-    let mut dc = PrinterDc::new(&printer, o.copies.max(1), lay, o.duplex, o.grayscale)?;
+    let pages = page_list(&choice.pages, current, count);
+    if pages.is_empty() {
+        return Err("Nenhuma página a imprimir.".into());
+    }
+    let mut dc = PrinterDc::new(&wide(&choice.printer), &choice.devmode)?;
+    // cada página ajustada à área imprimível, uma por folha (páginas por folha: do driver)
+    let options = app_state::print::PrintOptions::default();
     let area = dc.printable();
-    let sheets = sheets(o, &pages, &sizes, area, lay);
-    // a impressora que não faz cópias sozinha recebe as folhas repetidas (agrupadas)
-    let rounds = if dc.driver_copies { 1 } else { o.copies.max(1) };
-    let name = req.file.file_name().map_or_else(
+    let sheets = sheets(&options, &pages, &sizes, area, area.w > area.h);
+    let name = file.file_name().map_or_else(
         || "Gera PDF Editor".into(),
         |n| n.to_string_lossy().into_owned(),
     );
     dc.start(&name, output)?;
-    for _ in 0..rounds {
+    for _ in 0..choice.copies.max(1) {
         for sheet in &sheets {
             dc.page(|dc| {
                 for p in sheet {
-                    dc.draw(&doc, p.page, sizes[p.page], p.at, o.grayscale)?;
+                    dc.draw(&doc, p.page, sizes[p.page], p.at)?;
                 }
                 Ok(())
             })?;
@@ -126,110 +321,53 @@ fn print_file(req: &PrintRequest, output: Option<&str>) -> Result<String, String
 struct PrinterDc {
     hdc: windows_sys::Win32::Graphics::Gdi::HDC,
     started: bool,
-    driver_copies: bool,
     dpi: (f32, f32),
     offset: (f32, f32),
     size: (f32, f32),
 }
 
 impl PrinterDc {
-    fn new(
-        printer: &[u16],
-        copies: u16,
-        landscape: bool,
-        duplex: app_state::print::Duplex,
-        grayscale: bool,
-    ) -> Result<Self, String> {
-        use app_state::print::Duplex;
+    /// O DC de `printer` com as configurações `devmode` da janela "Imprimir" (vazio ou curto
+    /// demais: as do driver).
+    fn new(printer: &[u16], devmode: &[u8]) -> Result<Self, String> {
         use windows_sys::Win32::Graphics::Gdi::*;
-        use windows_sys::Win32::Graphics::Printing::{DocumentPropertiesW, PRINTER_HANDLE};
-        use windows_sys::Win32::Storage::Xps::{DeviceCapabilitiesW, DC_COPIES};
-        let (hwnd, handle) = (std::ptr::null_mut(), PRINTER_HANDLE::default());
-        // SAFETY: o DEVMODE do driver é lido num buffer do tamanho que ele pede, alterado nos
-        // campos públicos e validado pelo próprio driver antes de criar o DC
-        unsafe {
-            let size = DocumentPropertiesW(
-                hwnd,
-                handle,
-                printer.as_ptr(),
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                0,
-            );
-            if size <= 0 {
-                return Err("a impressora não foi encontrada".into());
+        // o DEVMODE vai num buffer alinhado
+        let mut buf = vec![0u64; devmode.len().div_ceil(8).max(1)];
+        let header = std::mem::offset_of!(DEVMODEW, dmFields) + 4;
+        let dm = if devmode.len() >= header {
+            // SAFETY: cópia de bytes para um buffer alinhado de tamanho suficiente
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    devmode.as_ptr(),
+                    buf.as_mut_ptr().cast::<u8>(),
+                    devmode.len(),
+                );
             }
-            let mut buf = vec![0u64; (size as usize).div_ceil(8)];
-            let dm = buf.as_mut_ptr().cast::<DEVMODEW>();
-            if DocumentPropertiesW(
-                hwnd,
-                handle,
-                printer.as_ptr(),
-                dm,
-                std::ptr::null(),
-                DM_OUT_BUFFER,
-            ) < 0
-            {
-                return Err("a impressora não respondeu".into());
-            }
-            let max_copies = DeviceCapabilitiesW(
-                printer.as_ptr(),
-                std::ptr::null(),
-                DC_COPIES,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-            );
-            let driver_copies = copies == 1 || max_copies >= i32::from(copies);
-            let d = &mut *dm;
-            d.dmFields |= DM_ORIENTATION | DM_DUPLEX | DM_COLOR | DM_COPIES | DM_COLLATE;
-            d.Anonymous1.Anonymous1.dmOrientation = if landscape {
-                DMORIENT_LANDSCAPE as i16
-            } else {
-                DMORIENT_PORTRAIT as i16
-            };
-            d.Anonymous1.Anonymous1.dmCopies = if driver_copies { copies as i16 } else { 1 };
-            d.dmCollate = DMCOLLATE_TRUE;
-            d.dmDuplex = match duplex {
-                Duplex::None => DMDUP_SIMPLEX,
-                // a borda longa é a "vertical" do Windows no papel em pé (e a horizontal deitado)
-                Duplex::LongEdge if landscape => DMDUP_HORIZONTAL,
-                Duplex::LongEdge => DMDUP_VERTICAL,
-                Duplex::ShortEdge if landscape => DMDUP_VERTICAL,
-                Duplex::ShortEdge => DMDUP_HORIZONTAL,
-            };
-            d.dmColor = if grayscale {
-                DMCOLOR_MONOCHROME
-            } else {
-                DMCOLOR_COLOR
-            };
-            DocumentPropertiesW(
-                hwnd,
-                handle,
-                printer.as_ptr(),
-                dm,
-                dm,
-                DM_IN_BUFFER | DM_OUT_BUFFER,
-            );
-            let hdc = CreateDCW(
+            buf.as_ptr().cast::<DEVMODEW>()
+        } else {
+            std::ptr::null()
+        };
+        // SAFETY: nomes e DEVMODE válidos durante a chamada
+        let hdc = unsafe {
+            CreateDCW(
                 wide("WINSPOOL").as_ptr(),
                 printer.as_ptr(),
                 std::ptr::null(),
                 dm,
-            );
-            if hdc.is_null() {
-                return Err("não foi possível abrir a impressora".into());
-            }
-            let cap = |i: u32| GetDeviceCaps(hdc, i as i32) as f32;
-            let dpi = (cap(LOGPIXELSX).max(72.0), cap(LOGPIXELSY).max(72.0));
-            Ok(Self {
-                hdc,
-                started: false,
-                driver_copies,
-                dpi,
-                offset: (cap(PHYSICALOFFSETX), cap(PHYSICALOFFSETY)),
-                size: (cap(HORZRES), cap(VERTRES)),
-            })
+            )
+        };
+        if hdc.is_null() {
+            return Err("não foi possível abrir a impressora".into());
         }
+        // SAFETY: DC válido
+        let cap = |i: u32| unsafe { GetDeviceCaps(hdc, i as i32) } as f32;
+        Ok(Self {
+            hdc,
+            started: false,
+            dpi: (cap(LOGPIXELSX).max(72.0), cap(LOGPIXELSY).max(72.0)),
+            offset: (cap(PHYSICALOFFSETX), cap(PHYSICALOFFSETY)),
+            size: (cap(HORZRES), cap(VERTRES)),
+        })
     }
 
     /// A parte imprimível do papel, em pontos.
@@ -285,7 +423,6 @@ impl PrinterDc {
         page: usize,
         size: (f32, f32),
         at: app_state::print_layout::Area,
-        gray: bool,
     ) -> Result<(), String> {
         use windows_sys::Win32::Graphics::Gdi::*;
         // destino em pixels do dispositivo (a origem do DC é o canto da parte imprimível)
@@ -319,15 +456,7 @@ impl PrinterDc {
                     .iter_mut()
                     .zip(src.as_chunks::<3>().0)
                 {
-                    if gray {
-                        let l = ((u32::from(s[0]) * 299
-                            + u32::from(s[1]) * 587
-                            + u32::from(s[2]) * 114)
-                            / 1000) as u8;
-                        d.copy_from_slice(&[l, l, l]);
-                    } else {
-                        d.copy_from_slice(&[s[2], s[1], s[0]]); // o DIB é BGR
-                    }
+                    *d = [s[2], s[1], s[0]]; // o DIB é BGR
                 }
             }
             let info = BITMAPINFO {
@@ -402,39 +531,35 @@ impl Drop for PrinterDc {
 mod tests {
     use super::*;
 
-    /// No Windows de teste (por SSH): imprime numa impressora de PDF e confere o arquivo.
-    /// `GERA_TEST_PRINTER` escolhe a impressora (padrão "Microsoft Print to PDF", que grava onde
-    /// o app manda); `GERA_TEST_PRINT_OUT`, o arquivo que ela grava (a "Adobe PDF" grava em
-    /// Documentos com o nome do documento).
     #[test]
-    #[ignore = "precisa de uma impressora de PDF (rodar no Windows)"]
-    fn prints_two_per_sheet_to_the_pdf_printer() {
-        let (list, default) = printers();
+    fn pages_from_the_dialog() {
+        assert_eq!(page_list(&WinPages::All, 1, 3), [0, 1, 2]);
+        assert_eq!(page_list(&WinPages::Current, 2, 3), [1]);
+        assert_eq!(
+            page_list(&WinPages::Ranges(vec![(3, 2), (5, 9)]), 1, 5),
+            [1, 2, 4]
+        );
+    }
+
+    /// No Windows de teste (por SSH): imprime numa impressora que grava em arquivo e confere.
+    /// `GERA_TEST_PRINTER` escolhe a impressora.
+    #[test]
+    #[ignore = "precisa de uma impressora que grave em arquivo (rodar no Windows)"]
+    fn prints_the_chosen_pages_landscape() {
+        let (list, _) = printers();
         let printer = std::env::var("GERA_TEST_PRINTER").unwrap_or("Microsoft Print to PDF".into());
         assert!(list.contains(&printer), "{list:?}");
-        assert!(default.is_some_and(|d| list.contains(&d)));
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("Ação 5 páginas.pdf");
         std::fs::write(&file, pdf_core::sample::sample_pdf(5, 0)).unwrap();
-        let out = std::env::var("GERA_TEST_PRINT_OUT")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| dir.path().join("saída.pdf"));
-        let _ = std::fs::remove_file(&out);
-        let mut options = app_state::print::PrintOptions {
+        let out = dir.path().join("saída.pdf");
+        let choice = WinChoice {
+            devmode: default_devmode(&wide(&printer), true).unwrap(),
             printer,
-            per_sheet: 2,
-            ..Default::default()
+            pages: WinPages::Ranges(vec![(1, 3)]),
+            copies: 1,
         };
-        options.pages = app_state::print::Pages::Ranges;
-        options.ranges = "1-3".into();
-        let req = PrintRequest {
-            options,
-            current: 1,
-            total: 5,
-            oversized: false,
-            file,
-        };
-        print_file(&req, out.to_str()).unwrap();
+        print_file(&choice, &file, 1, out.to_str()).unwrap();
         // o spooler grava o arquivo depois: espera até 60 s
         let t = std::time::Instant::now();
         while pdf_core::PdfDoc::open(&out, None).is_err() && t.elapsed().as_secs() < 60 {
@@ -442,8 +567,8 @@ mod tests {
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
         let printed = pdf_core::PdfDoc::open(&out, None).unwrap();
-        assert_eq!(printed.page_count().unwrap(), 2, "3 páginas, 2 por folha");
+        assert_eq!(printed.page_count().unwrap(), 3);
         let size = printed.page_size(0).unwrap();
-        assert!(size.width > size.height, "2 por folha: papel deitado");
+        assert!(size.width > size.height, "DEVMODE em paisagem");
     }
 }

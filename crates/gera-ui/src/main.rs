@@ -26,6 +26,8 @@ mod open_dialog;
 mod organize;
 mod page_labels_dialog;
 mod pagination_tool;
+#[cfg(target_os = "linux")]
+mod portal_print;
 mod prepare;
 mod print_job;
 #[cfg(windows)]
@@ -37,6 +39,7 @@ mod sidebar;
 mod stamp_dialogs;
 mod submit;
 mod summary_dialog;
+mod system_print;
 mod thumbnails;
 mod view;
 
@@ -55,11 +58,15 @@ fn main() -> eframe::Result {
         }
     }
     desktop::integrate_appimage();
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1100.0, 800.0])
+    let mut viewport = egui::ViewportBuilder::default();
+    // no Windows abre maximizada, como o Acrobat; um tamanho inicial junto faz a janela
+    // maximizada ficar com só esse tamanho
+    if cfg!(not(windows)) {
+        viewport = viewport.with_inner_size([1100.0, 800.0]);
+    }
+    viewport = viewport
         .with_title("Gera PDF Editor")
         .with_app_id(desktop::APP_ID)
-        // no Windows abre maximizada, como o Acrobat (e não passa da tela num notebook)
         .with_maximized(cfg!(windows));
     if let Some(icon) = icon::app_icon() {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));

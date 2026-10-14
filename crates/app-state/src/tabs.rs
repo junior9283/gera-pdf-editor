@@ -8,7 +8,23 @@ pub const FIXED: usize = 2;
 
 /// Identidade de um documento: o caminho canônico, ou o próprio caminho se não der para resolver.
 pub fn canonical(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    std::fs::canonicalize(path).map_or_else(|_| path.to_path_buf(), without_verbatim)
+}
+
+/// No Windows, o caminho canônico vem com o prefixo `\\?\` (`\\?\C:\pasta`,
+/// `\\?\UNC\servidor\pasta`): o prefixo sai para mostrar e gravar como o usuário escreve.
+fn without_verbatim(path: PathBuf) -> PathBuf {
+    let Some(s) = path.to_str() else {
+        return path;
+    };
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    match s.strip_prefix(r"\\?\") {
+        // só unidade com letra (C:\...); outros caminhos verbatim ficam como estão
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => path,
+    }
 }
 
 /// Nome do arquivo para a aba, com no máximo `max` caracteres (o excesso vira "…").
@@ -108,6 +124,25 @@ impl TabList {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn verbatim_prefix_is_removed() {
+        let p = |s: &str| without_verbatim(PathBuf::from(s));
+        assert_eq!(
+            p(r"\\?\C:\gera\Pasta Ação\a.pdf"),
+            PathBuf::from(r"C:\gera\Pasta Ação\a.pdf")
+        );
+        assert_eq!(
+            p(r"\\?\UNC\srv\docs\a.pdf"),
+            PathBuf::from(r"\\srv\docs\a.pdf")
+        );
+        assert_eq!(
+            p(r"\\?\Volume{1}\a.pdf"),
+            PathBuf::from(r"\\?\Volume{1}\a.pdf")
+        );
+        assert_eq!(p("/home/x/a.pdf"), PathBuf::from("/home/x/a.pdf"));
+    }
+
     use super::*;
 
     fn p(name: &str) -> PathBuf {

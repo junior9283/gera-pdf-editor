@@ -43,14 +43,12 @@ pub fn printers() -> (Vec<String>, Option<String>) {
 }
 
 /// O envio do pedido pelo `lp`, pronto para rodar numa thread (as opções já conferidas).
-pub fn job(req: &PrintRequest) -> Result<impl FnOnce() -> Result<String, String> + Send, String> {
-    let args = app_state::print::lp_args(
-        &req.options,
-        req.current,
-        req.total,
-        req.oversized,
-        &req.file,
-    )?;
+pub fn job(
+    options: &app_state::print::PrintOptions,
+    req: &PrintRequest,
+) -> Result<impl FnOnce() -> Result<String, String> + Send, String> {
+    let args =
+        app_state::print::lp_args(options, req.current, req.total, req.oversized, &req.file)?;
     let lp = program("GERA_LP", "lp");
     let file = req.file.clone();
     Ok(move || run_lp(&lp, &args, &file))
