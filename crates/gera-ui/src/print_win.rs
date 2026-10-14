@@ -16,8 +16,7 @@ fn from_wide(p: *const u16) -> String {
 #[cfg(test)]
 pub fn printers() -> (Vec<String>, Option<String>) {
     use windows_sys::Win32::Graphics::Printing::{
-        EnumPrintersW, GetDefaultPrinterW, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL,
-        PRINTER_INFO_4W,
+        EnumPrintersW, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL, PRINTER_INFO_4W,
     };
     let flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS;
     let (mut needed, mut count) = (0u32, 0u32);
@@ -51,15 +50,19 @@ pub fn printers() -> (Vec<String>, Option<String>) {
             infos.iter().map(|i| from_wide(i.pPrinterName)).collect()
         }
     };
+    (list, default_printer().map(|n| from_wide(n.as_ptr())))
+}
+
+/// Nome da impressora padrão do Windows (UTF-16 com NUL).
+fn default_printer() -> Option<Vec<u16>> {
+    use windows_sys::Win32::Graphics::Printing::GetDefaultPrinterW;
     let mut len = 0u32;
-    // SAFETY: mede e depois lê o nome da padrão num buffer do tamanho pedido
-    let default = unsafe {
+    // SAFETY: mede e depois lê o nome num buffer do tamanho pedido
+    unsafe {
         GetDefaultPrinterW(std::ptr::null_mut(), &mut len);
         let mut name = vec![0u16; len as usize];
-        (len > 0 && GetDefaultPrinterW(name.as_mut_ptr(), &mut len) != 0)
-            .then(|| from_wide(name.as_ptr()))
-    };
-    (list, default)
+        (len > 0 && GetDefaultPrinterW(name.as_mut_ptr(), &mut len) != 0).then_some(name)
+    }
 }
 
 /// Cadeia UTF-16 terminada em NUL.
@@ -142,7 +145,6 @@ pub fn ask(
     preset: Option<Vec<(u32, u32)>>,
 ) -> Result<Option<WinChoice>, String> {
     use windows_sys::Win32::Foundation::{GlobalFree, HGLOBAL};
-    use windows_sys::Win32::Graphics::Printing::GetDefaultPrinterW;
     use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
     use windows_sys::Win32::System::Memory::{
         GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
@@ -164,11 +166,8 @@ pub fn ask(
     unsafe {
         CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
         // a impressora padrão já com a orientação da primeira página
-        let mut len = 0u32;
-        GetDefaultPrinterW(std::ptr::null_mut(), &mut len);
-        let mut name = vec![0u16; len as usize];
         let mut hdevmode: HGLOBAL = std::ptr::null_mut();
-        if len > 0 && GetDefaultPrinterW(name.as_mut_ptr(), &mut len) != 0 {
+        if let Some(name) = default_printer() {
             if let Some(dm) = default_devmode(&name, landscape) {
                 hdevmode = GlobalAlloc(GMEM_MOVEABLE, dm.len());
                 if !hdevmode.is_null() {
@@ -279,38 +278,23 @@ fn print_file(
     current: usize,
     output: Option<&str>,
 ) -> Result<String, String> {
-    use app_state::print_layout::sheets;
     let doc = pdf_core::PdfDoc::open(file, None).map_err(|e| e.to_string())?;
     let count = doc.page_count().map_err(|e| e.to_string())?.max(0) as usize;
-    let sizes: Vec<(f32, f32)> = (0..count as i32)
-        .map(|p| {
-            doc.page_size(p)
-                .map(|s| (s.width, s.height))
-                .unwrap_or((612.0, 792.0))
-        })
-        .collect();
     let pages = page_list(&choice.pages, current, count);
     if pages.is_empty() {
         return Err("Nenhuma página a imprimir.".into());
     }
     let mut dc = PrinterDc::new(&wide(&choice.printer), &choice.devmode)?;
-    // cada página ajustada à área imprimível, uma por folha (páginas por folha: do driver)
-    let options = app_state::print::PrintOptions::default();
-    let area = dc.printable();
-    let sheets = sheets(&options, &pages, &sizes, area, area.w > area.h);
     let name = file.file_name().map_or_else(
         || "Gera PDF Editor".into(),
         |n| n.to_string_lossy().into_owned(),
     );
     dc.start(&name, output)?;
+    // uma página por folha, ajustada à área imprimível (páginas por folha: as do driver)
     for _ in 0..choice.copies.max(1) {
-        for sheet in &sheets {
-            dc.page(|dc| {
-                for p in sheet {
-                    dc.draw(&doc, p.page, sizes[p.page], p.at)?;
-                }
-                Ok(())
-            })?;
+        for &page in &pages {
+            let size = doc.page_size(page as i32).map_err(|e| e.to_string())?;
+            dc.page(|dc| dc.draw(&doc, page as i32, (size.width, size.height)))?;
         }
     }
     dc.end()?;
@@ -322,7 +306,6 @@ struct PrinterDc {
     hdc: windows_sys::Win32::Graphics::Gdi::HDC,
     started: bool,
     dpi: (f32, f32),
-    offset: (f32, f32),
     size: (f32, f32),
 }
 
@@ -365,20 +348,8 @@ impl PrinterDc {
             hdc,
             started: false,
             dpi: (cap(LOGPIXELSX).max(72.0), cap(LOGPIXELSY).max(72.0)),
-            offset: (cap(PHYSICALOFFSETX), cap(PHYSICALOFFSETY)),
             size: (cap(HORZRES), cap(VERTRES)),
         })
-    }
-
-    /// A parte imprimível do papel, em pontos.
-    fn printable(&self) -> app_state::print_layout::Area {
-        let pt = |px: f32, dpi: f32| px * 72.0 / dpi;
-        app_state::print_layout::Area {
-            x: pt(self.offset.0, self.dpi.0),
-            y: pt(self.offset.1, self.dpi.1),
-            w: pt(self.size.0, self.dpi.0),
-            h: pt(self.size.1, self.dpi.1),
-        }
     }
 
     /// Abre o documento na impressora; `output` grava num arquivo (impressoras de arquivo).
@@ -416,64 +387,44 @@ impl PrinterDc {
         Ok(())
     }
 
-    /// Desenha a página em `at` (pontos no papel), renderizada em faixas.
-    fn draw(
-        &mut self,
-        doc: &pdf_core::PdfDoc,
-        page: usize,
-        size: (f32, f32),
-        at: app_state::print_layout::Area,
-    ) -> Result<(), String> {
+    /// Desenha a página (`size` em pontos) ajustada e centrada na área imprimível,
+    /// rasterizada em faixas na resolução da impressora (no máximo `MAX_DPI`).
+    fn draw(&mut self, doc: &pdf_core::PdfDoc, page: i32, size: (f32, f32)) -> Result<(), String> {
         use windows_sys::Win32::Graphics::Gdi::*;
-        // destino em pixels do dispositivo (a origem do DC é o canto da parte imprimível)
-        let dx = (at.x * self.dpi.0 / 72.0 - self.offset.0).round() as i32;
-        let dy = (at.y * self.dpi.1 / 72.0 - self.offset.1).round() as i32;
-        let dw = (at.w * self.dpi.0 / 72.0).round().max(1.0);
-        let dh = (at.h * self.dpi.1 / 72.0).round().max(1.0);
-        // escala do MuPDF (px por ponto) na resolução da impressora, no máximo MAX_DPI
-        let scale = (dw / size.0.max(1.0)).min(at.w * MAX_DPI / 72.0 / size.0.max(1.0));
-        let page = page as i32;
-        let mut y0 = 0u32;
+        let (pw, ph) = (size.0.max(1.0), size.1.max(1.0));
+        // escala que cabe na área imprimível, em pontos do papel por ponto da página
+        let fit = (self.size.0 * 72.0 / self.dpi.0 / pw).min(self.size.1 * 72.0 / self.dpi.1 / ph);
+        // destino em pixels do dispositivo (a origem do DC é o canto da área imprimível)
+        let dw = (pw * fit * self.dpi.0 / 72.0).round().max(1.0);
+        let dh = (ph * fit * self.dpi.1 / 72.0).round().max(1.0);
+        let dx = ((self.size.0 - dw) / 2.0).round() as i32;
+        let dy = ((self.size.1 - dh) / 2.0).round() as i32;
+        let renderer = doc
+            .band_renderer(page, fit * self.dpi.0.min(MAX_DPI) / 72.0)
+            .map_err(|e| e.to_string())?;
+        let (bw, total_h) = renderer.size();
         // SAFETY: DC válido; o modo de ampliação só afeta este DC
         unsafe {
             SetStretchBltMode(self.hdc, HALFTONE);
         }
-        loop {
-            let band = match doc.render_band(page, scale, y0, BAND) {
-                Ok(b) => b,
-                Err(_) if y0 > 0 => break, // passou do fim da página
-                Err(e) => return Err(e.to_string()),
-            };
-            let total_h = size.1 * scale; // altura renderizada da página inteira
-            let (bw, bh) = (band.width as usize, band.height as usize);
-            let stride = (bw * 3).div_ceil(4) * 4;
-            let mut bits = vec![0u8; stride * bh];
-            for (row, src) in band.rgb.chunks_exact(bw * 3).enumerate() {
-                let dst = &mut bits[row * stride..row * stride + bw * 3];
-                for (d, s) in dst
-                    .as_chunks_mut::<3>()
-                    .0
-                    .iter_mut()
-                    .zip(src.as_chunks::<3>().0)
-                {
-                    *d = [s[2], s[1], s[0]]; // o DIB é BGR
-                }
-            }
+        let mut y0 = 0u32;
+        while y0 < total_h {
+            let (bh, bits) = renderer.band_bgra(y0, BAND).map_err(|e| e.to_string())?;
             let info = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
                     biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
                     biWidth: bw as i32,
                     biHeight: -(bh as i32), // de cima para baixo
                     biPlanes: 1,
-                    biBitCount: 24,
+                    biBitCount: 32, // BGRA: linhas já alinhadas, sem conversão
                     biCompression: BI_RGB,
                     ..Default::default()
                 },
                 ..Default::default()
             };
-            let top = dy + (y0 as f32 * dh / total_h).round() as i32;
-            let bottom = dy + ((y0 as f32 + bh as f32) * dh / total_h).round() as i32;
-            // SAFETY: bits com `stride` × `bh` bytes, descritos pelo BITMAPINFO acima
+            let row = |y: u32| dy + (y as f32 * dh / total_h as f32).round() as i32;
+            let (top, bottom) = (row(y0), row(y0 + bh));
+            // SAFETY: `bits` tem bw × bh × 4 bytes, descritos pelo BITMAPINFO acima
             let ok = unsafe {
                 StretchDIBits(
                     self.hdc,
@@ -494,10 +445,7 @@ impl PrinterDc {
             if ok == 0 {
                 return Err("a impressora recusou a imagem da página".into());
             }
-            y0 += band.height;
-            if band.height < BAND {
-                break;
-            }
+            y0 += bh;
         }
         Ok(())
     }

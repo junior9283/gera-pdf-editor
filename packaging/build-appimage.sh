@@ -6,6 +6,7 @@
 # em tempo de execução). Veja `ldd target/release/gera-pdf-editor`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source packaging/lib.sh
 
 # appimagetool fixado numa versão estável e conferido por hash (SHA-256 publicado pelo GitHub).
 TOOL_VERSION=1.9.1
@@ -24,19 +25,9 @@ for s in 32 48 64 128 256 512; do
   mkdir -p "$APPDIR/usr/share/icons/hicolor/${s}x${s}/apps"
   cp "packaging/icons/gera-pdf-editor-$s.png" "$APPDIR/usr/share/icons/hicolor/${s}x${s}/apps/gera-pdf-editor.png"
 done
-cp LICENSE THIRD_PARTY_NOTICES.md "$DOCDIR/" # AGPL-3.0: a licença e os avisos acompanham o binário
-cp crates/pdf-core/fonts/OFL.txt "$DOCDIR/OFL-GreatVibes.txt"
-# dados de idioma do OCR (português e inglês): o app os procura em $APPDIR/usr/share/tessdata
-mkdir -p "$APPDIR/usr/share/tessdata"
-for lang in por eng; do
-  for dir in /usr/share/tesseract/tessdata /usr/share/tessdata /usr/share/tesseract-ocr/*/tessdata; do
-    if [ -f "$dir/$lang.traineddata" ]; then cp "$dir/$lang.traineddata" "$APPDIR/usr/share/tessdata/"; break; fi
-  done
-  if [ ! -f "$APPDIR/usr/share/tessdata/$lang.traineddata" ]; then
-    echo "faltam os dados de OCR '$lang' (instale tesseract-langpack-$lang)" >&2
-    exit 1
-  fi
-done
+copy_licenses "$DOCDIR"
+# dados de idioma do OCR: o app os procura em $APPDIR/usr/share/tessdata
+copy_tessdata "$APPDIR/usr/share/tessdata"
 ln -s usr/bin/gera-pdf-editor "$APPDIR/AppRun"
 
 if [ ! -x "$TOOL" ]; then

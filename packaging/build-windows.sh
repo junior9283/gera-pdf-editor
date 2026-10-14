@@ -7,6 +7,7 @@
 # mingw64-winpthreads-static; Ubuntu: g++-mingw-w64-x86-64-posix) e o zip.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source packaging/lib.sh
 
 TARGET=x86_64-pc-windows-gnu
 VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
@@ -14,22 +15,11 @@ cargo build --release -p gera-ui --target "$TARGET"
 
 STAGE=target/windows-portatil
 APP="$STAGE/Gera PDF Editor"
-rm -rf "$STAGE" && mkdir -p "$APP/tessdata" "$APP/licencas" dist
+rm -rf "$STAGE" && mkdir -p "$APP" dist
 cp "target/$TARGET/release/gera-pdf-editor.exe" "$APP/GeraPDFEditor.exe"
-# AGPL-3.0: a licença e os avisos acompanham o programa
-cp LICENSE "$APP/licencas/LICENSE.txt"
-cp THIRD_PARTY_NOTICES.md "$APP/licencas/"
-cp crates/pdf-core/fonts/OFL.txt "$APP/licencas/OFL-GreatVibes.txt"
-# dados de idioma do OCR (português e inglês): o app os procura em tessdata\ ao lado do .exe
-for lang in por eng; do
-  for dir in /usr/share/tesseract/tessdata /usr/share/tessdata /usr/share/tesseract-ocr/*/tessdata; do
-    if [ -f "$dir/$lang.traineddata" ]; then cp "$dir/$lang.traineddata" "$APP/tessdata/"; break; fi
-  done
-  if [ ! -f "$APP/tessdata/$lang.traineddata" ]; then
-    echo "faltam os dados de OCR '$lang' (instale tesseract-langpack-$lang)" >&2
-    exit 1
-  fi
-done
+copy_licenses "$APP/licencas" LICENSE.txt
+# dados de idioma do OCR: o app os procura em tessdata\ ao lado do .exe
+copy_tessdata "$APP/tessdata"
 # instruções curtas em texto do Windows (CRLF)
 sed 's/$/\r/' > "$APP/LEIA-ME.txt" <<TXT
 Gera PDF Editor $VERSION - versão portátil para Windows 10 e 11 (64 bits)

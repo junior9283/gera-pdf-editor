@@ -21,10 +21,15 @@ fn base_dir(kind: &str) -> Option<PathBuf> {
     }
     #[cfg(windows)]
     {
-        let fallback =
-            std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Gera PDF Editor"));
-        let exe = std::env::current_exe().ok()?;
-        Some(portable_base(exe.parent()?, fallback)?.join(kind))
+        // resolvida uma vez: o teste de gravação não se repete a cada preferência salva
+        static BASE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+        let base = BASE.get_or_init(|| {
+            let fallback =
+                std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Gera PDF Editor"));
+            let exe = std::env::current_exe().ok()?;
+            portable_base(exe.parent()?, fallback)
+        });
+        Some(base.as_ref()?.join(kind))
     }
     #[cfg(not(windows))]
     {
@@ -176,7 +181,6 @@ impl Drop for BackgroundSaver {
 
 #[cfg(test)]
 mod tests {
-
     #[test]
     fn portable_dir_next_to_exe() {
         let exe = tempfile::tempdir().unwrap();

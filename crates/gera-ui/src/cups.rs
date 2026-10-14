@@ -42,13 +42,26 @@ pub fn printers() -> (Vec<String>, Option<String>) {
     (parse_list(&run("-e")), parse_default(&run("-d")))
 }
 
+/// Impressão pelo diálogo do app: as opções e o que o `lp` precisa saber do documento.
+pub struct CupsJob {
+    pub options: app_state::print::PrintOptions,
+    pub total: usize,
+    /// Alguma página é maior que o papel ("Reduzir páginas grandes").
+    pub oversized: bool,
+}
+
 /// O envio do pedido pelo `lp`, pronto para rodar numa thread (as opções já conferidas).
 pub fn job(
-    options: &app_state::print::PrintOptions,
+    job: &CupsJob,
     req: &PrintRequest,
 ) -> Result<impl FnOnce() -> Result<String, String> + Send, String> {
-    let args =
-        app_state::print::lp_args(options, req.current, req.total, req.oversized, &req.file)?;
+    let args = app_state::print::lp_args(
+        &job.options,
+        req.current,
+        job.total,
+        job.oversized,
+        &req.file,
+    )?;
     let lp = program("GERA_LP", "lp");
     let file = req.file.clone();
     Ok(move || run_lp(&lp, &args, &file))

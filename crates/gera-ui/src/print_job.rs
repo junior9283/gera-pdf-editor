@@ -155,7 +155,7 @@ pub fn sweep() {
 pub enum PrintKind {
     /// Diálogo do app (Linux sem portal): o CUPS com as opções.
     #[cfg(unix)]
-    Cups(app_state::print::PrintOptions),
+    Cups(crate::cups::CupsJob),
     /// Portal de impressão do Linux: o token das opções escolhidas na janela.
     #[cfg(target_os = "linux")]
     Portal { token: u32, title: String },
@@ -169,7 +169,7 @@ impl PrintKind {
     pub fn destination(&self) -> String {
         match self {
             #[cfg(unix)]
-            Self::Cups(o) => o.printer.clone(),
+            Self::Cups(job) => job.options.printer.clone(),
             #[cfg(target_os = "linux")]
             Self::Portal { .. } => "a impressora escolhida".into(),
             #[cfg(windows)]
@@ -180,26 +180,19 @@ impl PrintKind {
     /// Imprime também as marcações (a janela do sistema imprime sempre "Documento e
     /// marcações", como o padrão do Acrobat).
     pub fn with_annots(&self) -> bool {
-        match self {
-            #[cfg(unix)]
-            Self::Cups(o) => o.with_annots,
-            #[allow(unreachable_patterns)]
-            _ => true,
+        #[cfg(unix)]
+        if let Self::Cups(job) = self {
+            return job.options.with_annots;
         }
+        true
     }
 }
 
 /// Um pedido de impressão: como imprimir e o PDF temporário já exportado.
 pub struct PrintRequest {
     pub kind: PrintKind,
-    /// Página atual (1-based) e total de páginas.
+    /// Página atual (1-based).
     pub current: usize,
-    #[cfg_attr(windows, allow(dead_code))]
-    pub total: usize,
-    /// Alguma página é maior que o papel ("Reduzir páginas grandes"; no Windows, a montagem das
-    /// folhas compara cada página com o papel).
-    #[cfg_attr(windows, allow(dead_code))]
-    pub oversized: bool,
     pub file: PathBuf,
 }
 
@@ -220,8 +213,8 @@ impl PrintJobs {
         let wake = move || ctx.request_repaint();
         match req.kind {
             #[cfg(unix)]
-            PrintKind::Cups(ref options) => {
-                let job = crate::cups::job(options, &req).inspect_err(|_| {
+            PrintKind::Cups(ref job) => {
+                let job = crate::cups::job(job, &req).inspect_err(|_| {
                     let _ = std::fs::remove_file(&req.file);
                 })?;
                 self.spawn(printer, job, wake);

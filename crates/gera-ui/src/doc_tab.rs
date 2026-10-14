@@ -12,6 +12,7 @@ use crate::view::DocView;
 use app_state::layout::ViewMode;
 use app_state::nav::{nav_target, NavKey};
 use app_state::prefs::LeftPanel;
+#[cfg(unix)]
 use app_state::print::any_oversized;
 use app_state::transform::PageMap;
 use app_state::zoom::{self, Fit};
@@ -292,14 +293,11 @@ pub struct DocTab {
     pub(crate) focus_search: bool,
     /// Propriedades mostradas na janela (aberta enquanto houver).
     properties: Option<crate::shell::properties::PropertiesDialog>,
-    /// Diálogo "Imprimir" aberto.
     /// Diálogo do app (Linux sem portal de impressão).
     #[cfg(unix)]
     print_dialog: Option<PrintDialog>,
-    /// Janela de impressão do sistema aberta: a resposta chega por aqui; as páginas já
-    /// escolhidas vão também para o diálogo do app, se for ele que abrir.
+    /// Janela de impressão do sistema aberta: a resposta chega por aqui.
     print_ask: Option<Receiver<crate::system_print::Outcome>>,
-    print_preset: Option<Vec<(u32, u32)>>,
     /// Impressão esperando a cópia temporária ficar pronta: opções e a página atual no clique.
     print_pending: Option<PendingPrint>,
     /// Lista de impressoras sendo lida do CUPS em segundo plano.
@@ -479,7 +477,6 @@ impl DocTab {
             #[cfg(unix)]
             print_dialog: None,
             print_ask: None,
-            print_preset: None,
             print_pending: None,
             #[cfg(unix)]
             printers_rx: None,
@@ -2452,7 +2449,6 @@ impl DocTab {
         }
         let landscape = view.sizes.first().is_some_and(|s| s.width > s.height);
         let total = view.sizes.len();
-        self.print_preset = preset.clone();
         self.print_ask = Some(crate::system_print::ask(
             ctx,
             self.title(),
@@ -2465,21 +2461,11 @@ impl DocTab {
     /// Diálogo do app (Linux sem a janela do sistema): as impressoras chegam do CUPS em segundo
     /// plano.
     #[cfg(unix)]
-    fn open_app_print_dialog(&mut self, ctx: &egui::Context) {
+    fn open_app_print_dialog(&mut self, ctx: &egui::Context, preset: crate::system_print::Preset) {
         let mut dialog = PrintDialog::new(self.last.current_page);
-        if let Some(pages) = self.print_preset.take() {
+        if let Some(pages) = preset {
             dialog.options.pages = app_state::print::Pages::Ranges;
-            dialog.options.ranges = pages
-                .iter()
-                .map(|(a, b)| {
-                    if a == b {
-                        a.to_string()
-                    } else {
-                        format!("{a}-{b}")
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
+            dialog.options.ranges = crate::thumbnails::ranges_text(&pages);
         }
         self.print_dialog = Some(dialog);
         self.printers_rx = Some(print_job::printers_in_background(ctx));
@@ -2501,7 +2487,16 @@ impl DocTab {
         match choice {
             Some(PrintChoice::Print(options)) => {
                 self.print_dialog = None;
-                self.start_print(print_job::PrintKind::Cups(options));
+                let total = self.page_total();
+                let oversized = self
+                    .view
+                    .as_ref()
+                    .is_some_and(|v| any_oversized(v.sizes.iter().map(|s| (s.width, s.height))));
+                self.start_print(print_job::PrintKind::Cups(crate::cups::CupsJob {
+                    options,
+                    total,
+                    oversized,
+                }));
             }
             Some(PrintChoice::Cancel) => self.print_dialog = None,
             None => {}
@@ -2509,7 +2504,7 @@ impl DocTab {
     }
 
     /// A resposta da janela de impressão do sistema.
-    fn poll_print_ask(&mut self, ctx: &egui::Context) {
+    fn poll_print_ask(&mut self, #[cfg_attr(windows, allow(unused))] ctx: &egui::Context) {
         use crate::system_print::Outcome;
         let Some(outcome) = self.print_ask.as_ref().and_then(|rx| rx.try_recv().ok()) else {
             return;
@@ -2519,12 +2514,10 @@ impl DocTab {
             Outcome::Chosen(kind) => self.start_print(kind),
             Outcome::Cancelled => {}
             #[cfg(unix)]
-            Outcome::Unavailable => self.open_app_print_dialog(ctx),
+            Outcome::Unavailable(preset) => self.open_app_print_dialog(ctx, preset),
             #[cfg(windows)]
-            Outcome::Unavailable => {}
             Outcome::Failed(e) => self.status = format!("Não foi possível imprimir: {e}"),
         }
-        let _ = ctx;
     }
 
     /// Impressão escolhida: o worker grava a cópia temporária; o envio continua em
@@ -2548,20 +2541,16 @@ impl DocTab {
         }
     }
 
-    /// A cópia temporária ficou pronta: monta os argumentos e entrega ao CUPS.
+    /// A cópia temporária ficou pronta: entrega à impressora (numa thread).
     fn send_to_printer(&mut self, ctx: &egui::Context, file: PathBuf) {
-        let (Some(PendingPrint { kind, page, .. }), Some(view)) =
-            (self.print_pending.take(), self.view.as_ref())
-        else {
+        let Some(PendingPrint { kind, page, .. }) = self.print_pending.take() else {
             let _ = std::fs::remove_file(&file);
             return;
         };
         let printer = kind.destination();
         let req = print_job::PrintRequest {
-            oversized: any_oversized(view.sizes.iter().map(|s| (s.width, s.height))),
             kind,
             current: page + 1,
-            total: view.sizes.len(),
             file,
         };
         self.status = match self.print_jobs.start(ctx, req) {
@@ -4983,7 +4972,7 @@ mod tests {
         tab.attachment_name = Some("outro.pdf".into());
         assert_eq!(tab.title(), "outro.pdf");
         assert!(!tab.is_dirty(), "abrir um anexo não é uma alteração");
-        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        let home = app_state::store::home_dir().unwrap();
         assert_eq!(tab.save_suggestion(), home.join("outro.pdf"));
     }
 

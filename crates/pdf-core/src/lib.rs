@@ -63,7 +63,7 @@ pub use compress::{CompressLevel, CompressReport};
 pub use create_export::{create_pdf_from_images, ExportFormat};
 pub use destinations::{DestInfo, DestOp};
 pub use digital_id::{fingerprint, DigitalId};
-pub use doc::{max_render_scale, PdfDoc};
+pub use doc::{max_render_scale, BandRenderer, PdfDoc};
 pub use edit_images::{ImageEdit, PageImage};
 pub use edit_text::{PageTextBlock, MIN_TEXT_WIDTH, NEW_TEXT_SIZE, TEXT_MARGIN};
 pub use error::{PdfError, Result};

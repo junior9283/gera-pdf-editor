@@ -74,9 +74,11 @@ pub(crate) fn open_authenticated(path: &Path, password: Option<&str>) -> Result<
     // no Windows, um arquivo aberto não pode ser substituído: o PDF vai para a memória e o
     // Salvar grava por cima dele
     #[cfg(windows)]
-    let mut inner = std::fs::read(path)
-        .map_err(|e| PdfError::Open(e.to_string()))
-        .and_then(|b| PdfDocument::from_bytes(&b).map_err(|e| PdfError::Open(e.to_string())))?;
+    let mut inner = {
+        let open = |e: &dyn std::fmt::Display| PdfError::Open(e.to_string());
+        let bytes = std::fs::read(path).map_err(|e| open(&e))?;
+        PdfDocument::from_bytes(&bytes).map_err(|e| open(&e))?
+    };
     #[cfg(not(windows))]
     let mut inner =
         PdfDocument::open(utf8_path(path)?).map_err(|e| PdfError::Open(e.to_string()))?;
@@ -258,32 +260,24 @@ impl PdfDoc {
         Ok(packed_rgb(&pix, invert))
     }
 
-    /// Faixa de `rows` linhas a partir da linha `y0` da página renderizada em `scale`, na largura
-    /// inteira (impressão no Windows: só a faixa fica na memória). A última sai cortada.
-    pub fn render_band(&self, page: i32, scale: f32, y0: u32, rows: u32) -> Result<RenderedPage> {
+    /// A página `page` em `scale` pronta para ser rasterizada em faixas (impressão no Windows):
+    /// a lista de desenho (com as anotações) é montada uma vez e cada faixa só rasteriza o seu
+    /// recorte.
+    pub fn band_renderer(&self, page: i32, scale: f32) -> Result<BandRenderer> {
         let page = self.load(page)?;
-        if !scale.is_finite()
-            || scale <= 0.0
-            || scale > MAX_TILE_SCALE
-            || !(1..=4096).contains(&rows)
-        {
+        if !scale.is_finite() || scale <= 0.0 || scale > MAX_TILE_SCALE {
             return Err(PdfError::InvalidScale(scale));
         }
         let ctm = Matrix::new_scale(scale, scale);
         let full = page.bounds()?.transform(&ctm).round();
-        let top = i64::from(full.y0) + i64::from(y0);
-        let bottom = (top + i64::from(rows)).min(i64::from(full.y1));
-        if top >= bottom || i64::from(full.x1) - i64::from(full.x0) > 32_768 {
+        if full.x1 - full.x0 > 32_768 || full.y1 <= full.y0 {
             return Err(PdfError::InvalidScale(scale));
         }
-        let rect = mupdf::IRect::new(full.x0, top as i32, full.x1, bottom as i32);
-        let mut pix = mupdf::Pixmap::new_with_rect(&Colorspace::device_rgb(), rect, false)?;
-        pix.clear_with(255)?;
-        {
-            let device = mupdf::Device::from_pixmap(&pix)?;
-            page.run(&device, &ctm)?;
-        }
-        Ok(packed_rgb(&pix, false))
+        Ok(BandRenderer {
+            list: page.to_display_list(true)?,
+            ctm,
+            full,
+        })
     }
 
     /// Caixa da tinta da página (sem anotações), em coordenadas do MuPDF, para "Ajustar ao
@@ -2013,6 +2007,48 @@ fn own_stream(doc: &mut PdfDocument, stream: &PdfObject) -> Result<PdfObject> {
 
 /// Escala máxima de um ladrilho: 6400 % numa tela 4× (o ladrilho tem tamanho fixo).
 const MAX_TILE_SCALE: f32 = 256.0;
+
+/// Página pronta para a rasterização em faixas (`PdfDoc::band_renderer`).
+pub struct BandRenderer {
+    list: mupdf::DisplayList,
+    ctm: Matrix,
+    full: mupdf::IRect,
+}
+
+impl BandRenderer {
+    /// Largura e altura da página renderizada, em pixels.
+    pub fn size(&self) -> (u32, u32) {
+        (
+            (self.full.x1 - self.full.x0) as u32,
+            (self.full.y1 - self.full.y0) as u32,
+        )
+    }
+
+    /// Faixa de até `rows` linhas a partir da linha `y0`, em BGRA (4 bytes por pixel, linhas
+    /// contíguas): o formato dos DIB de 32 bits do Windows. A última sai cortada; devolve a
+    /// altura e os pixels.
+    pub fn band_bgra(&self, y0: u32, rows: u32) -> Result<(u32, Vec<u8>)> {
+        let top = i64::from(self.full.y0) + i64::from(y0);
+        let bottom = (top + i64::from(rows)).min(i64::from(self.full.y1));
+        if top >= bottom || !(1..=4096).contains(&rows) {
+            return Err(PdfError::Engine("faixa fora da página".into()));
+        }
+        let rect = mupdf::IRect::new(self.full.x0, top as i32, self.full.x1, bottom as i32);
+        let mut pix = mupdf::Pixmap::new_with_rect(&Colorspace::device_bgr(), rect, true)?;
+        pix.clear_with(255)?;
+        {
+            let device = mupdf::Device::from_pixmap(&pix)?;
+            let area = mupdf::Rect::new(
+                rect.x0 as f32,
+                rect.y0 as f32,
+                rect.x1 as f32,
+                rect.y1 as f32,
+            );
+            self.list.run(&device, &self.ctm, area)?;
+        }
+        Ok(((bottom - top) as u32, pix.samples().to_vec()))
+    }
+}
 
 /// Pixels RGB compactos (sem o preenchimento de cada linha) de um pixmap `device_rgb` sem alfa.
 fn packed_rgb(pix: &mupdf::Pixmap, invert: bool) -> RenderedPage {

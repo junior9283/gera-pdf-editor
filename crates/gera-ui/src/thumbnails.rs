@@ -74,6 +74,22 @@ pub fn page_ranges(pages: &[i32]) -> Vec<(u32, u32)> {
     out
 }
 
+/// Faixas (a partir de 1) como texto: "1-3,7" (o diálogo do app e o portal entendem).
+#[cfg(unix)]
+pub fn ranges_text(ranges: &[(u32, u32)]) -> String {
+    ranges
+        .iter()
+        .map(|(a, b)| {
+            if a == b {
+                a.to_string()
+            } else {
+                format!("{a}-{b}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Página para onde as setas, Início e Fim levam (a partir da `current`).
 pub fn key_action(key: Key, current: Option<i32>, total: i32) -> Option<i32> {
     if total <= 0 {
