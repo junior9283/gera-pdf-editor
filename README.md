@@ -5,7 +5,7 @@
 <h1 align="center">Gera PDF Editor</h1>
 
 <p align="center">
-  Editor de PDF completo, livre e nativo para Linux, escrito em Rust.<br>
+  Editor de PDF completo, livre e nativo para Linux e Windows, escrito em Rust.<br>
   A meta: todas as ferramentas do Acrobat Pro, com a mesma qualidade, sem custo e com código aberto.
 </p>
 
@@ -13,7 +13,7 @@
   <a href="https://github.com/junior9283/gera-pdf-editor/releases/latest"><img alt="Versão" src="https://img.shields.io/github/v/release/junior9283/gera-pdf-editor?label=vers%C3%A3o"></a>
   <a href="LICENSE"><img alt="Licença AGPL-3.0" src="https://img.shields.io/badge/licen%C3%A7a-AGPL--3.0-blue"></a>
   <a href="https://github.com/junior9283/gera-pdf-editor/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/junior9283/gera-pdf-editor/actions/workflows/ci.yml/badge.svg"></a>
-  <img alt="Linux" src="https://img.shields.io/badge/plataforma-Linux-informational">
+  <img alt="Linux e Windows" src="https://img.shields.io/badge/plataforma-Linux%20%7C%20Windows-informational">
 </p>
 
 ---
@@ -34,6 +34,8 @@ reaprender nada. A implementação é **original**: nenhum código, ícone ou re
 
 ## Baixar e usar
 
+### Linux
+
 1. Baixe o `Gera_PDF_Editor-x86_64.AppImage` da [última versão](https://github.com/junior9283/gera-pdf-editor/releases/latest).
 2. Torne-o executável e abra:
 
@@ -44,6 +46,18 @@ reaprender nada. A implementação é **original**: nenhum código, ícone ou re
 
 O AppImage roda na maioria das distribuições x86-64 modernas (Fedora, Ubuntu, Debian, openSUSE, Arch…)
 e já traz os dados de OCR em português e inglês.
+
+### Windows (versão portátil)
+
+1. Baixe o `Gera_PDF_Editor-<versão>-windows-x64-portatil.zip` da
+   [última versão](https://github.com/junior9283/gera-pdf-editor/releases/latest).
+2. Extraia a pasta `Gera PDF Editor` onde quiser (inclusive num pendrive) e abra `GeraPDFEditor.exe`.
+
+Não há instalação: as configurações ficam na pasta `dados`, ao lado do programa. Funciona no Windows 10 e
+11 (64 bits), também sem placa de vídeo. Para abrir um PDF, arraste-o até a janela ou use
+"Abrir com" ▸ `GeraPDFEditor.exe`.
+
+A impressão usa a janela "Imprimir" do sistema (no Linux, a do KDE ou do GNOME).
 
 ## Funcionalidades
 
@@ -98,7 +112,9 @@ interface) e revisão de código independente antes de entrar na `main`.
 | v6e2 | Organizar campos (alinhar, duplicar, cópias), ações de campo e de página, campo Imagem | ✅ 0.20.0 |
 | v6e3 | Detecção automática de campos e campo Código de barras | ✅ 0.21.1 |
 | v6e4 | Dados do formulário, Enviar, nivelar e preenchimento automático | ✅ 0.22.0 |
-| v6f–v6n | Avaliação para a 1.0.0: as lacunas restantes em relação ao Acrobat Pro | 🚧 próxima |
+| w1 | Versão Windows portátil e impressão pela janela do sistema | ✅ 0.23.0 |
+| w2 | Versão Windows instalável | 🚧 próxima |
+| v6f–v6n | Avaliação para a 1.0.0: as lacunas restantes em relação ao Acrobat Pro | ⏳ |
 
 O histórico de cada versão está no [CHANGELOG](CHANGELOG.md) e o plano detalhado no [ROADMAP](ROADMAP.md).
 As especificações e os planos de cada etapa ficam em [`docs/superpowers`](docs/superpowers).
@@ -126,6 +142,7 @@ cargo test --workspace            # todos os testes
 cargo clippy --workspace --all-targets
 scripts/measure.sh                # metas de desempenho (abertura, memória, binário)
 packaging/build-appimage.sh       # gera dist/Gera_PDF_Editor-x86_64.AppImage
+packaging/build-windows.sh        # gera o ZIP portátil do Windows (compilação cruzada com MinGW-w64)
 ```
 
 ## Arquitetura
@@ -154,9 +171,9 @@ precisa disponibilizar o código-fonte nos mesmos termos.
 
 ### In English
 
-**Gera PDF Editor** is a free, open-source (AGPL-3.0), native PDF editor for Linux written in Rust,
+**Gera PDF Editor** is a free, open-source (AGPL-3.0), native PDF editor for Linux and Windows written in Rust,
 aiming at feature and quality parity with Adobe Acrobat Pro: viewing, commenting, page organization,
 forms, fill & sign, digital signatures, protection, compression, conversion, OCR and content editing.
 The UI is currently in Brazilian Portuguese; contributions (including translations) are welcome — see
-[CONTRIBUTING.md](CONTRIBUTING.md). Download the AppImage from the
+[CONTRIBUTING.md](CONTRIBUTING.md). Download the AppImage (Linux) or the portable ZIP (Windows) from the
 [latest release](https://github.com/junior9283/gera-pdf-editor/releases/latest).

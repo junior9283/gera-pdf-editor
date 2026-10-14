@@ -6,7 +6,22 @@ e as versões seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/
 
 ## [Não lançado]
 
-- v6f — editar PDF: painel Formatar, ferramenta Link, plano de fundo.
+- w2 — versão Windows instalável.
+
+## [0.23.0] — 2026-10-14 · Versão Windows portátil e impressão pela janela do sistema (w1)
+
+### Adicionado
+- **Versão para Windows 10 e 11 (64 bits)**, portátil: um ZIP com `GeraPDFEditor.exe`, sem
+  instalação. As configurações ficam na pasta `dados` ao lado do programa, ou em `%APPDATA%` se a
+  pasta não permitir gravação. O OCR em português e inglês vai junto. Funciona também sem placa de
+  vídeo (DirectX 12 por software).
+- **Impressão pela janela do sistema**: no Windows, a janela "Imprimir" padrão (impressora, páginas,
+  cópias, agrupar e Preferências do driver); no Linux, a janela do KDE ou do GNOME (portal de
+  impressão). Cada página é ajustada à folha e girada quando a orientação é diferente, como o
+  "retrato/paisagem automático" do Acrobat. Sem o portal, o Linux abre o diálogo do app, como antes.
+
+### Corrigido
+- Caminhos com acento e arquivos com nome em outra codificação abrem nos dois sistemas.
 
 ## [0.22.0] — 2026-10-12 · Dados do formulário, Enviar, nivelar e preenchimento automático (v6e4)
 

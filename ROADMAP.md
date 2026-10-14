@@ -44,7 +44,9 @@ A meta da versão **1.0.0**: todas as ferramentas do Adobe Acrobat Pro, com qual
 
 - [ ] v6c3 — pendências dos painéis: visibilidade de camadas pela API do MuPDF (olho em PDF
   assinado), /PageMode /UseOC abre Camadas, grupos exclusivos de camadas, Delete no painel Destinos
-- [ ] v6f — próxima: editar PDF: painel Formatar, ferramenta Link, plano de fundo
+- [x] w1 — versão Windows portátil e impressão pela janela do sistema (0.23.0)
+- [ ] w2 — próxima: versão Windows instalável
+- [ ] v6f — editar PDF: painel Formatar, ferramenta Link, plano de fundo
 - [ ] v6g — converter: criar de Office, exportar Excel/PowerPoint/HTML
 - [ ] v6h a v6n — impressão de livreto/pôster e Otimizador, ortografia e digitalização, Medir e réguas,
   certificados avançados, acessibilidade, PDF/A-X-UA e Preflight, pesquisa em vários arquivos

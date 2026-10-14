@@ -127,7 +127,7 @@ dependencies = [
 
 [[package]]
 name = "app-state"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "dunce",
  "pdf-core",
@@ -1721,7 +1721,7 @@ dependencies = [
 
 [[package]]
 name = "gera-ui"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "app-state",
  "arboard",
@@ -3187,7 +3187,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-core"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "aes 0.8.4",
  "cbc 0.1.2",
